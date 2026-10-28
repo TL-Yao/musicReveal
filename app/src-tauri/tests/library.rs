@@ -384,3 +384,47 @@ fn embedded_covers_become_jpeg_thumbnails_of_at_least_600px() {
     settled(&rx);
     assert!(!jpg.exists(), "文件删了缩略图也删");
 }
+
+#[test]
+fn same_name_lrc_gives_lyrics() {
+    let r = Rig::new("lrc");
+    let a = mp3(&r.out.join("a.mp3"), &[], None);
+    let b = mp3(&r.out.join("b.mp3"), &[], None);
+    let c = mp3(&r.out.join("c.mp3"), &[], None);
+    std::fs::write(
+        r.out.join("a.LRC"),
+        "[ti:x]\n[00:01.00]第一句\n[00:01.00]first\n[00:02.50]第二句\n",
+    )
+    .unwrap();
+    std::fs::write(r.out.join("b.lrc"), "[ti:只有标签]\n").unwrap();
+    r.lib.set_dir(&r.out);
+    settled(&r.rx);
+
+    assert!(r.lib.track(&id(&a)).unwrap().has_lyrics);
+    let l = r.lib.lyrics(&id(&a)).unwrap();
+    assert_eq!(l.len(), 2);
+    assert_eq!(
+        (l[0].ms, l[0].text.as_str(), l[0].trans.as_deref()),
+        (1000, "第一句", Some("first"))
+    );
+    assert_eq!((l[1].ms, l[1].trans.as_deref()), (2500, None));
+    let j = serde_json::to_value(&l).unwrap();
+    assert_eq!(j[0]["trans"], "first");
+    assert!(j[1].get("trans").is_none(), "{j}");
+
+    assert!(!r.lib.track(&id(&b)).unwrap().has_lyrics, "解析为空");
+    assert_eq!(r.lib.lyrics(&id(&b)), None);
+    assert!(!r.lib.track(&id(&c)).unwrap().has_lyrics);
+    assert_eq!(r.lib.lyrics(&id(&c)), None);
+    assert_eq!(
+        r.lib.lyrics(&id(&r.out.join("a.LRC"))),
+        None,
+        "不是资料库里的歌"
+    );
+
+    // 后放进来的歌词也算
+    std::fs::write(r.out.join("c.lrc"), "[00:00.10]来了\n").unwrap();
+    r.lib.refresh();
+    let (_, v) = settled(&r.rx);
+    assert!(v.tracks.iter().find(|t| t.id == id(&c)).unwrap().has_lyrics);
+}

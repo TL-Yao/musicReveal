@@ -56,6 +56,28 @@ pub struct LibraryView {
     pub scanning: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Lyric {
+    pub ms: u64,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trans: Option<String>,
+}
+
+/// 读 .lrc 并解析；读不了或没有带时间的行为 None。
+fn parse_lrc(p: &Path) -> Option<Vec<Lyric>> {
+    let text = std::fs::read(p).ok()?;
+    let v: Vec<Lyric> = reveal_core::parse_lrc(&String::from_utf8_lossy(&text))
+        .into_iter()
+        .map(|l| Lyric {
+            ms: l.ms,
+            text: l.text,
+            trans: l.trans,
+        })
+        .collect();
+    (!v.is_empty()).then_some(v)
+}
+
 /// 一首歌读出来的标签，按路径 + 大小 + mtime 缓存。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -249,6 +271,8 @@ struct Worker {
     dirty: bool,
     /// 读不了的文件：没变就不再试。
     bad: HashMap<PathBuf, Stat>,
+    /// .lrc 能否解析出歌词，按大小 + mtime 记。
+    lrc: HashMap<PathBuf, (Stat, bool)>,
     last: Option<LibraryView>,
 }
 
@@ -272,6 +296,7 @@ impl Worker {
             cache: recs.into_iter().map(|r| (r.path.clone(), r)).collect(),
             dirty: false,
             bad: HashMap::new(),
+            lrc: HashMap::new(),
             last: None,
         }
     }
@@ -299,8 +324,20 @@ impl Worker {
         } else {
             scan::files(&dir, &keep)
         };
-        let audio: Vec<(PathBuf, Stat)> =
-            found.into_iter().filter(|(p, _)| ext(p) != "lrc").collect();
+        // 去掉扩展名的路径 → 同名 .lrc
+        let mut lrcs: HashMap<PathBuf, (PathBuf, Stat)> = HashMap::new();
+        let mut audio = vec![];
+        for (p, s) in found {
+            if ext(&p) == "lrc" {
+                lrcs.insert(p.with_extension(""), (p, s));
+            } else {
+                audio.push((p, s));
+            }
+        }
+        self.lrc.retain(|p, (s, _)| {
+            lrcs.get(&p.with_extension(""))
+                .is_some_and(|l| &l.0 == p && l.1 == *s)
+        });
         let now: HashMap<&PathBuf, Stat> = audio.iter().map(|(p, s)| (p, *s)).collect();
         let covers = &self.covers;
         let before = self.cache.len();
@@ -334,6 +371,9 @@ impl Worker {
                     known.insert(p.clone(), t.clone());
                 }
             }
+            for t in known.values_mut() {
+                lyrics(&mut self.lrc, &lrcs, t);
+            }
             st.tracks = known;
             st.scanning = !misses.is_empty();
         }
@@ -349,7 +389,9 @@ impl Worker {
             }
             match rec {
                 Some(r) => {
-                    st.tracks.insert(p.clone(), track_of(&r, &self.covers));
+                    let mut t = track_of(&r, &self.covers);
+                    lyrics(&mut self.lrc, &lrcs, &mut t);
+                    st.tracks.insert(p.clone(), t);
                     if let Some(old) = self.cache.insert(p, r) {
                         drop_cover(&self.covers, &old);
                     }
@@ -374,6 +416,21 @@ impl Worker {
         lock(&lib.st).scanning = false;
         self.emit(lib);
     }
+}
+
+/// 填上同名 .lrc；能否解析出歌词按 .lrc 的大小 + mtime 记在 `seen` 里。
+fn lyrics(
+    seen: &mut HashMap<PathBuf, (Stat, bool)>,
+    lrcs: &HashMap<PathBuf, (PathBuf, Stat)>,
+    t: &mut Track,
+) {
+    let found = lrcs.get(&Path::new(&t.id).with_extension(""));
+    t.lrc = found.map(|l| l.0.clone());
+    t.has_lyrics = found.is_some_and(|(p, s)| {
+        seen.entry(p.clone())
+            .or_insert_with(|| (*s, parse_lrc(p).is_some()))
+            .1
+    });
 }
 
 fn drop_cover(covers: &Path, r: &Rec) {
@@ -474,5 +531,10 @@ impl Library {
 
     pub fn track(&self, id: &str) -> Option<Track> {
         lock(&self.0.st).tracks.get(Path::new(id)).cloned()
+    }
+
+    /// 资料库里这首歌的同名 .lrc 解析出的歌词；没有或解析为空为 None。
+    pub fn lyrics(&self, id: &str) -> Option<Vec<Lyric>> {
+        parse_lrc(&self.track(id)?.lrc?)
     }
 }
