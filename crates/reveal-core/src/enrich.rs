@@ -243,3 +243,128 @@ pub(crate) fn netease_lyric(body: &[u8]) -> Result<Option<crate::Lyrics>, String
     }
     Ok(str_at(&v, "/lrc/lyric").and_then(|l| lyrics(l, str_at(&v, "/tlyric/lyric"))))
 }
+
+const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
+(KHTML, like Gecko) Chrome/120.0 Safari/537.36";
+
+/// 一个平台的接口：歌曲信息、歌词的 URL 与解析，以及由歌曲信息里的封面引用生成候选封面 URL。
+struct Api {
+    referer: &'static str,
+    song_url: String,
+    lyric_url: String,
+    song: fn(&[u8], &mut TrackMeta) -> Result<Option<String>, String>,
+    lyric: fn(&[u8]) -> Result<Option<crate::Lyrics>, String>,
+    covers: fn(&str) -> Vec<String>,
+}
+
+fn api(id: &crate::SongId) -> Api {
+    match id {
+        crate::SongId::QqMid(mid) => Api {
+            referer: "https://y.qq.com/",
+            song_url: format!(
+                "https://c.y.qq.com/v8/fcg-bin/fcg_play_single_song.fcg?songmid={mid}\
+&platform=yqq&format=json&needNewCode=0&new_json=1"
+            ),
+            lyric_url: format!(
+                "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid={mid}\
+&format=json&nobase64=1&g_tk=5381&loginUin=0&hostUin=0&inCharset=utf8&outCharset=utf-8\
+&notice=0&platform=yqq.json&needNewCode=0"
+            ),
+            song: qq_song,
+            lyric: qq_lyric,
+            covers: |album_mid| {
+                let base = "https://y.gtimg.cn/music/photo_new";
+                [1200, 800, 500]
+                    .iter()
+                    .map(|s| format!("{base}/T002R{s}x{s}M000{album_mid}.jpg"))
+                    .collect()
+            },
+        },
+        crate::SongId::Netease(id) => Api {
+            referer: "https://music.163.com/",
+            song_url: format!("https://music.163.com/api/song/detail/?ids=%5B{id}%5D"),
+            lyric_url: format!("https://music.163.com/api/song/lyric?id={id}&lv=1&tv=1"),
+            song: netease_song,
+            lyric: netease_lyric,
+            covers: |pic| vec![format!("{pic}?param=1400y1400"), pic.to_owned()],
+        },
+    }
+}
+
+/// 按 `TrackMeta.song_id` 精确查 QQ / 网易云公开接口；不带登录凭据。
+pub struct OnlineEnricher {
+    http: reqwest::Client,
+}
+
+impl Default for OnlineEnricher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OnlineEnricher {
+    pub fn new() -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .user_agent(UA)
+            .build()
+            .unwrap_or_default();
+        Self { http }
+    }
+
+    async fn get(&self, url: &str, referer: &str) -> Result<Vec<u8>, String> {
+        let r = self
+            .http
+            .get(url)
+            .header(reqwest::header::REFERER, referer)
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+            .map_err(|e| e.to_string())?;
+        Ok(r.bytes().await.map_err(|e| e.to_string())?.to_vec())
+    }
+
+    /// 依次试，取第一个 2xx 且像张图（> 1KB）的。
+    async fn cover(&self, urls: &[String], referer: &str) -> Option<Vec<u8>> {
+        for u in urls {
+            if let Ok(b) = self.get(u, referer).await {
+                if b.len() > 1024 {
+                    return Some(b);
+                }
+            }
+        }
+        None
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::Enricher for OnlineEnricher {
+    async fn enrich(&self, meta: &mut TrackMeta) -> Result<(), String> {
+        let Some(api) = meta.song_id.as_ref().map(api) else {
+            return Ok(());
+        };
+        let (song, lyric) = tokio::join!(
+            self.get(&api.song_url, api.referer),
+            self.get(&api.lyric_url, api.referer)
+        );
+        let mut errs = vec![];
+        match song.and_then(|b| (api.song)(&b, meta)) {
+            Ok(Some(r)) => match self.cover(&(api.covers)(&r), api.referer).await {
+                Some(c) => meta.cover = Some(c),
+                None => errs.push("封面下载失败".to_owned()),
+            },
+            Ok(None) => {}
+            Err(e) => errs.push(format!("歌曲信息：{e}")),
+        }
+        match lyric.and_then(|b| (api.lyric)(&b)) {
+            Ok(Some(l)) => meta.lyrics = Some(l),
+            Ok(None) => {}
+            Err(e) => errs.push(format!("歌词：{e}")),
+        }
+        if errs.is_empty() {
+            Ok(())
+        } else {
+            Err(errs.join("；"))
+        }
+    }
+}

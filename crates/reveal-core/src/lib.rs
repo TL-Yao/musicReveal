@@ -103,6 +103,8 @@ mod creds;
 mod enrich;
 mod flac;
 
+pub use enrich::OnlineEnricher;
+
 pub use convert::{
     convert, find_ffmpeg, strip_timestamps, CancelToken, ConvertError, ConvertOptions,
     ConvertOutcome, Enricher, Lyrics, NoopEnricher, OutputFormat, Stage, TrackMeta,

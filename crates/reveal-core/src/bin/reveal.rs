@@ -35,12 +35,13 @@ async fn main() -> std::process::ExitCode {
         format,
         ffmpeg: find_ffmpeg(),
     };
+    let enricher = OnlineEnricher::new();
     let mut failed = false;
     for f in &files {
         let r = convert(
             f,
             &opts,
-            &NoopEnricher,
+            &enricher,
             creds.as_ref(),
             &CancelToken::default(),
             &mut |_| {},
