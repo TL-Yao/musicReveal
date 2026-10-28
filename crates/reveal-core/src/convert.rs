@@ -213,8 +213,10 @@ fn io_err(e: std::io::Error) -> ConvertError {
     ConvertError::Failed(format!("读写失败：{e}"))
 }
 
-/// 本次转换创建的临时文件；无论成功失败，离开作用域时全部删除（成功时已被 rename 走）。
-struct Parts(Vec<PathBuf>);
+/// 本次转换创建的临时文件；无论成功失败，离开作用域时全部删除（成功时已落盘移走）。
+/// 被丢弃时先置 `gone`，让仍在后台跑的阻塞任务知道没人收尾了、自行删除产物。
+#[derive(Default)]
+struct Parts(Vec<PathBuf>, CancelToken);
 
 impl Parts {
     fn add(&mut self, dir: &Path) -> PathBuf {
@@ -236,18 +238,30 @@ impl Parts {
 
 impl Drop for Parts {
     fn drop(&mut self) {
+        self.1.cancel();
         for p in &self.0 {
             let _ = std::fs::remove_file(p);
         }
     }
 }
 
-/// 每次写之前看一眼取消标志，让流式解密能中途停下。
-struct CancelWriter(std::fs::File, CancelToken);
+/// 阻塞任务里的产物：外层已放弃（`Parts` 被丢弃）时由任务自己删除。
+struct Orphan(PathBuf, CancelToken);
+
+impl Drop for Orphan {
+    fn drop(&mut self) {
+        if self.1.is_cancelled() {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+}
+
+/// 每次写之前看一眼取消 / 放弃标志，让流式解密能中途停下。
+struct CancelWriter(std::fs::File, CancelToken, CancelToken);
 
 impl Write for CancelWriter {
     fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-        if self.1.is_cancelled() {
+        if self.1.is_cancelled() || self.2.is_cancelled() {
             return Err(std::io::Error::other("cancelled"));
         }
         self.0.write(b)
@@ -508,14 +522,17 @@ pub async fn convert(
         _ => None,
     };
     let dir = &opts.output_dir;
-    let mut parts = Parts(vec![]);
+    let mut parts = Parts::default();
     let mut cur = parts.add(dir);
 
     progress(Stage::Decrypt);
     let d = {
         let (input, part, c) = (input.to_path_buf(), cur.clone(), cancel.clone());
+        let gone = parts.1.clone();
         blocking(move || {
-            let mut w = CancelWriter(std::fs::File::create_new(&part).map_err(io_err)?, c.clone());
+            let _orphan = Orphan(part.clone(), gone.clone());
+            let f = std::fs::File::create_new(&part).map_err(io_err)?;
+            let mut w = CancelWriter(f, c.clone(), gone);
             let d = match decrypt(&input, &kind, ekey.as_deref(), &mut w) {
                 Err(_) if c.is_cancelled() => return Err(ConvertError::Cancelled),
                 r => r?,

@@ -444,3 +444,43 @@ async fn cancel_interrupts_a_stuck_enricher() {
     assert!(matches!(r, Ok(Err(ConvertError::Cancelled))), "{r:?}");
     assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0);
 }
+
+/// 外层 future 在解密任务排队时被丢弃：后台任务事后运行也必须自行清理 `.part`。
+#[test]
+fn dropped_convert_future_leaves_no_part_files() {
+    let t = Tmp::new("pl-drop");
+    let input = t.write(
+        "src.ncm",
+        &build_ncm(&super::audio(b"fLaC", 3_000_000), b"k", META, None),
+    );
+    let out = out_dir(&t);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let occupy = tokio::task::spawn_blocking(move || rx.recv().ok());
+        let opts = ConvertOptions {
+            output_dir: out.clone(),
+            format: OutputFormat::Original,
+            ffmpeg: None,
+        };
+        let cancel = CancelToken::default();
+        let mut progress = |_| {};
+        let fut = convert(&input, &opts, &NoopEnricher, None, &cancel, &mut progress);
+        let r = tokio::time::timeout(std::time::Duration::from_millis(100), fut).await;
+        assert!(r.is_err(), "转换不应在阻塞池被占满时完成");
+        tx.send(()).unwrap();
+        occupy.await.unwrap();
+        // 阻塞池只有一个线程且先进先出：这个标记任务完成时，被遗弃的解密任务已经跑完
+        tokio::task::spawn_blocking(|| ()).await.unwrap();
+    });
+    let left: Vec<_> = std::fs::read_dir(&out)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+}
