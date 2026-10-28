@@ -456,6 +456,122 @@ fn opus_ogg_plays_seeks_and_advances() {
     plays_seeks_and_advances_with("ogg", &|d, n| encode(d, n, OPUS, 2.0));
 }
 
+/// 让兜底解码慢下来：`REVEAL_FFMPEG` 指向以 10 倍实时速度读入的包装，丢掉时恢复。
+/// 改的是进程环境变量，调用方须持有 `audio()`。
+struct SlowFfmpeg;
+
+impl SlowFfmpeg {
+    fn new(t: &Tmp) -> Option<Self> {
+        use std::os::unix::fs::PermissionsExt;
+        let real = reveal_core::find_ffmpeg()?;
+        let sh = t.0.join("slow-ffmpeg");
+        std::fs::write(
+            &sh,
+            format!("#!/bin/sh\nexec '{}' -readrate 10 \"$@\"\n", real.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&sh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("REVEAL_FFMPEG", &sh);
+        Some(SlowFfmpeg)
+    }
+}
+
+impl Drop for SlowFfmpeg {
+    fn drop(&mut self) {
+        std::env::remove_var("REVEAL_FFMPEG");
+    }
+}
+
+/// 命令行里带 `dir` 的 ffmpeg 进程 pid（输入文件在 `dir` 里）。
+fn ffmpeg_pids(dir: &Path) -> Vec<String> {
+    let o = std::process::Command::new("pgrep")
+        .arg("-f")
+        .arg(dir)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&o.stdout)
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// 兜底解码缓存目录里的文件（含半成品）。
+fn decoded_files(t: &Tmp) -> Vec<String> {
+    std::fs::read_dir(t.0.join("data/decoded"))
+        .map(|d| {
+            d.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+#[ignore = "需要音频设备"]
+fn stop_during_fallback_decode_kills_ffmpeg_and_cleans_up() {
+    let _g = audio();
+    let t = Tmp::new("decodestop");
+    let Some(_slow) = SlowFfmpeg::new(&t) else {
+        return;
+    };
+    let o = encode(&t.0, "o.ogg", OPUS, 30.0).unwrap();
+    let p = quiet(&t, noop());
+    p.play(vec![o], 0).unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!ffmpeg_pids(&t.0).is_empty(), "此时应在解码");
+    p.stop();
+    assert_eq!(
+        ffmpeg_pids(&t.0),
+        Vec::<String>::new(),
+        "stop 返回时 ffmpeg 已结束"
+    );
+    assert_eq!(decoded_files(&t), Vec::<String>::new(), "不留半成品");
+}
+
+#[test]
+#[ignore = "需要音频设备"]
+fn seek_while_fallback_decoding_applies_once_ready() {
+    let _g = audio();
+    let t = Tmp::new("decodeseek");
+    let Some(_slow) = SlowFfmpeg::new(&t) else {
+        return;
+    };
+    let o = encode(&t.0, "o.ogg", OPUS, 30.0).unwrap();
+    let p = quiet(&t, noop());
+    p.play(vec![o.clone()], 0).unwrap();
+    p.seek(15_000);
+    assert_eq!(p.state().position_ms, 15_000, "等待期间显示待定位的位置");
+    let s = wait(&p, 20, |s| s.position_ms > 15_200);
+    assert!(
+        s.playing && s.track_id.as_deref() == Some(o.as_str()) && s.position_ms < 20_000,
+        "{s:?}"
+    );
+    p.stop();
+}
+
+#[test]
+#[ignore = "需要音频设备"]
+fn rapid_switches_between_fallback_tracks_leave_one_cache_file() {
+    let _g = audio();
+    let t = Tmp::new("decoderapid");
+    let Some(_slow) = SlowFfmpeg::new(&t) else {
+        return;
+    };
+    let ids: Vec<String> = ["a.ogg", "b.ogg", "c.ogg"]
+        .iter()
+        .map(|n| encode(&t.0, n, OPUS, 30.0).unwrap())
+        .collect();
+    let p = quiet(&t, noop());
+    p.play(ids.clone(), 0).unwrap();
+    p.next();
+    p.next();
+    let s = wait(&p, 20, |s| s.position_ms > 300);
+    assert_eq!(s.track_id.as_deref(), Some(ids[2].as_str()), "{s:?}");
+    assert_eq!(decoded_files(&t).len(), 1, "{:?}", decoded_files(&t));
+    assert_eq!(ffmpeg_pids(&t.0), Vec::<String>::new());
+    p.stop();
+}
+
 /// 兜底解码还没完就切走：解码结果作废，不把播放拉回那首。
 #[test]
 #[ignore = "需要音频设备"]

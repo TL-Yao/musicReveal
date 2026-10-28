@@ -198,13 +198,34 @@ struct St {
     ended: mpsc::Sender<Msg>,
     /// ffmpeg 兜底解码的缓存目录。
     cache: PathBuf,
+    /// 正在为当前曲做的兜底解码。
+    decoding: Option<Decoding>,
 }
 
 /// 发给后台线程的消息，都带曲目编号。
 enum Msg {
     Ended(u64),
-    /// ffmpeg 兜底解码完成；None 为解不了。
-    Decoded(u64, Option<PathBuf>),
+    /// 兜底解码的 ffmpeg 退出了；true 为成功。
+    Decoded(u64, bool),
+}
+
+/// 进行中的 ffmpeg 兜底解码。丢掉即取消：杀掉 ffmpeg 并等它退出，删掉半成品。
+struct Decoding {
+    gen: u64,
+    child: Arc<Mutex<std::process::Child>>,
+    tmp: PathBuf,
+    out: PathBuf,
+    /// 等待期间拖到的位置：开播前先定位。
+    seek: Option<u64>,
+}
+
+impl Drop for Decoding {
+    fn drop(&mut self) {
+        let mut c = self.child.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = c.kill();
+        let _ = c.wait();
+        let _ = std::fs::remove_file(&self.tmp);
+    }
 }
 
 struct Inner {
@@ -244,6 +265,7 @@ impl Player {
                 finished: Arc::new(AtomicU64::new(0)),
                 ended,
                 cache,
+                decoding: None,
             }),
             media: Mutex::new(None),
             hold: Mutex::new(()),
@@ -257,7 +279,7 @@ impl Player {
             let p = Player(inner);
             match msg {
                 Ok(Msg::Ended(gen)) => p.ended(gen),
-                Ok(Msg::Decoded(gen, r)) => p.decoded(gen, r),
+                Ok(Msg::Decoded(gen, ok)) => p.decoded(gen, ok),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     if p.lock().playing {
                         p.notify();
@@ -343,6 +365,10 @@ impl Player {
             } else {
                 ms
             };
+            if let Some(d) = st.decoding.as_mut() {
+                d.seek = Some(ms);
+                return;
+            }
             let pos = Duration::from_millis(ms);
             if let Some(s) = st.sink.as_ref().filter(|_| !st.ended()) {
                 let _ = s.try_seek(pos);
@@ -404,16 +430,25 @@ impl Player {
         });
     }
 
-    /// 兜底解码完成：还是这首就开播，解不了就跳过。
-    fn decoded(&self, gen: u64, r: Option<PathBuf>) {
+    /// 兜底解码的 ffmpeg 退出了：还是这首就开播（先定位到等待期间拖到的位置），解不了就跳过。
+    fn decoded(&self, gen: u64, ok: bool) {
         self.edit(|st| {
-            let Some(id) = st.track.clone().filter(|_| st.gen == gen) else {
+            if st.decoding.as_ref().is_none_or(|d| d.gen != gen) {
                 return;
+            }
+            let d = st.decoding.take().expect("刚查过");
+            let Some(id) = st.track.clone() else { return };
+            let r = if ok && publish(&d.tmp, &d.out) {
+                decoder(&d.out)
+            } else {
+                Err(CORRUPT)
             };
-            match r.ok_or(CORRUPT).and_then(|p| decoder(&p)) {
+            let seek = d.seek;
+            drop(d);
+            match r {
                 Ok(dec) => {
                     let ms = st.duration_ms;
-                    st.start(&id, dec, ms);
+                    st.start(&id, dec, ms, seek);
                 }
                 Err(e) => {
                     if let Some(next) = st.skip(&id, e) {
@@ -528,6 +563,9 @@ impl St {
     }
 
     fn position(&self) -> u64 {
+        if let Some(d) = &self.decoding {
+            return d.seek.unwrap_or(0);
+        }
         let ms = self
             .sink
             .as_ref()
@@ -550,6 +588,7 @@ impl St {
 
     /// 停止：不再出声，位置归零，曲目保留。
     fn halt(&mut self) {
+        self.decoding = None;
         self.sink = None;
         self.playing = false;
         self.gen += 1;
@@ -608,27 +647,46 @@ impl St {
         next
     }
 
-    /// 开播 `id`；rodio 解不了的交给后台 ffmpeg 解码（`Msg::Decoded` 回来再播）。
+    /// 开播 `id`；rodio 解不了的交给 ffmpeg 解码，有缓存直接用，否则后台解（`Msg::Decoded` 回来再播）。
     fn open(&mut self, id: &str) -> Result<(), &'static str> {
+        self.decoding = None;
         let path = Path::new(id);
         let from_tags = || reveal_core::read_track(path).ok().map(|t| t.duration_ms);
         let dec = match decoder(path) {
             Ok(d) => d,
             Err(CORRUPT) => {
+                let out = cached(path, &self.cache).ok_or(CORRUPT)?;
+                let ms = from_tags().unwrap_or(0);
+                if let Ok(d) = decoder(&out) {
+                    self.start(id, d, ms, None);
+                    return Ok(());
+                }
+                let tmp = tmp_in(&self.cache);
+                let child = spawn_ffmpeg(path, &tmp).ok_or(CORRUPT)?;
                 self.sink = None;
                 self.gen += 1;
-                let (gen, tx, src, cache) = (
-                    self.gen,
-                    self.ended.clone(),
-                    path.to_owned(),
-                    self.cache.clone(),
-                );
-                std::thread::spawn(move || {
-                    let _ = tx.send(Msg::Decoded(gen, transcode(&src, &cache)));
+                let (gen, tx, child) = (self.gen, self.ended.clone(), Arc::new(Mutex::new(child)));
+                let c = child.clone();
+                // 只轮询退出；取消时 `Decoding` 被丢掉，杀掉的进程同样在这里收尾
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(Duration::from_millis(20));
+                    let r = c.lock().unwrap_or_else(|e| e.into_inner()).try_wait();
+                    match r {
+                        Ok(None) => continue,
+                        Ok(Some(s)) => break drop(tx.send(Msg::Decoded(gen, s.success()))),
+                        Err(_) => break drop(tx.send(Msg::Decoded(gen, false))),
+                    }
+                });
+                self.decoding = Some(Decoding {
+                    gen,
+                    child,
+                    tmp,
+                    out,
+                    seek: None,
                 });
                 self.track = Some(id.to_owned());
                 self.playing = true;
-                self.duration_ms = from_tags().unwrap_or(0);
+                self.duration_ms = ms;
                 return Ok(());
             }
             Err(e) => return Err(e),
@@ -639,14 +697,18 @@ impl St {
             .filter(|&d| d > 0)
             .or_else(from_tags)
             .unwrap_or(0);
-        self.start(id, dec, duration_ms);
+        self.start(id, dec, duration_ms, None);
         Ok(())
     }
 
-    fn start(&mut self, id: &str, dec: Audio, duration_ms: u64) {
+    /// 接上音源开播；`seek` 给了就先暂停着定位到那里再放。
+    fn start(&mut self, id: &str, dec: Audio, duration_ms: u64, seek: Option<u64>) {
         let out = self.out.as_ref().expect("设备已打开");
         let sink = rodio::Player::connect_new(out.mixer());
         sink.set_volume(self.prefs.volume);
+        if seek.is_some() {
+            sink.pause();
+        }
         self.gen += 1;
         let (gen, tx, done) = (self.gen, self.ended.clone(), self.finished.clone());
         sink.append(dec);
@@ -654,6 +716,10 @@ impl St {
             done.store(gen, Ordering::SeqCst);
             let _ = tx.send(Msg::Ended(gen));
         })));
+        if let Some(ms) = seek {
+            let _ = sink.try_seek(Duration::from_millis(ms));
+            sink.play();
+        }
         self.sink = Some(sink);
         self.track = Some(id.to_owned());
         self.playing = true;
@@ -689,49 +755,62 @@ pub fn open_source(path: &Path, cache: &Path) -> Result<Audio, &'static str> {
     }
 }
 
-/// rodio 解不了的编码（如 Opus）用 ffmpeg 解成 FLAC 放进 `cache`：按路径 + 大小 + mtime 命名可复用，
-/// 只留最近解的一个。ffmpeg 也解不了为 None。
+/// rodio 解不了的编码（如 Opus）用 ffmpeg 解成 FLAC 放进 `cache`，同步等它完成。ffmpeg 也解不了为 None。
 fn transcode(path: &Path, cache: &Path) -> Option<PathBuf> {
-    use std::hash::{Hash, Hasher};
-    use std::sync::atomic::AtomicU32;
-    static N: AtomicU32 = AtomicU32::new(0);
-    let m = std::fs::metadata(path).ok()?;
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    (path, m.len(), m.modified().ok()).hash(&mut h);
-    let out = cache.join(format!("{:016x}.flac", h.finish()));
+    let out = cached(path, cache)?;
     if out.exists() {
         return Some(out);
     }
-    let ff = reveal_core::find_ffmpeg()?;
-    std::fs::create_dir_all(cache).ok()?;
-    for e in std::fs::read_dir(cache).ok()?.flatten() {
-        let _ = std::fs::remove_file(e.path());
-    }
-    let tmp = cache.join(format!(".{}.tmp", N.fetch_add(1, Ordering::Relaxed)));
-    let ok = std::process::Command::new(ff)
+    let tmp = tmp_in(cache);
+    let ok = spawn_ffmpeg(path, &tmp)?.wait().is_ok_and(|s| s.success()) && publish(&tmp, &out);
+    let _ = std::fs::remove_file(&tmp);
+    ok.then_some(out)
+}
+
+/// 兜底解码结果的缓存文件：按路径 + 大小 + mtime 命名，可复用。
+fn cached(path: &Path, cache: &Path) -> Option<PathBuf> {
+    use std::hash::{Hash, Hasher};
+    let m = std::fs::metadata(path).ok()?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (path, m.len(), m.modified().ok()).hash(&mut h);
+    Some(cache.join(format!("{:016x}.flac", h.finish())))
+}
+
+/// 缓存目录里一个新的半成品文件名。
+fn tmp_in(cache: &Path) -> PathBuf {
+    use std::sync::atomic::AtomicU32;
+    static N: AtomicU32 = AtomicU32::new(0);
+    cache.join(format!(".{}.tmp", N.fetch_add(1, Ordering::Relaxed)))
+}
+
+/// 起 ffmpeg 把 `path` 解成 FLAC 写到 `tmp`。
+fn spawn_ffmpeg(path: &Path, tmp: &Path) -> Option<std::process::Child> {
+    std::fs::create_dir_all(tmp.parent()?).ok()?;
+    std::process::Command::new(reveal_core::find_ffmpeg()?)
         .args(["-v", "error", "-nostdin", "-y", "-i"])
         .arg(path)
-        .args([
-            "-map",
-            "0:a:0",
-            "-c:a",
-            "flac",
-            "-compression_level",
-            "0",
-            "-f",
-            "flac",
-        ])
-        .arg(&tmp)
+        .args(["-map", "0:a:0", "-c:a", "flac", "-compression_level", "0"])
+        .args(["-f", "flac"])
+        .arg(tmp)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
-    if ok && std::fs::rename(&tmp, &out).is_ok() {
-        return Some(out);
+        .spawn()
+        .ok()
+}
+
+/// 半成品转正，缓存目录里只留它。
+fn publish(tmp: &Path, out: &Path) -> bool {
+    if std::fs::rename(tmp, out).is_err() {
+        return false;
     }
-    let _ = std::fs::remove_file(&tmp);
-    None
+    let dir = out.parent().expect("缓存文件在目录里");
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        if e.path() != out {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+    true
 }
 
 struct Media {
