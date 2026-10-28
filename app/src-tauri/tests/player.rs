@@ -177,3 +177,64 @@ fn repeat_parses_only_known_modes() {
     assert_eq!("one".parse::<Repeat>(), Ok(Repeat::One));
     assert!("loop".parse::<Repeat>().is_err());
 }
+
+// ---------- Player：偏好与状态 ----------
+
+fn noop() -> Box<dyn Fn(PlayerState) + Send + Sync> {
+    Box::new(|_| {})
+}
+
+#[test]
+fn defaults_without_prefs_file() {
+    let t = Tmp::new("defaults");
+    let s = Player::new(t.0.clone(), noop()).state();
+    assert_eq!((s.volume, s.shuffle, s.repeat), (0.8, false, Repeat::Off));
+    assert_eq!((s.track_id, s.playing, s.position_ms), (None, false, 0));
+}
+
+#[test]
+fn prefs_survive_a_new_player_on_the_same_data_dir() {
+    let t = Tmp::new("prefs");
+    let p = Player::new(t.0.clone(), noop());
+    p.set_volume(0.3);
+    p.set_shuffle(true);
+    p.set_repeat(Repeat::One);
+    drop(p);
+    assert!(t.0.join("player.json").is_file());
+    let s = Player::new(t.0.clone(), noop()).state();
+    assert_eq!((s.volume, s.shuffle, s.repeat), (0.3, true, Repeat::One));
+}
+
+#[test]
+fn volume_is_clamped_to_unit_range() {
+    let t = Tmp::new("clamp");
+    let p = Player::new(t.0.clone(), noop());
+    p.set_volume(1.7);
+    assert_eq!(p.state().volume, 1.0);
+    p.set_volume(-1.0);
+    assert_eq!(p.state().volume, 0.0);
+}
+
+#[test]
+fn changes_are_pushed_to_listener() {
+    let t = Tmp::new("notify");
+    let got = Arc::new(Mutex::new(vec![]));
+    let g = got.clone();
+    let p = Player::new(t.0.clone(), Box::new(move |s| g.lock().unwrap().push(s)));
+    p.set_repeat(Repeat::All);
+    assert_eq!(got.lock().unwrap().last().unwrap().repeat, Repeat::All);
+}
+
+#[test]
+fn state_serializes_to_the_ipc_contract() {
+    let t = Tmp::new("json");
+    let text = serde_json::to_string(&Player::new(t.0.clone(), noop()).state()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "playing": false, "positionMs": 0, "durationMs": 0,
+            "volume": 0.8, "shuffle": false, "repeat": "off"
+        })
+    );
+}

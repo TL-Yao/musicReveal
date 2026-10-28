@@ -1,6 +1,8 @@
 //! 原生播放器：播放队列规则（`PlayQueue`）与 rodio 输出（`Player`）。不依赖 tauri。
 
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -129,5 +131,157 @@ impl PlayQueue {
         } else if i == self.pos && self.pos == self.order.len() && self.repeat == Repeat::All {
             self.pos = 0;
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayerState {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub track_id: Option<String>,
+    pub playing: bool,
+    pub position_ms: u64,
+    pub duration_ms: u64,
+    pub volume: f32,
+    pub shuffle: bool,
+    pub repeat: Repeat,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
+struct Prefs {
+    volume: f32,
+    shuffle: bool,
+    repeat: Repeat,
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Prefs {
+            volume: 0.8,
+            shuffle: false,
+            repeat: Repeat::Off,
+        }
+    }
+}
+
+struct St {
+    prefs: Prefs,
+    queue: Option<PlayQueue>,
+    track: Option<String>,
+    playing: bool,
+    duration_ms: u64,
+    error: Option<String>,
+}
+
+struct Inner {
+    data_dir: PathBuf,
+    on_change: Box<dyn Fn(PlayerState) + Send + Sync>,
+    st: Mutex<St>,
+}
+
+pub struct Player(Arc<Inner>);
+
+impl Player {
+    /// 偏好从 `<data_dir>/player.json` 读，读不到用默认值。
+    pub fn new(data_dir: PathBuf, on_change: Box<dyn Fn(PlayerState) + Send + Sync>) -> Self {
+        let prefs = std::fs::read(data_dir.join(PREFS))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        Player(Arc::new(Inner {
+            data_dir,
+            on_change,
+            st: Mutex::new(St {
+                prefs,
+                queue: None,
+                track: None,
+                playing: false,
+                duration_ms: 0,
+                error: None,
+            }),
+        }))
+    }
+
+    pub fn state(&self) -> PlayerState {
+        self.lock().view()
+    }
+
+    pub fn set_volume(&self, v: f32) {
+        self.edit_prefs(|st| st.prefs.volume = v.clamp(0.0, 1.0));
+    }
+
+    pub fn set_shuffle(&self, on: bool) {
+        self.edit_prefs(|st| {
+            st.prefs.shuffle = on;
+            if let Some(q) = st.queue.as_mut() {
+                q.set_shuffle(on);
+            }
+        });
+    }
+
+    pub fn set_repeat(&self, r: Repeat) {
+        self.edit_prefs(|st| {
+            st.prefs.repeat = r;
+            if let Some(q) = st.queue.as_mut() {
+                q.set_repeat(r);
+            }
+        });
+    }
+
+    fn lock(&self) -> MutexGuard<'_, St> {
+        self.0.st.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 改状态，再在锁外通知。
+    fn edit<T>(&self, f: impl FnOnce(&mut St) -> T) -> T {
+        let (r, view) = {
+            let mut st = self.lock();
+            let r = f(&mut st);
+            (r, st.view())
+        };
+        (self.0.on_change)(view);
+        r
+    }
+
+    /// 改偏好并落盘（在锁内写，天然串行）。
+    fn edit_prefs(&self, f: impl FnOnce(&mut St)) {
+        let dir = self.0.data_dir.clone();
+        self.edit(|st| {
+            f(st);
+            save(&dir, &st.prefs);
+        });
+    }
+}
+
+impl St {
+    fn view(&self) -> PlayerState {
+        PlayerState {
+            track_id: self.track.clone(),
+            playing: self.playing,
+            position_ms: 0,
+            duration_ms: self.duration_ms,
+            volume: self.prefs.volume,
+            shuffle: self.prefs.shuffle,
+            repeat: self.prefs.repeat,
+            error: self.error.clone(),
+        }
+    }
+}
+
+const PREFS: &str = "player.json";
+
+/// 写临时文件再 rename。
+fn save(dir: &Path, prefs: &Prefs) {
+    let tmp = dir.join(format!("{PREFS}.{}.tmp", std::process::id()));
+    let r = (|| {
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(&tmp, serde_json::to_vec(prefs)?)?;
+        std::fs::rename(&tmp, dir.join(PREFS))
+    })();
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
 }
