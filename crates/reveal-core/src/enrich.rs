@@ -73,52 +73,6 @@ pub(crate) fn qq_song(body: &[u8], meta: &mut TrackMeta) -> Result<Option<String
     Ok(str_at(s, "/album/mid").map(str::to_owned))
 }
 
-/// `&#58;` / `&#x3A;` / 常见命名实体；认不出的原样保留。
-fn unescape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(i) = rest.find('&') {
-        out += &rest[..i];
-        rest = &rest[i..];
-        let decoded = rest
-            .bytes()
-            .skip(1)
-            .take(11)
-            .position(|b| b == b';')
-            .and_then(|end| {
-                let name = &rest[1..end + 1];
-                let c = match name {
-                    "amp" => '&',
-                    "lt" => '<',
-                    "gt" => '>',
-                    "quot" => '"',
-                    "apos" => '\'',
-                    "nbsp" => ' ',
-                    _ => {
-                        let n = name.strip_prefix('#')?;
-                        let code = match n.strip_prefix(['x', 'X']) {
-                            Some(h) => u32::from_str_radix(h, 16).ok()?,
-                            None => n.parse().ok()?,
-                        };
-                        char::from_u32(code)?
-                    }
-                };
-                Some((c, end + 2))
-            });
-        match decoded {
-            Some((c, len)) => {
-                out.push(c);
-                rest = &rest[len..];
-            }
-            None => {
-                out.push('&');
-                rest = &rest[1..];
-            }
-        }
-    }
-    out + rest
-}
-
 /// 署名角色：后接冒号（半角 / 全角，前后可有空白）即为署名行。
 const CREDITS: &[&str] = &[
     "作词",
@@ -232,10 +186,13 @@ fn drop_notice(lrc: &str) -> String {
 /// QQ `fcg_query_lyric_new`（nobase64）响应 → 歌词；没有歌词返回 None。
 pub(crate) fn qq_lyric(body: &[u8]) -> Result<Option<crate::Lyrics>, String> {
     let v = json(body)?;
-    let lrc = drop_notice(&unescape(
+    let lrc = drop_notice(&html_escape::decode_html_entities(
         v.get("lyric").and_then(Value::as_str).unwrap_or(""),
     ));
-    let trans = v.get("trans").and_then(Value::as_str).map(unescape);
+    let trans = v
+        .get("trans")
+        .and_then(Value::as_str)
+        .map(html_escape::decode_html_entities);
     Ok(lyrics(&lrc, trans.as_deref()))
 }
 

@@ -80,7 +80,7 @@ fn qq_lyric_from_recorded_response() {
 fn qq_lyric_decodes_html_entities_and_keeps_translation() {
     let body = r#"{"retcode":0,"lyric":"[ti&#58;x]\n[00:01.00]It&apos;s &amp; &#x4E2D;&#25991;&nbsp;&lt;3&gt; &unknown;","trans":"[00:01.00]&quot;译&quot;"}"#;
     let l = crate::enrich::qq_lyric(body.as_bytes()).unwrap().unwrap();
-    assert_eq!(l.lrc, "[ti:x]\n[00:01.00]It's & 中文 <3> &unknown;");
+    assert_eq!(l.lrc, "[ti:x]\n[00:01.00]It's & 中文\u{a0}<3> &unknown;");
     assert_eq!(l.translated_lrc.as_deref(), Some("[00:01.00]\"译\""));
 }
 
@@ -351,4 +351,16 @@ fn recorded_credit_lines_are_still_credits() {
         .collect();
     assert_eq!(credits.len(), 5);
     assert_eq!(ne_lrc(&credits.join("\n")), None);
+}
+
+#[test]
+fn qq_lyric_decodes_html5_named_entities() {
+    let body = serde_json::json!({
+        "retcode": 0,
+        "lyric": "[00:01.00]Caf&eacute; &ndash; toi&hellip; &hearts; &#39;x&#39; &bogus; a&b",
+        "trans": ""
+    })
+    .to_string();
+    let l = crate::enrich::qq_lyric(body.as_bytes()).unwrap().unwrap();
+    assert_eq!(l.lrc, "[00:01.00]Café – toi… ♥ 'x' &bogus; a&b");
 }
