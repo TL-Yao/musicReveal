@@ -109,14 +109,17 @@ mod enrich;
 mod flac;
 mod track;
 
-pub use track::{read_cover, read_track, split_artists, title_from_file_name, TrackInfo};
+pub use track::{
+    embed_lyrics, read_cover, read_lyrics, read_track, split_artists, title_from_file_name,
+    TrackInfo,
+};
 
 pub use enrich::OnlineEnricher;
 
 pub use convert::{
-    convert, find_ffmpeg, parse_lrc, strip_timestamps, CancelToken, ConvertError, ConvertOptions,
-    ConvertOutcome, Enricher, LyricLine, Lyrics, NoopEnricher, OutputFormat, Stage, TrackMeta,
-    PART_PREFIX,
+    convert, find_ffmpeg, lrc_home, parse_lrc, strip_timestamps, CancelToken, ConvertError,
+    ConvertOptions, ConvertOutcome, Enricher, LyricLine, Lyrics, NoopEnricher, OutputFormat, Stage,
+    TrackMeta, PART_PREFIX,
 };
 
 pub use creds::{

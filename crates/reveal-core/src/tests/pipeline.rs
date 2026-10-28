@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-fn ffmpeg() -> Option<PathBuf> {
+pub(super) fn ffmpeg() -> Option<PathBuf> {
     let f = find_ffmpeg();
     if f.is_none() {
         eprintln!("跳过：找不到 ffmpeg（可设 REVEAL_FFMPEG）");
@@ -16,7 +16,7 @@ fn ffmpeg() -> Option<PathBuf> {
     f
 }
 
-fn gen(ff: &Path, out: &Path, args: &[&str]) -> Vec<u8> {
+pub(super) fn gen(ff: &Path, out: &Path, args: &[&str]) -> Vec<u8> {
     let st = Command::new(ff)
         .args(["-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=440:d=2"])
         .args(args)
@@ -33,7 +33,7 @@ fn flac24(ff: &Path, t: &Tmp, tags: &[&str]) -> Vec<u8> {
     gen(ff, &t.0.join("plain.flac"), &a)
 }
 
-fn png(ff: &Path, t: &Tmp) -> Vec<u8> {
+pub(super) fn png(ff: &Path, t: &Tmp) -> Vec<u8> {
     let p = t.0.join("c.png");
     let st = Command::new(ff)
         .args([

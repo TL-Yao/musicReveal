@@ -375,11 +375,20 @@ fn first<'a, T>(tags: &[&'a Tag], get: impl Fn(&'a Tag) -> Option<T>) -> Option<
     tags.iter().find_map(|t| get(t))
 }
 
-fn lyrics_of(tags: &[&Tag]) -> Option<String> {
+pub(crate) fn lyrics_of(tags: &[&Tag]) -> Option<String> {
     let s = |t: &Tag, k| non_blank(t.get_string(k).map(str::to_owned));
     first(tags, |t| {
         s(t, ItemKey::UnsyncLyrics).or_else(|| s(t, ItemKey::Lyrics))
     })
+}
+
+/// ID3v2 只认 USLT（UnsyncLyrics），其余格式用 Lyrics。
+pub(crate) fn lyrics_key(t: &Tag) -> ItemKey {
+    if t.tag_type() == lofty::tag::TagType::Id3v2 {
+        ItemKey::UnsyncLyrics
+    } else {
+        ItemKey::Lyrics
+    }
 }
 
 fn non_blank(s: Option<String>) -> Option<String> {
@@ -466,12 +475,7 @@ fn write_tags(
     if let Some(v) = m.disc {
         t.set_disk(v);
     }
-    // ID3v2 只认 USLT（UnsyncLyrics），其余格式用 Lyrics
-    let key = if t.tag_type() == lofty::tag::TagType::Id3v2 {
-        ItemKey::UnsyncLyrics
-    } else {
-        ItemKey::Lyrics
-    };
+    let key = lyrics_key(t);
     match (&m.lyrics, src_lyrics) {
         (Some(l), _) => {
             t.insert_text(key, strip_timestamps(&l.lrc));
@@ -868,4 +872,12 @@ pub(crate) fn first_executable(c: impl IntoIterator<Item = PathBuf>) -> Option<P
     c.into_iter().find(|p| {
         std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
     })
+}
+
+/// `audio` 的 .lrc 在输出文件夹里的位置：`<out_root>/lrc/<相对子路径>.lrc`；不在 `out_root` 内时只用文件名。
+pub fn lrc_home(out_root: &Path, audio: &Path) -> PathBuf {
+    let rel = audio
+        .strip_prefix(out_root)
+        .unwrap_or_else(|_| Path::new(audio.file_name().unwrap_or_default()));
+    out_root.join("lrc").join(rel).with_extension("lrc")
 }

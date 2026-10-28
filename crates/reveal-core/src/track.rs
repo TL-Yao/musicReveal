@@ -1,8 +1,12 @@
 //! 资料库用：读输出文件夹里普通音频的标签、封面，以及由文件名推歌名。
 
-use crate::convert::{front_cover, merge, quality, read_audio, tags_of};
+use crate::convert::{
+    front_cover, lyrics_key, lyrics_of, merge, quality, read_audio, tags_of, Parts,
+};
 use crate::{Container, EmbeddedMeta, Error, Platform};
 use lofty::file::{AudioFile, FileType, TaggedFileExt};
+use lofty::prelude::ItemKey;
+use lofty::tag::Tag;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -96,4 +100,48 @@ pub fn title_from_file_name(name: &str) -> String {
     } else {
         t.to_owned()
     }
+}
+
+/// 内嵌歌词原文；没有或空白为 None。
+pub fn read_lyrics(path: &Path) -> Option<String> {
+    lyrics_of(&tags_of(&read_audio(path).ok()?))
+}
+
+/// 把 `lrc` 写进歌词字段（先删掉已有的歌词字段）。同目录隐藏副本写好后 rename 换上：
+/// 失败时原文件不变；保留创建时间与权限。符号链接、只读文件不写。
+pub fn embed_lyrics(path: &Path, lrc: &str) -> Result<(), Error> {
+    use std::io::{Error as IoError, ErrorKind};
+    let m = std::fs::symlink_metadata(path)?;
+    if !m.is_file() {
+        return Err(IoError::new(ErrorKind::InvalidInput, "不是普通文件（符号链接不写入）").into());
+    }
+    // 用户设为只读的不改
+    std::fs::OpenOptions::new().write(true).open(path)?;
+    let mut parts = Parts::default();
+    let tmp = parts.add(path.parent().unwrap_or(Path::new(".")));
+    std::fs::copy(path, &tmp)?;
+    let mut f = read_audio(&tmp).map_err(|e| Error::Corrupt(e.to_string()))?;
+    let types: Vec<_> = f.tags().iter().map(|t| t.tag_type()).collect();
+    for ty in types {
+        if let Some(t) = f.tag_mut(ty) {
+            t.remove_key(ItemKey::Lyrics);
+            t.remove_key(ItemKey::UnsyncLyrics);
+        }
+    }
+    if f.primary_tag().is_none() {
+        f.insert_tag(Tag::new(f.primary_tag_type()));
+    }
+    let t = f.primary_tag_mut().expect("刚插入");
+    t.insert_text(lyrics_key(t), lrc.to_owned());
+    f.save_to_path(&tmp, lofty::config::WriteOptions::default())
+        .map_err(|e| IoError::other(format!("写入标签失败：{e}")))?;
+    if let Ok(born) = m.created() {
+        use std::os::macos::fs::FileTimesExt;
+        std::fs::File::options()
+            .write(true)
+            .open(&tmp)?
+            .set_times(std::fs::FileTimes::new().set_created(born))?;
+    }
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
