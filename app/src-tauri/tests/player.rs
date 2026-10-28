@@ -57,8 +57,9 @@ fn shuffle_keeps_current_first_and_plays_every_other_track_once() {
     assert_eq!(p.current(), Some("5"));
     let mut rest: Vec<String> = (0..19).map(|_| p.next(false).unwrap().to_owned()).collect();
     assert_eq!(p.next(false), None, "随机播放一轮后到队尾");
-    rest.sort_by_key(|s| s.parse::<u32>().unwrap());
     let want: Vec<String> = ids(20).into_iter().filter(|s| s != "5").collect();
+    assert_ne!(rest, want, "其余曲目被打乱（19! 分之一的概率恰好原序）");
+    rest.sort_by_key(|s| s.parse::<u32>().unwrap());
     assert_eq!(rest, want);
 }
 

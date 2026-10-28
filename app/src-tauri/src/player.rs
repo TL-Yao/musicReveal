@@ -98,7 +98,6 @@ impl PlayQueue {
 
     /// 开：当前曲排第一，其余打乱；关：回到原顺序，从当前曲之后继续。
     pub fn set_shuffle(&mut self, on: bool) {
-        use rand::seq::SliceRandom;
         let cur = self.current().map(str::to_owned);
         if on {
             let mut rest: Vec<String> = self
@@ -107,7 +106,7 @@ impl PlayQueue {
                 .filter(|i| Some(*i) != cur.as_ref())
                 .cloned()
                 .collect();
-            rest.shuffle(&mut rand::rng());
+            shuffle(&mut rest);
             self.pos = if cur.is_some() { 0 } else { rest.len() };
             self.order = cur.into_iter().chain(rest).collect();
         } else {
@@ -134,6 +133,15 @@ impl PlayQueue {
         } else if i == self.pos && self.pos == self.order.len() && self.repeat == Repeat::All {
             self.pos = 0;
         }
+    }
+}
+
+/// Fisher–Yates；随机数取自每次新建的 `RandomState`（SipHash 随机密钥）。
+fn shuffle(v: &mut [String]) {
+    use std::hash::BuildHasher;
+    let s = std::hash::RandomState::new();
+    for i in (1..v.len()).rev() {
+        v.swap(i, (s.hash_one(i) % (i as u64 + 1)) as usize);
     }
 }
 
