@@ -4,7 +4,7 @@ pub mod engine;
 
 use engine::{AddFolderResult, Engine, RealConverter, Snapshot};
 use std::sync::Arc;
-use tauri::{Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
 
 type R<T> = Result<T, String>;
 
@@ -206,11 +206,7 @@ pub fn run() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = ev {
                 api.prevent_close();
                 let _ = w.hide();
-                let app = w.app_handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    app.state::<Engine>().shutdown().await;
-                    app.exit(0);
-                });
+                quit(w.app_handle().clone());
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -233,6 +229,24 @@ pub fn run() {
             pick_folder,
             dismiss_notice,
         ])
-        .run(tauri::generate_context!())
-        .expect("musicReveal 启动失败");
+        .build(tauri::generate_context!())
+        .expect("musicReveal 启动失败")
+        .run(|app, ev| {
+            // ⌘Q、系统注销等走 ExitRequested（code 为 None）：同样先取消并清理；
+            // quit() 自己的 app.exit(0) 带 code，直接放行。
+            if let RunEvent::ExitRequested {
+                api, code: None, ..
+            } = ev
+            {
+                api.prevent_exit();
+                quit(app.clone());
+            }
+        });
+}
+
+fn quit(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        app.state::<Engine>().shutdown().await;
+        app.exit(0);
+    });
 }
