@@ -333,6 +333,8 @@ fn ext(c: &Container) -> &'static str {
         Container::M4a => "m4a",
         Container::Mp3 => "mp3",
         Container::Wav => "wav",
+        Container::Wma => "wma",
+        Container::Ape => "ape",
     }
 }
 
@@ -607,18 +609,31 @@ pub async fn convert(
         })
         .await?
     };
-    let src_tags = read_audio(&cur)?;
-    let mut meta = merge(d.meta, tag_of(&src_tags));
-    drop(src_tags);
+    // lofty 读不了 ASF：WMA 的自带标签等转码后从 MP3 里读
+    let src_tags = match d.container {
+        Container::Wma => None,
+        _ => Some(read_audio(&cur)?),
+    };
 
     let mut container = d.container;
-    if opts.format == OutputFormat::Mp3 && container != Container::Mp3 {
+    // 已是 MP3 不重编码；WMA / APE 的标签 lofty 写不全，总要转成 MP3 / FLAC
+    let target = match (&container, opts.format) {
+        (Container::Mp3, _) => None,
+        (Container::Wma, _) | (_, OutputFormat::Mp3) => Some(Container::Mp3),
+        (Container::Ape, OutputFormat::Original) => Some(Container::Flac),
+        (_, OutputFormat::Original) => None,
+    };
+    if let Some(target) = target {
         let ff = opts
             .ffmpeg
             .clone()
             .ok_or_else(|| ConvertError::Failed("缺少 ffmpeg".into()))?;
         progress(Stage::Transcode);
-        let mp3 = parts.add(dir);
+        let next = parts.add(dir);
+        let codec: &[&str] = match target {
+            Container::Flac => &["-codec:a", "flac", "-f", "flac"],
+            _ => &["-codec:a", "libmp3lame", "-b:a", "320k", "-f", "mp3"],
+        };
         let mut child = tokio::process::Command::new(ff)
             .args(["-v", "error", "-nostdin", "-y", "-i"])
             .arg(&cur)
@@ -629,9 +644,9 @@ pub async fn convert(
                     .iter()
                     .flat_map(|k| ["-metadata".into(), format!("{k}=")]),
             )
-            .args(["-vn", "-codec:a", "libmp3lame"])
-            .args(["-b:a", "320k", "-f", "mp3"])
-            .arg(&mp3)
+            .args(["-vn"])
+            .args(codec)
+            .arg(&next)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -649,9 +664,15 @@ pub async fn convert(
         if !status.success() {
             return Err(ConvertError::Failed(format!("ffmpeg 转码失败（{status}）")));
         }
-        cur = mp3;
-        container = Container::Mp3;
+        cur = next;
+        container = target;
     }
+    let src_tags = match src_tags {
+        Some(t) => t,
+        None => read_audio(&cur)?,
+    };
+    let mut meta = merge(d.meta, tag_of(&src_tags));
+    drop(src_tags);
 
     progress(Stage::Metadata);
     tokio::select! {

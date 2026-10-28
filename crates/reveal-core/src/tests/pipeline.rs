@@ -1,6 +1,6 @@
 //! `convert` 端到端：ffmpeg 运行时生成明文，合成器包成 NCM / QMC v2 / musicex。
 
-use super::{build_ncm, make_ekey_v1, musicex, qmc2, qtag, Tmp};
+use super::{build_ncm, enc, make_ekey_v1, musicex, qmc2, qtag, Tmp};
 use crate::*;
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::prelude::{Accessor, ItemKey};
@@ -633,4 +633,99 @@ async fn existing_lrc_or_symlink_is_never_overwritten() {
     );
     assert_eq!(std::fs::read(&victim).unwrap(), b"victim");
     assert!(!out.join("歌手甲, 歌手乙 - 测试歌.flac").exists());
+}
+
+fn decodes_cleanly(ff: &Path, p: &Path) {
+    let dec = Command::new(ff)
+        .args(["-v", "error", "-i"])
+        .arg(p)
+        .args(["-f", "null", "-"])
+        .output()
+        .unwrap();
+    assert!(
+        dec.status.success() && dec.stderr.is_empty(),
+        "{}: {}",
+        p.display(),
+        String::from_utf8_lossy(&dec.stderr)
+    );
+}
+
+/// WMA / APE 解密后总要转码：APE → FLAC（原格式）或 MP3，WMA → MP3；文件自带标签保留。
+async fn legacy_container_case(ff: &Path, t: &Tmp, src: &str, plain: &[u8], expect: [&str; 2]) {
+    let input = t.write(src, &enc(&crate::qmc::Cipher::static_v1(), plain));
+    for (fmt, ext) in [OutputFormat::Original, OutputFormat::Mp3]
+        .into_iter()
+        .zip(expect)
+    {
+        let out = t.0.join(format!("out-{src}-{fmt:?}"));
+        std::fs::create_dir_all(&out).unwrap();
+        let r = run(&input, &out, fmt, &NoopEnricher, None).await;
+        let o = r.res.unwrap_or_else(|e| panic!("{src} {fmt:?}: {e}"));
+        assert_eq!(
+            name(&o.output),
+            format!("歌手 - 标题.{ext}"),
+            "{src} {fmt:?}"
+        );
+        assert_eq!(
+            r.stages,
+            vec![Stage::Decrypt, Stage::Transcode, Stage::Metadata]
+        );
+        decodes_cleanly(ff, &o.output);
+        let f = read_back(&o.output);
+        let tag = f.primary_tag().unwrap();
+        assert_eq!(tag.title().as_deref(), Some("标题"), "{src} {fmt:?}");
+        assert_eq!(tag.artist().as_deref(), Some("歌手"), "{src} {fmt:?}");
+        assert_eq!(
+            tag.get_string(ItemKey::Composer),
+            Some("作曲"),
+            "{src} {fmt:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn bkcwma_is_transcoded_to_mp3_in_both_modes() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("pl-wma");
+    let plain = gen(
+        &ff,
+        &t.0.join("p.wma"),
+        &[
+            "-c:a",
+            "wmav2",
+            "-b:a",
+            "64k",
+            "-metadata",
+            "title=标题",
+            "-metadata",
+            "artist=歌手",
+            "-metadata",
+            "composer=作曲",
+        ],
+    );
+    legacy_container_case(&ff, &t, "a.bkcwma", &plain, ["mp3", "mp3"]).await;
+}
+
+/// `tests/fixtures/sine.ape`：1 秒 440Hz 正弦波（ffmpeg lavfi 合成，22.05kHz 单声道），
+/// 用 Monkey's Audio SDK 1343 的 `mac s.wav s.ape -c2000` 编码；ffmpeg 不能编码 APE。
+#[tokio::test]
+async fn bkcape_becomes_flac_or_mp3() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("pl-ape");
+    let p = t.0.join("p.ape");
+    std::fs::copy(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sine.ape"),
+        &p,
+    )
+    .unwrap();
+    let mut f = read_back(&p);
+    let mut tag = lofty::tag::Tag::new(f.primary_tag_type());
+    tag.set_title("标题".into());
+    tag.set_artist("歌手".into());
+    tag.insert_text(ItemKey::Composer, "作曲".into());
+    f.insert_tag(tag);
+    f.save_to_path(&p, lofty::config::WriteOptions::default())
+        .unwrap();
+    let plain = std::fs::read(&p).unwrap();
+    legacy_container_case(&ff, &t, "a.bkcape", &plain, ["flac", "mp3"]).await;
 }

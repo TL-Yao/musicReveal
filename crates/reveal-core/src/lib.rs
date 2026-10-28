@@ -25,6 +25,9 @@ pub enum Container {
     M4a,
     Mp3,
     Wav,
+    /// lofty 写不全标签，转换时总要转码（见 `convert`）。
+    Wma,
+    Ape,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -145,6 +148,8 @@ fn sniff_container(h: &[u8]) -> Option<Container> {
         }
         [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'A', b'V', b'E', ..] => Container::Wav,
         [_, _, _, _, b'f', b't', b'y', b'p', ..] => Container::M4a,
+        [0x30, 0x26, 0xB2, 0x75, 0x8E, 0x66, 0xCF, 0x11, ..] => Container::Wma,
+        [b'M', b'A', b'C', b' ', ..] => Container::Ape,
         _ => return None,
     })
 }
