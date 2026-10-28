@@ -656,7 +656,7 @@ impl Engine {
                 st.settings.folders.clone(),
                 st.settings.output_dir.clone(),
                 tracked,
-                st.ticks % QQ_POLLS == 0,
+                st.ticks.is_multiple_of(QQ_POLLS),
                 st.qq_stamp,
             )
         };
