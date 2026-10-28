@@ -1,6 +1,7 @@
 //! musicReveal 桌面应用：Tauri 外壳，把 `engine` 暴露成命令与 `snapshot` 事件。
 
 pub mod engine;
+pub mod player;
 
 use engine::{AddFolderResult, Engine, RealConverter, Snapshot};
 use std::sync::Arc;
