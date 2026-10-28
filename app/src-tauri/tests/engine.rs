@@ -669,6 +669,25 @@ async fn watch_folder_equal_to_or_inside_output_dir_yields_nothing() {
     assert!(r.fake.calls().is_empty());
 }
 
+/// 拖入或「添加文件…」：输出文件夹里（含子目录）的文件不当输入，否则会转出「(2)」副本。
+#[tokio::test]
+async fn added_files_inside_output_dir_are_ignored() {
+    let r = Rig::new("addout").await;
+    let sub = r.out.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    let a = put(&r.out, "a.mp3", b"x");
+    let b = put(&sub, "b.ncm", b"x");
+    r.eng
+        .add_files(vec![a.to_string_lossy().into(), b.to_string_lossy().into()]);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        r.eng.snapshot().jobs.is_empty(),
+        "{:?}",
+        r.eng.snapshot().jobs
+    );
+    assert!(r.fake.calls().is_empty());
+}
+
 #[tokio::test]
 async fn corrupt_settings_and_history_do_not_crash() {
     let t = Tmp::new("corrupt");

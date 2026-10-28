@@ -878,14 +878,14 @@ impl Engine {
         Ok(())
     }
 
-    /// 拖入的文件或文件夹（只看一层，规则同监听扫描），直接入队。
+    /// 拖入的文件或文件夹（只看一层，规则同监听扫描），直接入队；输出文件夹里的不算。
     pub fn add_files(&self, paths: Vec<String>) {
         let skip = self.lock().settings.output_dir.clone();
         let mut files = vec![];
         for p in paths.into_iter().map(PathBuf::from) {
             if p.is_dir() {
                 files.extend(scan::shallow(&p, &skip));
-            } else if scan::candidate(&p) {
+            } else if scan::candidate(&p) && !p.starts_with(&skip) {
                 files.extend(scan::stat(&p).map(|s| (p, s)));
             }
         }
