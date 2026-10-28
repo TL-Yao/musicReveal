@@ -38,9 +38,12 @@ pub fn candidate(p: &Path) -> bool {
     !hidden(p) && reveal_core::is_candidate(p)
 }
 
-/// 监听扫描。`Err` 是给用户看的「不可访问」原因。
+/// 监听扫描。`Err` 是给用户看的「不可访问」原因。输出目录本身或其内的文件夹扫出来是空的。
 pub fn scan(root: &Path, skip: &Path) -> Result<Vec<(PathBuf, Stat)>, String> {
     let mut out = vec![];
+    if root.starts_with(skip) {
+        return Ok(out);
+    }
     walk(root, 0, MAX_DEPTH, skip, &mut 0, &mut out)?;
     Ok(out)
 }

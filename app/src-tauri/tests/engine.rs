@@ -641,6 +641,31 @@ async fn output_dir_inside_watch_folder_is_not_rescanned() {
     assert_eq!(r.fake.calls().len(), 1);
 }
 
+/// 输出文件夹永不当输入：否则普通音频转完又被扫到，无限复制出「(2)」。
+#[tokio::test]
+async fn watch_folder_equal_to_or_inside_output_dir_yields_nothing() {
+    let r = Rig::new("loop").await;
+    let inner = r.out.join("sub");
+    std::fs::create_dir_all(&inner).unwrap();
+    put(&r.out, "a.mp3", b"x");
+    put(&inner, "b.mp3", b"x");
+    for f in [&r.out, &inner] {
+        assert_eq!(
+            r.eng.add_watch_folder(&f.to_string_lossy()).unwrap().existing,
+            0
+        );
+    }
+    for _ in 0..4 {
+        r.eng.tick();
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let s = r.eng.snapshot();
+    assert!(s.jobs.is_empty(), "{:?}", s.jobs);
+    assert!(s.notices.is_empty());
+    assert!(s.folders.iter().all(|f| f.accessible), "{:?}", s.folders);
+    assert!(r.fake.calls().is_empty());
+}
+
 #[tokio::test]
 async fn corrupt_settings_and_history_do_not_crash() {
     let t = Tmp::new("corrupt");
