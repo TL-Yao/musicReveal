@@ -79,7 +79,11 @@ fn shuffle_turned_off_continues_after_current_in_original_order() {
     let cur: usize = p.next(false).unwrap().parse().unwrap();
     p.set_shuffle(false);
     assert_eq!(p.current(), Some(cur.to_string().as_str()));
-    let want = if cur == 19 { None } else { Some((cur + 1).to_string()) };
+    let want = if cur == 19 {
+        None
+    } else {
+        Some((cur + 1).to_string())
+    };
     assert_eq!(p.next(false).map(str::to_owned), want);
 }
 
@@ -316,8 +320,10 @@ fn wait(p: &Player, secs: u64, f: impl Fn(&PlayerState) -> bool) -> PlayerState 
 fn plays_seeks_and_advances(ext: &str) {
     let _g = audio();
     let t = Tmp::new(ext);
-    let (Some(a), Some(b)) = (make(&t.0, &format!("a.{ext}")), make(&t.0, &format!("b.{ext}")))
-    else {
+    let (Some(a), Some(b)) = (
+        make(&t.0, &format!("a.{ext}")),
+        make(&t.0, &format!("b.{ext}")),
+    ) else {
         eprintln!("没有 ffmpeg，跳过 {ext}");
         return;
     };
@@ -333,10 +339,16 @@ fn plays_seeks_and_advances(ext: &str) {
     let before = pushes.load(Ordering::Relaxed);
     std::thread::sleep(Duration::from_millis(1200));
     let s = p.state();
-    assert!(s.playing && s.track_id.as_deref() == Some(a.as_str()), "{s:?}");
+    assert!(
+        s.playing && s.track_id.as_deref() == Some(a.as_str()),
+        "{s:?}"
+    );
     assert!(s.position_ms >= 1000, "{s:?}");
     assert!((1900..=2200).contains(&s.duration_ms), "{s:?}");
-    assert!(pushes.load(Ordering::Relaxed) > before, "播放中每秒推送一次");
+    assert!(
+        pushes.load(Ordering::Relaxed) > before,
+        "播放中每秒推送一次"
+    );
 
     p.seek(1500);
     let s = p.state();
@@ -345,7 +357,11 @@ fn plays_seeks_and_advances(ext: &str) {
     let s = wait(&p, 3, |s| s.track_id.as_deref() == Some(b.as_str()));
     assert!(s.playing, "{s:?}");
     let s = wait(&p, 4, |s| !s.playing);
-    assert_eq!(s.track_id.as_deref(), Some(b.as_str()), "循环关：停在最后一首");
+    assert_eq!(
+        s.track_id.as_deref(),
+        Some(b.as_str()),
+        "循环关：停在最后一首"
+    );
     assert_eq!((s.position_ms, s.error), (0, None));
 }
 
@@ -391,7 +407,10 @@ fn repeat_one_replays_the_track_when_it_ends() {
     p.play(vec![a.clone(), b], 0).unwrap();
     p.seek(1800);
     let s = wait(&p, 3, |s| s.position_ms < 1000);
-    assert!(s.playing && s.track_id.as_deref() == Some(a.as_str()), "{s:?}");
+    assert!(
+        s.playing && s.track_id.as_deref() == Some(a.as_str()),
+        "{s:?}"
+    );
 }
 
 #[test]
@@ -432,7 +451,10 @@ fn toggle_next_and_prev_drive_playback() {
 
     p.prev();
     let s = p.state();
-    assert!(s.track_id.as_deref() == Some(a.as_str()) && s.position_ms < 300, "第一首上一首 = 从头：{s:?}");
+    assert!(
+        s.track_id.as_deref() == Some(a.as_str()) && s.position_ms < 300,
+        "第一首上一首 = 从头：{s:?}"
+    );
     p.next();
     assert_eq!(p.state().track_id.as_deref(), Some(b.as_str()));
     p.prev();
@@ -440,10 +462,16 @@ fn toggle_next_and_prev_drive_playback() {
     p.next();
     p.next();
     let s = p.state();
-    assert!(!s.playing && s.position_ms == 0 && s.track_id.as_deref() == Some(b.as_str()), "{s:?}");
+    assert!(
+        !s.playing && s.position_ms == 0 && s.track_id.as_deref() == Some(b.as_str()),
+        "{s:?}"
+    );
     p.toggle();
     let s = p.state();
-    assert!(s.playing && s.track_id.as_deref() == Some(b.as_str()), "停止后再按播放从当前曲开始：{s:?}");
+    assert!(
+        s.playing && s.track_id.as_deref() == Some(b.as_str()),
+        "停止后再按播放从当前曲开始：{s:?}"
+    );
 }
 
 fn bad(dir: &Path) -> String {
@@ -464,12 +492,18 @@ fn missing_or_corrupt_tracks_are_skipped_with_a_reason() {
 
     p.play(vec![gone.clone(), good.clone()], 0).unwrap();
     let s = p.state();
-    assert!(s.playing && s.track_id.as_deref() == Some(good.as_str()), "{s:?}");
+    assert!(
+        s.playing && s.track_id.as_deref() == Some(good.as_str()),
+        "{s:?}"
+    );
     assert!(s.error.as_deref().unwrap().contains("不存在"), "{s:?}");
 
     p.play(vec![bad.clone(), good.clone()], 0).unwrap();
     let s = p.state();
-    assert!(s.playing && s.track_id.as_deref() == Some(good.as_str()), "{s:?}");
+    assert!(
+        s.playing && s.track_id.as_deref() == Some(good.as_str()),
+        "{s:?}"
+    );
     assert!(s.error.as_deref().unwrap().contains("损坏"), "{s:?}");
 
     // 曲终自动前进到失效的曲目
@@ -489,7 +523,10 @@ fn all_tracks_failing_stops_playback() {
     let p = quiet(&t, noop());
     p.play(vec![gone, bad(&t.0)], 0).unwrap();
     let s = p.state();
-    assert!(!s.playing && s.track_id.is_none() && s.error.is_some(), "{s:?}");
+    assert!(
+        !s.playing && s.track_id.is_none() && s.error.is_some(),
+        "{s:?}"
+    );
 }
 
 #[test]

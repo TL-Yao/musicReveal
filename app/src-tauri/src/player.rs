@@ -1,9 +1,9 @@
 //! 原生播放器：播放队列规则（`PlayQueue`）与 rodio 输出（`Player`）。不依赖 tauri。
 
-use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 use rodio::source::EmptyCallback;
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Source};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -190,6 +190,8 @@ struct Inner {
     data_dir: PathBuf,
     on_change: Box<dyn Fn(PlayerState) + Send + Sync>,
     st: Mutex<St>,
+    /// 系统媒体键与「正在播放」；只有 App 里开（测试不碰系统）。
+    media: Mutex<Option<Media>>,
 }
 
 pub struct Player(Arc<Inner>);
@@ -217,6 +219,7 @@ impl Player {
                 gen: 0,
                 ended,
             }),
+            media: Mutex::new(None),
         });
         // 曲终前进与播放中每秒推送都在这条线程上；Player 丢掉后它随之退出。
         let weak = Arc::downgrade(&inner);
@@ -304,7 +307,11 @@ impl Player {
 
     pub fn seek(&self, ms: u64) {
         self.edit(|st| {
-            let ms = if st.duration_ms > 0 { ms.min(st.duration_ms) } else { ms };
+            let ms = if st.duration_ms > 0 {
+                ms.min(st.duration_ms)
+            } else {
+                ms
+            };
             if let Some(s) = &st.sink {
                 let _ = s.try_seek(Duration::from_millis(ms));
             }
@@ -355,7 +362,12 @@ impl Player {
             if st.gen != gen || st.sink.is_none() {
                 return;
             }
-            match st.queue.as_mut().and_then(|q| q.next(true)).map(str::to_owned) {
+            match st
+                .queue
+                .as_mut()
+                .and_then(|q| q.next(true))
+                .map(str::to_owned)
+            {
                 Some(id) => st.load(id),
                 None => st.halt(),
             }
@@ -367,7 +379,54 @@ impl Player {
     }
 
     fn notify(&self) {
-        (self.0.on_change)(self.state());
+        let s = self.state();
+        if let Some(m) = self
+            .0
+            .media
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            m.update(&s);
+        }
+        (self.0.on_change)(s);
+    }
+
+    /// 接入系统媒体键（播放/暂停/上一首/下一首/拖动进度）与控制中心「正在播放」。
+    pub fn enable_media_controls(&self) -> Result<(), String> {
+        use souvlaki::{MediaControlEvent as E, MediaControls, PlatformConfig};
+        let mut controls = MediaControls::new(PlatformConfig {
+            display_name: "musicReveal",
+            dbus_name: "musicreveal",
+            hwnd: None,
+        })
+        .map_err(|e| format!("无法接入媒体键：{e}"))?;
+        let weak = Arc::downgrade(&self.0);
+        controls
+            .attach(move |ev| {
+                let Some(inner) = weak.upgrade() else { return };
+                let p = Player(inner);
+                match ev {
+                    E::Toggle => p.toggle(),
+                    E::Play | E::Pause | E::Stop => {
+                        if p.state().playing != (ev == E::Play) {
+                            p.toggle();
+                        }
+                    }
+                    E::Next => p.next(),
+                    E::Previous => p.prev(),
+                    E::SetPosition(souvlaki::MediaPosition(d)) => p.seek(d.as_millis() as u64),
+                    _ => {}
+                }
+            })
+            .map_err(|e| format!("无法接入媒体键：{e}"))?;
+        *self.0.media.lock().unwrap_or_else(|e| e.into_inner()) = Some(Media {
+            controls,
+            track: None,
+            cover_dir: self.0.data_dir.join("now-playing"),
+        });
+        self.notify();
+        Ok(())
     }
 
     /// 改状态，再在锁外通知。
@@ -452,9 +511,9 @@ impl St {
         }
         loop {
             let Err(e) = self.open(&id) else { return };
-            let name = Path::new(&id).file_name().map_or(id.clone(), |n| {
-                n.to_string_lossy().into_owned()
-            });
+            let name = Path::new(&id)
+                .file_name()
+                .map_or(id.clone(), |n| n.to_string_lossy().into_owned());
             self.error = Some(format!("{name}：{e}，已跳过"));
             let q = self.queue.as_mut().expect("load 只在有队列时调用");
             q.remove(&id);
@@ -506,6 +565,78 @@ impl St {
         Ok(())
     }
 }
+struct Media {
+    controls: souvlaki::MediaControls,
+    /// 已经交给系统的曲目。
+    track: Option<String>,
+    cover_dir: PathBuf,
+}
+
+impl Media {
+    fn update(&mut self, s: &PlayerState) {
+        use souvlaki::{MediaMetadata, MediaPlayback, MediaPosition};
+        if s.track_id != self.track {
+            self.track = s.track_id.clone();
+            let _ = std::fs::remove_dir_all(&self.cover_dir);
+            let meta = match &s.track_id {
+                Some(id) => {
+                    let path = Path::new(id);
+                    let t = reveal_core::read_track(path).ok();
+                    let title = t.as_ref().and_then(|t| t.title.clone()).unwrap_or_else(|| {
+                        let name = path.file_name().unwrap_or_default().to_string_lossy();
+                        reveal_core::title_from_file_name(&name)
+                    });
+                    let artist = t.as_ref().map(|t| t.artists.join("、"));
+                    let album = t.as_ref().and_then(|t| t.album.clone());
+                    let cover = reveal_core::read_cover(path).and_then(|b| {
+                        // 每首一个文件名：系统按 URL 缓存图片
+                        let f = self.cover_dir.join(cover_name(id));
+                        std::fs::create_dir_all(&self.cover_dir).ok()?;
+                        std::fs::write(&f, b).ok()?;
+                        Some(file_url(&f))
+                    });
+                    Some((title, artist, album, cover))
+                }
+                None => None,
+            };
+            let m = meta.as_ref();
+            let _ = self.controls.set_metadata(MediaMetadata {
+                title: m.map(|m| m.0.as_str()),
+                artist: m.and_then(|m| m.1.as_deref()).filter(|a| !a.is_empty()),
+                album: m.and_then(|m| m.2.as_deref()),
+                cover_url: m.and_then(|m| m.3.as_deref()),
+                duration: m.map(|_| Duration::from_millis(s.duration_ms)),
+            });
+        }
+        let progress = Some(MediaPosition(Duration::from_millis(s.position_ms)));
+        let _ = self.controls.set_playback(match (&s.track_id, s.playing) {
+            (None, _) => MediaPlayback::Stopped,
+            (_, true) => MediaPlayback::Playing { progress },
+            (_, false) => MediaPlayback::Paused { progress },
+        });
+    }
+}
+
+fn cover_name(id: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    id.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+/// 百分号编码的 file:// URL（数据目录里有空格）。
+fn file_url(p: &Path) -> String {
+    let mut s = String::from("file://");
+    for b in p.to_string_lossy().bytes() {
+        if b.is_ascii_alphanumeric() || b"/-_.~".contains(&b) {
+            s.push(b as char);
+        } else {
+            s.push_str(&format!("%{b:02X}"));
+        }
+    }
+    s
+}
+
 const PREFS: &str = "player.json";
 
 /// 写临时文件再 rename。
