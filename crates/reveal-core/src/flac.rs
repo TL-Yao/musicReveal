@@ -91,13 +91,23 @@ fn frame_header(h: &[u8], fixed_block: u64) -> Option<(usize, u64, u64)> {
     Some((p + 1, start, block))
 }
 
-/// 截掉末帧之后的字节。必须同时满足：帧头 CRC-8 通过、帧的样本范围恰好结束于
-/// STREAMINFO 总样本数、帧尾 CRC-16 在唯一一个位置成立。返回是否截断。
+fn crc16(d: &[u8]) -> u16 {
+    d.iter().fold(0, |c, &b| crc16_step(c, b))
+}
+
+/// 截掉末帧之后的字节。末帧候选须同时满足：帧头 CRC-8 通过；样本范围恰好结束于
+/// STREAMINFO 总样本数；被「当场确认」——要么紧接元数据且从样本 0 开始，要么前面有一个
+/// 样本号正好衔接的合法帧头、其 CRC-16 恰在候选处归零；帧尾 CRC-16 只在唯一位置成立。
+/// 所有确认过的候选必须给出同一个截断点，否则不截。返回是否截断。
 pub(crate) fn trim_tail(path: &Path) -> std::io::Result<bool> {
     let mut f = File::options().read(true).write(true).open(path)?;
     let len = f.metadata()?.len();
     let mut head = [0u8; 42];
-    if len < 42 || f.read_exact(&mut head).is_err() || &head[..4] != b"fLaC" || head[4] & 0x7F != 0
+    if len < 42
+        || f.read_exact(&mut head).is_err()
+        || &head[..4] != b"fLaC"
+        || head[4] & 0x7F != 0
+        || head[5..8] != [0, 0, 34]
     {
         return Ok(false);
     }
@@ -108,34 +118,58 @@ pub(crate) fn trim_tail(path: &Path) -> std::io::Result<bool> {
     if total == 0 {
         return Ok(false);
     }
-    let base = len.saturating_sub(WINDOW).max(42);
+    // 走完元数据块链，得到音频起点
+    let mut audio = 4u64;
+    loop {
+        let mut b = [0u8; 4];
+        f.seek(SeekFrom::Start(audio))?;
+        if f.read_exact(&mut b).is_err() {
+            return Ok(false);
+        }
+        audio += 4 + u64::from(u32::from_be_bytes([0, b[1], b[2], b[3]]));
+        if b[0] & 0x80 != 0 {
+            break;
+        }
+    }
+    let base = len.saturating_sub(WINDOW).max(audio);
+    if base >= len {
+        return Ok(false);
+    }
     f.seek(SeekFrom::Start(base))?;
     let mut w = Vec::new();
     (&mut f).take(len - base).read_to_end(&mut w)?;
 
-    for i in (0..w.len().saturating_sub(1)).rev() {
-        let Some((hlen, start, n)) = frame_header(&w[i..], block) else {
-            continue;
-        };
-        if start + n != total {
+    let heads: Vec<(usize, usize, u64, u64)> = (0..w.len())
+        .filter_map(|i| frame_header(&w[i..], block).map(|(h, s, n)| (i, h, s, n)))
+        .collect();
+    let mut cut = None;
+    for &(i, hlen, start, _) in heads.iter().filter(|h| h.2 + h.3 == total) {
+        let confirmed = (base + i as u64 == audio && start == 0)
+            || heads
+                .iter()
+                .any(|&(j, jh, js, jn)| j + jh < i && js + jn == start && crc16(&w[j..i]) == 0);
+        if !confirmed {
             continue;
         }
-        // 帧含 CRC-16 在内整体余数为 0 的位置即帧尾候选，要求唯一
         let mut crc = 0u16;
         let mut ends = vec![];
         for (k, &b) in w[i..].iter().enumerate() {
             crc = crc16_step(crc, b);
             if crc == 0 && k > hlen {
-                ends.push(k + 1);
+                ends.push(i + k + 1);
             }
         }
-        return Ok(match ends[..] {
-            [end] if i + end < w.len() => {
-                f.set_len(base + (i + end) as u64)?;
-                true
-            }
-            _ => false,
-        });
+        match (&ends[..], cut) {
+            (&[e], None) => cut = Some(e),
+            (&[e], Some(c)) if c == e => {}
+            _ => return Ok(false),
+        }
     }
-    Ok(false)
+    match cut {
+        Some(c) if c < w.len() => {
+            f.set_len(base + c as u64)?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
