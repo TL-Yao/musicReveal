@@ -1,10 +1,13 @@
 //! 应用后台：监听、串行队列、处理记录。不依赖 tauri。
 
 mod model;
+mod real;
 mod scan;
 mod store;
 
 pub use model::*;
+pub use real::RealConverter;
+pub use store::home;
 use reveal_core::{CancelToken, ConvertError, ConvertOptions, ConvertOutcome, QqStatus, Stage};
 use scan::Stat;
 use std::collections::{HashMap, VecDeque};
