@@ -1,4 +1,5 @@
-//! 文件夹扫描：监听找转换候选（跳过输出目录），资料库找可播放文件；都跳过隐藏项，深度与条目数有上限。
+//! 文件夹扫描：监听找转换候选（跳过输出目录），资料库找可播放文件；都跳过隐藏项、不进符号链目录，
+//! 深度与条目数有上限（资料库的宽得多）。
 
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -6,6 +7,9 @@ use std::time::UNIX_EPOCH;
 /// 根目录之下最多再进 3 层子目录。
 const MAX_DEPTH: u32 = 3;
 const MAX_ENTRIES: u32 = 5000;
+/// 资料库：输出文件夹里实际有的歌都要收，上限只防失控。
+const LIB_DEPTH: u32 = 16;
+const LIB_ENTRIES: u32 = 200_000;
 
 /// 大小 + mtime（纳秒）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -72,7 +76,8 @@ pub fn scan(root: &Path, skip: &Path) -> Result<Vec<(PathBuf, Stat)>, String> {
     if inside(root, skip) {
         return Ok(out);
     }
-    walk(root, 0, MAX_DEPTH, Some(skip), &candidate, &mut 0, &mut out)?;
+    let lim = (MAX_DEPTH, MAX_ENTRIES);
+    walk(root, 0, lim, Some(skip), &candidate, &mut 0, &mut out)?;
     Ok(out)
 }
 
@@ -80,23 +85,25 @@ pub fn scan(root: &Path, skip: &Path) -> Result<Vec<(PathBuf, Stat)>, String> {
 pub fn shallow(dir: &Path, skip: &Path) -> Vec<(PathBuf, Stat)> {
     let mut out = vec![];
     if !inside(dir, skip) {
-        let _ = walk(dir, 0, 0, Some(skip), &candidate, &mut 0, &mut out);
+        let lim = (0, MAX_ENTRIES);
+        let _ = walk(dir, 0, lim, Some(skip), &candidate, &mut 0, &mut out);
     }
     out
 }
 
-/// 资料库扫描：`root` 下 `keep` 认可的文件，隐藏项、深度与条目上限同监听扫描；
-/// 读不了的为空，超过上限时只取已看到的部分。
+/// 资料库扫描：`root` 下 `keep` 认可的文件，跳过隐藏项；读不了的为空，超过上限时只取已看到的部分。
 pub fn files(root: &Path, keep: &dyn Fn(&Path) -> bool) -> Vec<(PathBuf, Stat)> {
     let mut out = vec![];
-    let _ = walk(root, 0, MAX_DEPTH, None, keep, &mut 0, &mut out);
+    let lim = (LIB_DEPTH, LIB_ENTRIES);
+    let _ = walk(root, 0, lim, None, keep, &mut 0, &mut out);
     out
 }
 
 fn walk(
     dir: &Path,
     depth: u32,
-    max_depth: u32,
+    // 最大深度、最多条目
+    (max_depth, max_entries): (u32, u32),
     skip: Option<&Path>,
     keep: &dyn Fn(&Path) -> bool,
     n: &mut u32,
@@ -115,8 +122,8 @@ fn walk(
     };
     for e in rd.flatten() {
         *n += 1;
-        if *n > MAX_ENTRIES {
-            return Err(format!("文件太多（超过 {MAX_ENTRIES} 个）"));
+        if *n > max_entries {
+            return Err(format!("文件太多（超过 {max_entries} 个）"));
         }
         let p = e.path();
         let Ok(ft) = e.file_type() else { continue };
@@ -126,7 +133,7 @@ fn walk(
         if ft.is_dir() {
             // 父目录已确认不在输出目录内，这里只需比它自己
             if depth < max_depth && !skip.is_some_and(|s| same_dir(&p, s)) {
-                walk(&p, depth + 1, max_depth, skip, keep, n, out)?;
+                walk(&p, depth + 1, (max_depth, max_entries), skip, keep, n, out)?;
             }
         } else if ft.is_file() && keep(&p) {
             if let Some(s) = stat(&p) {

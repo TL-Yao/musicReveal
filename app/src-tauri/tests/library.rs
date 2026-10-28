@@ -159,7 +159,13 @@ fn scan_collects_playable_files_recursively_and_skips_the_rest() {
     );
     let b = mp3(&o.join("sub/歌手 - 歌名乙.mp3"), &[], None);
     let c = mp3(&o.join("sub/1/2/c.mp3"), &[("title", "丙")], None);
-    mp3(&o.join("sub/1/2/3/太深.mp3"), &[], None);
+    // 资料库不受监听扫描的 3 层限制：第 5 层照收
+    let deep = mp3(&o.join("sub/1/2/3/4/深.mp3"), &[], None);
+    // 符号链目录不进（含指回自己的环）
+    let elsewhere = r.t.0.join("elsewhere");
+    mp3(&elsewhere.join("外.mp3"), &[], None);
+    std::os::unix::fs::symlink(&elsewhere, o.join("link")).unwrap();
+    std::os::unix::fs::symlink(o, o.join("sub/loop")).unwrap();
     mp3(&o.join(".隐藏.mp3"), &[], None);
     mp3(&o.join(".hid/x.mp3"), &[], None);
     let part = format!("{}1a2b.part", reveal_core::PART_PREFIX);
@@ -172,7 +178,10 @@ fn scan_collects_playable_files_recursively_and_skips_the_rest() {
     r.lib.set_dir(o);
     let (_, v) = settled(&r.rx);
     assert_eq!(v.dir, id(o));
-    assert_eq!(ids(&v), [id(&a), id(&c), id(&b)].map(|s| s.to_string()));
+    assert_eq!(
+        ids(&v),
+        [id(&a), id(&deep), id(&c), id(&b)].map(|s| s.to_string())
+    );
 
     let ta = r.lib.track(&id(&a)).unwrap();
     assert_eq!(ta.title, "标题甲");
@@ -479,7 +488,12 @@ fn a_thousand_cached_tracks_serialize_under_50ms() {
         std::fs::copy(&a, r.out.join(format!("{i:04}.mp3"))).unwrap();
     }
     r.lib.set_dir(&r.out);
-    settled(&r.rx);
+    let (partial, _) = settled(&r.rx);
+    assert!(
+        !partial.is_empty() && partial.iter().all(|p| p.scanning),
+        "首次扫描大目录先发部分结果：{}",
+        partial.len()
+    );
 
     let (lib, rx) = open(&r.data());
     lib.set_dir(&r.out);
@@ -589,4 +603,19 @@ fn abandoned_scan_leaves_no_orphan_thumbnails() {
         .map(|d| d.flatten().map(|e| e.file_name()).collect())
         .unwrap_or_default();
     assert!(left.is_empty(), "{left:?}");
+}
+
+/// 资料库不受监听扫描的 5000 条目上限：大目录里排在后面的歌也在。
+#[test]
+fn library_is_not_cut_off_by_the_watch_scan_entry_limit() {
+    let r = Rig::new("many");
+    let junk = r.out.join("junk");
+    std::fs::create_dir_all(&junk).unwrap();
+    for i in 0..5100 {
+        std::fs::write(junk.join(format!("{i}.txt")), b"").unwrap();
+    }
+    let z = mp3(&r.out.join("zz/歌.mp3"), &[], None);
+    r.lib.set_dir(&r.out);
+    let (_, v) = settled(&r.rx);
+    assert_eq!(ids(&v), [id(&z)]);
 }
