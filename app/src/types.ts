@@ -19,7 +19,8 @@ export type Job = {
   id: string;
   source: string;
   fileName: string;
-  platform: "qq" | "netease";
+  /** other：普通音频，无来源平台，界面不显示来源字样 */
+  platform: "qq" | "netease" | "other";
   state: "downloading" | "queued" | "decrypt" | "transcode" | "metadata" | "done" | "skipped" | "waitLogin" | "failed";
   /** 仅 queued 有，从 1 开始 */
   queuePos?: number;
@@ -35,10 +36,43 @@ export type Job = {
   renamed?: number;
   /** 中文简短原因，仅 failed 有 */
   error?: string;
-  /** 输出文件绝对路径；done 与 skipped 有 */
+  /** 输出文件绝对路径；done 与 skipped 有。等于资料库里对应 Track 的 id */
   output?: string;
-  /** 正在试听；播放自然结束或 stop_preview 后消失 */
-  playing?: boolean;
 };
 
 export type AddFolderResult = { existing: number };
+
+// 资料库与播放器（`library` / `player` 事件，get_library / get_player / get_lyrics 的载荷）
+export type Track = {
+  /** 绝对路径 */
+  id: string;
+  title: string;
+  artists: string[];
+  album?: string;
+  albumArtist?: string;
+  year?: number;
+  track?: number;
+  disc?: number;
+  durationMs: number;
+  /** "FLAC 24bit/48kHz" | "MP3 320k" */
+  quality: string;
+  /** 可直接作 img src */
+  coverUrl?: string;
+  hasLyrics: boolean;
+  /** ms */
+  addedAt: number;
+};
+export type Library = { dir: string; tracks: Track[]; scanning: boolean };
+export type LyricLine = { ms: number; text: string; trans?: string };
+export type Repeat = "off" | "all" | "one";
+export type PlayerState = {
+  trackId?: string;
+  playing: boolean;
+  positionMs: number;
+  durationMs: number;
+  /** 0..1 */
+  volume: number;
+  shuffle: boolean;
+  repeat: Repeat;
+  error?: string;
+};

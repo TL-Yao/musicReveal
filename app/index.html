@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>musicReveal</title>
+    <link rel="icon" href="data:," />
   </head>
   <body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -15,62 +16,89 @@
   <symbol id="i-lock" viewBox="0 0 20 20"><path fill="currentColor" d="M6 8V6.5a4 4 0 0 1 8 0V8h.5A1.5 1.5 0 0 1 16 9.5v6A1.5 1.5 0 0 1 14.5 17h-9A1.5 1.5 0 0 1 4 15.5v-6A1.5 1.5 0 0 1 5.5 8H6Zm1.6 0h4.8V6.5a2.4 2.4 0 0 0-4.8 0V8Z"/></symbol>
   <symbol id="i-warn" viewBox="0 0 20 20"><path fill="currentColor" d="M8.7 3.6a1.5 1.5 0 0 1 2.6 0l6.2 10.8a1.5 1.5 0 0 1-1.3 2.3H3.8a1.5 1.5 0 0 1-1.3-2.3L8.7 3.6ZM10 7.2c-.5 0-.8.3-.8.8v3.2a.8.8 0 0 0 1.6 0V8c0-.5-.3-.8-.8-.8Zm0 6a1 1 0 1 0 0 2 1 1 0 0 0 0-2Z"/></symbol>
   <symbol id="i-play" viewBox="0 0 20 20"><path fill="currentColor" d="M6.5 4.6c0-.9 1-1.5 1.8-1l8 4.9c.8.5.8 1.6 0 2.1l-8 4.9c-.8.5-1.8-.1-1.8-1V4.6Z"/></symbol>
-  <symbol id="i-stop" viewBox="0 0 20 20"><rect fill="currentColor" x="5" y="5" width="10" height="10" rx="2"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 20 20"><rect fill="currentColor" x="5" y="4" width="3.6" height="12" rx="1.2"/><rect fill="currentColor" x="11.4" y="4" width="3.6" height="12" rx="1.2"/></symbol>
+  <symbol id="i-prev" viewBox="0 0 20 20"><path fill="currentColor" d="M10.6 5.2c0-.9-1-1.4-1.7-.9L3.2 8.9c-.7.5-.7 1.6 0 2.1l5.7 4.6c.7.5 1.7 0 1.7-.9V5.2Z"/><path fill="currentColor" d="M17.6 5.2c0-.9-1-1.4-1.7-.9l-5.7 4.6c-.7.5-.7 1.6 0 2.1l5.7 4.6c.7.5 1.7 0 1.7-.9V5.2Z"/></symbol>
+  <symbol id="i-next" viewBox="0 0 20 20"><g transform="matrix(-1 0 0 1 20 0)"><path fill="currentColor" d="M10.6 5.2c0-.9-1-1.4-1.7-.9L3.2 8.9c-.7.5-.7 1.6 0 2.1l5.7 4.6c.7.5 1.7 0 1.7-.9V5.2Z"/><path fill="currentColor" d="M17.6 5.2c0-.9-1-1.4-1.7-.9l-5.7 4.6c-.7.5-.7 1.6 0 2.1l5.7 4.6c.7.5 1.7 0 1.7-.9V5.2Z"/></g></symbol>
+  <symbol id="i-shuffle" viewBox="0 0 20 20"><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" d="M3 6h2.3c1.3 0 2.5.6 3.3 1.6l2.8 3.8c.8 1 2 1.6 3.3 1.6H17M3 14h2.3c1.3 0 2.5-.6 3.3-1.6l.4-.5M11.6 8.1l.4-.5c.8-1 2-1.6 3.3-1.6H17M14.8 3.8 17 6l-2.2 2.2M14.8 10.8 17 13l-2.2 2.2"/></symbol>
+  <symbol id="i-repeat" viewBox="0 0 20 20"><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" d="M4.5 9.5V8a3 3 0 0 1 3-3h8M13.3 2.8 15.5 5l-2.2 2.2M15.5 10.5V12a3 3 0 0 1-3 3h-8M6.7 17.2 4.5 15l2.2-2.2"/></symbol>
+  <symbol id="i-repeat1" viewBox="0 0 20 20"><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" d="M4.5 9.5V8a3 3 0 0 1 3-3h8M13.3 2.8 15.5 5l-2.2 2.2M15.5 10.5V12a3 3 0 0 1-3 3h-8M6.7 17.2 4.5 15l2.2-2.2"/><text x="10" y="12.6" font-size="7.5" font-weight="700" text-anchor="middle" fill="currentColor" font-family="-apple-system, sans-serif">1</text></symbol>
+  <symbol id="i-speaker" viewBox="0 0 20 20"><path fill="currentColor" d="M3 7.8v4.4c0 .4.3.7.7.7h2.5l3.6 3c.5.4 1.2 0 1.2-.6V4.7c0-.6-.7-1-1.2-.6l-3.6 3H3.7c-.4 0-.7.3-.7.7Z"/><path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" d="M13 7.2a4 4 0 0 1 0 5.6M15.3 5a7.2 7.2 0 0 1 0 10"/></symbol>
+  <symbol id="i-lyrics" viewBox="0 0 20 20"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" d="M3 6a2.5 2.5 0 0 1 2.5-2.5h9A2.5 2.5 0 0 1 17 6v5.5a2.5 2.5 0 0 1-2.5 2.5H9.5l-3.6 3v-3h-.4A2.5 2.5 0 0 1 3 11.5V6Z"/><path fill="currentColor" d="M6.6 9.8c0-1.5.8-2.5 2.2-2.9l.3.7c-.7.3-1.1.7-1.2 1.3h1.1v1.9H6.6v-1Zm4.5 0c0-1.5.8-2.5 2.2-2.9l.3.7c-.7.3-1.1.7-1.2 1.3h1.1v1.9h-2.4v-1Z"/></symbol>
+  <symbol id="i-search" viewBox="0 0 20 20"><circle cx="8.5" cy="8.5" r="5" fill="none" stroke="currentColor" stroke-width="1.8"/><path stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="m12.3 12.3 4 4"/></symbol>
+  <symbol id="i-note" viewBox="0 0 20 20"><path fill="currentColor" d="M15.8 2.6a.8.8 0 0 1 .7.8v9.9a2.9 2.9 0 1 1-1.6-2.6V6.2L8.4 7.6v7.1a2.9 2.9 0 1 1-1.6-2.6V5.3c0-.4.3-.7.6-.8l7.8-1.9h.6Z"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 20 20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="m5 7.5 5 5 5-5"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 20 20"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M4 6h12M8 6V4.3h4V6M5.8 6l.7 10h7l.7-10M8.5 9v4M11.5 9v4"/></symbol>
   <symbol id="i-finder" viewBox="0 0 20 20"><path fill="currentColor" d="M3 5.5A2.5 2.5 0 0 1 5.5 3h9A2.5 2.5 0 0 1 17 5.5v9a2.5 2.5 0 0 1-2.5 2.5h-9A2.5 2.5 0 0 1 3 14.5v-9Zm1.6 0v9c0 .5.4.9.9.9h9c.5 0 .9-.4.9-.9v-9c0-.5-.4-.9-.9-.9h-9c-.5 0-.9.4-.9.9Zm3.1 1.6c.4 0 .7.3.7.7v1.4a.7.7 0 0 1-1.4 0V7.8c0-.4.3-.7.7-.7Zm4.6 0c.4 0 .7.3.7.7v1.4a.7.7 0 0 1-1.4 0V7.8c0-.4.3-.7.7-.7ZM7 11.6a.7.7 0 0 1 1-.2c.6.4 1.3.6 2 .6s1.4-.2 2-.6a.7.7 0 1 1 .8 1.2c-.8.5-1.8.8-2.8.8s-2-.3-2.8-.8a.7.7 0 0 1-.2-1Z"/></symbol>
   <symbol id="i-retry" viewBox="0 0 20 20"><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" d="M15.5 10a5.5 5.5 0 1 1-1.6-3.9M15.5 3.5v3.3h-3.3"/></symbol>
-  <symbol id="i-x" viewBox="0 0 20 20"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M6 6l8 8M14 6l-8 8"/></symbol>
+  <symbol id="i-x" viewBox="0 0 20 20"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" d="M6 6l8 8M14 6l-8 8"/></symbol>
   <symbol id="i-clock" viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M10 6.5V10l2.4 1.6"/></symbol>
-  <symbol id="i-doc" viewBox="0 0 20 20"><path fill="currentColor" d="M5 4.5A1.5 1.5 0 0 1 6.5 3h5l3.5 3.5v9A1.5 1.5 0 0 1 13.5 17h-7A1.5 1.5 0 0 1 5 15.5v-11Zm1.6.1v10.8h6.8V7.2h-2.5V4.6H6.6Z"/></symbol>
 </svg>
 
 <div class="app" id="win">
   <aside class="sidebar">
     <div class="lights" data-tauri-drag-region></div>
-
+    <div class="search" id="searchBox" data-group="lib"><svg><use href="#i-search"/></svg><input id="searchInput" placeholder="搜索" aria-label="搜索资料库" spellcheck="false" autocomplete="off"><button class="clear" id="searchClear" title="清除"><svg><use href="#i-x"/></svg></button></div>
+    <section class="group" data-group="lib">
+      <header><h3>资料库</h3></header>
+      <div class="nav on"><span class="ico"><svg><use href="#i-note"/></svg></span><span class="name">歌曲</span><span class="count" id="navCount"></span></div>
+    </section>
     <section class="group" data-group="folders">
       <header><h3>监听文件夹</h3><button class="icon-btn" id="addFolder" title="添加文件夹…"><svg><use href="#i-plus"/></svg></button></header>
       <div id="folderList"></div>
     </section>
-
-    <section class="group" data-group="qq">
-      <header><h3>QQ 音乐</h3></header>
-      <div class="qq" id="qqRow"></div>
-    </section>
-
-    <section class="group" data-group="output">
-      <header><h3>输出</h3></header>
-      <div class="srow" id="outDir" role="button" title="选择输出文件夹…">
-        <span class="ico"><svg><use href="#i-folder"/></svg></span>
-        <span><div class="name" id="outName"></div><div class="path" id="outPath"></div></span>
-        <span></span>
-      </div>
-      <div class="seg" id="fmtSeg" data-on="0"><div class="thumb"></div><button data-v="original">原格式</button><button data-v="mp3">MP3</button></div>
-    </section>
+    <div class="sb-foot">
+      <div id="qqAlert"></div>
+      <div class="sb-status" id="sbStatus"></div>
+    </div>
   </aside>
 
   <main class="content">
     <header class="toolbar" data-tauri-drag-region>
-      <div class="titles" data-tauri-drag-region><h1 data-tauri-drag-region>musicReveal</h1><p id="subtitle" data-tauri-drag-region></p></div>
-      <button class="glass-btn" id="addFiles"><svg><use href="#i-plus"/></svg>添加文件…</button>
+      <div class="tgroup">
+        <button class="tbtn" id="btnShuffle" title="随机播放"><svg><use href="#i-shuffle"/></svg></button>
+        <button class="tbtn" id="btnPrev" title="上一首"><svg><use href="#i-prev"/></svg></button>
+        <button class="tbtn big" id="btnPlay" title="播放"><svg><use href="#i-play"/></svg></button>
+        <button class="tbtn" id="btnNext" title="下一首"><svg><use href="#i-next"/></svg></button>
+        <button class="tbtn" id="btnRepeat" title="循环播放"><svg><use href="#i-repeat"/></svg></button>
+      </div>
+      <div class="lcd idle" id="lcd">
+        <div class="cover" id="lcdCover"></div>
+        <div class="tx"><div class="t1" id="lcdT1">未在播放</div><div class="t2" id="lcdT2"></div></div><div></div>
+        <div class="scrub"><i></i><input type="range" min="0" max="1000" value="0" id="scrub" aria-label="播放进度"></div>
+        <span class="time l" id="timeL">0:00</span><span class="time r" id="timeR">0:00</span>
+      </div>
+      <div class="tgroup">
+        <button class="tbtn" id="btnLyrics" title="歌词"><svg><use href="#i-lyrics"/></svg></button>
+        <div class="vol"><svg><use href="#i-speaker"/></svg><input type="range" class="slider" id="volRange" min="0" max="100" value="70" aria-label="音量"></div>
+      </div>
     </header>
-    <div class="body">
+    <div class="body" id="bodyPanel">
+      <div class="page-head">
+        <div><h2>歌曲</h2><p id="libSub"></p></div>
+        <div class="acts"><button class="btn" id="sortBtn"></button><button class="glass-btn" id="addFiles"><svg><use href="#i-plus"/></svg>添加文件…</button></div>
+      </div>
       <div class="scroll" id="scroll">
-        <div id="notices"></div>
-        <ul class="tasks" id="tasks"></ul>
+        <div class="notices" id="notices"></div>
+        <section class="tray off" id="tray"><div><div class="tray-in"><header id="trayHead"></header><div class="tasks-wrap" id="tasksWrap"><ul class="tasks" id="tasks"></ul></div></div></div></section>
+        <div class="thead" id="thead"></div>
+        <ul class="songs" id="songs" role="listbox" aria-label="歌曲" tabindex="0"></ul>
+        <div class="void" id="void"></div>
       </div>
       <div class="stage off" id="stage"></div>
+      <div class="lyrics" id="lyrics"></div>
       <div class="drop" id="drop">
         <div class="pane"></div>
         <div class="inner">
           <div class="tile"><div class="art"></div><div class="dash"></div></div>
           <h3 id="dropTitle"></h3>
-          <p>将与监听文件夹中的歌曲一样处理。</p>
-          <div class="files" id="dropFiles"></div>
+          <p>与监听文件夹里的歌曲一样处理，转换完成后加入资料库。</p>
         </div>
       </div>
     </div>
   </main>
 </div>
+<div class="menu" id="menu" role="menu"></div>
+<div class="settings-view" id="settings" hidden></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
