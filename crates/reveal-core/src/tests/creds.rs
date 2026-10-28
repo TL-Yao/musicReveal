@@ -122,26 +122,6 @@ fn unreadable_container_plist_needs_auth() {
 }
 
 #[test]
-fn newer_of_two_plists_wins() {
-    let t = Tmp::new("cred-new");
-    let set_age = |p: &Path, secs: u64| {
-        let when = std::time::SystemTime::now() - std::time::Duration::from_secs(secs);
-        std::fs::File::options()
-            .write(true)
-            .open(p)
-            .unwrap()
-            .set_modified(when)
-            .unwrap();
-    };
-    let new = write_plist(&t.0, NEW, logged("a", 11111111));
-    let old = write_plist(&t.0, OLD, logged("b", 22222222));
-    set_age(&new, 3600);
-    assert_eq!(load_credentials(&t.0).unwrap().uin, "22222222");
-    set_age(&old, 7200);
-    assert_eq!(load_credentials(&t.0).unwrap().uin, "11111111");
-}
-
-#[test]
 fn debug_output_hides_secrets() {
     let c = Credentials {
         uin: "1234567890".into(),
@@ -155,23 +135,85 @@ fn debug_output_hides_secrets() {
     );
 }
 
-#[test]
-fn unreadable_newer_plist_needs_auth_instead_of_falling_back() {
+fn set_age(p: &Path, secs: u64) {
+    let when = std::time::SystemTime::now() - std::time::Duration::from_secs(secs);
+    std::fs::File::options()
+        .write(true)
+        .open(p)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+}
+
+fn chmod(p: &Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[test]
+fn valid_new_plist_wins_even_if_container_plist_is_newer() {
+    let t = Tmp::new("cred-new-first");
+    let new = write_plist(&t.0, NEW, logged("a", 11111111));
+    write_plist(&t.0, OLD, logged("b", 22222222));
+    set_age(&new, 3600);
+    assert_eq!(load_credentials(&t.0).unwrap().uin, "11111111");
+}
+
+#[test]
+fn valid_new_plist_wins_over_newer_unreadable_container_plist() {
     let t = Tmp::new("cred-newer-locked");
     let new = write_plist(&t.0, NEW, logged("a", 11111111));
     let old = write_plist(&t.0, OLD, logged("b", 22222222));
-    let past = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
-    std::fs::File::options()
-        .write(true)
-        .open(&new)
-        .unwrap()
-        .set_modified(past)
-        .unwrap();
-    std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o000)).unwrap();
+    set_age(&new, 3600);
+    chmod(&old, 0o000);
     let st = credentials_status(&t.0);
     let loaded = load_credentials(&t.0).map(|c| c.uin);
-    std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o644)).unwrap();
+    chmod(&old, 0o644);
+    assert_eq!(
+        st,
+        QqStatus::LoggedIn {
+            masked_uin: "11****11".into()
+        }
+    );
+    assert_eq!(loaded.unwrap(), "11111111");
+}
+
+#[test]
+fn logged_out_new_plist_falls_back_to_container_plist() {
+    let t = Tmp::new("cred-fallback");
+    write_plist(&t.0, NEW, None);
+    write_plist(&t.0, OLD, logged("b", 22222222));
+    assert_eq!(load_credentials(&t.0).unwrap().uin, "22222222");
+}
+
+#[test]
+fn readable_container_plist_without_login_is_logged_out() {
+    let t = Tmp::new("cred-old-out");
+    write_plist(&t.0, OLD, None);
+    assert_eq!(
+        load_in(&t.0, &no_sys_apps(&t.0)).unwrap_err(),
+        QqStatus::LoggedOut
+    );
+}
+
+#[test]
+fn inaccessible_empty_container_dir_needs_auth() {
+    let t = Tmp::new("cred-empty-locked");
+    let dir = t.0.join("Library/Containers/com.tencent.QQMusicMac");
+    std::fs::create_dir_all(&dir).unwrap();
+    chmod(&dir, 0o000);
+    let st = load_in(&t.0, &no_sys_apps(&t.0));
+    chmod(&dir, 0o755);
+    assert_eq!(st.unwrap_err(), QqStatus::NeedsAuth);
+}
+
+#[test]
+fn unreadable_new_plist_and_locked_container_plist_needs_auth() {
+    let t = Tmp::new("cred-both-locked");
+    write_plist(&t.0, NEW, None);
+    let old = write_plist(&t.0, OLD, logged("b", 22222222));
+    chmod(&old, 0o000);
+    let st = credentials_status(&t.0);
+    chmod(&old, 0o644);
     assert_eq!(st, QqStatus::NeedsAuth);
-    assert_eq!(loaded, Err(QqStatus::NeedsAuth));
 }
