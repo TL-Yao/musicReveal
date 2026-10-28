@@ -65,6 +65,7 @@ pub enum QqState {
 pub enum Platform {
     Qq,
     Netease,
+    Other,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]

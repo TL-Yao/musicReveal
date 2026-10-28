@@ -230,7 +230,7 @@ fn append(p: &Path, data: &[u8]) {
 async fn growing_file_stays_downloading_until_two_polls_unchanged() {
     let r = Rig::new("stable").await;
     let p = put(&r.watch, "a.ncm", b"1");
-    put(&r.watch, "plain.mp3", b"x");
+    put(&r.watch, "notes.txt", b"x");
     put(&r.watch, ".hidden.ncm", b"x");
     r.eng.tick();
     assert_eq!(r.state("a.ncm"), Some(JobState::Downloading));
@@ -243,7 +243,7 @@ async fn growing_file_stays_downloading_until_two_polls_unchanged() {
     assert_eq!(j.artists, vec!["歌手".to_string()]);
     assert_eq!(j.platform, Platform::Netease);
     assert!(j.output.is_some());
-    assert_eq!(r.eng.snapshot().jobs.len(), 1, "普通音频与隐藏文件不处理");
+    assert_eq!(r.eng.snapshot().jobs.len(), 1, "非音频与隐藏文件不处理");
     assert_eq!(r.fake.calls(), vec!["a.ncm"]);
 }
 
@@ -420,7 +420,7 @@ async fn new_folder_asks_about_existing_songs_convert_branch() {
     let lib = r.t.dir("lib");
     put(&lib, "old1.ncm", b"x");
     put(&lib, "old2.mflac", b"x");
-    put(&lib, "song.mp3", b"x");
+    put(&lib, "cover.jpg", b"x");
     let res = r.eng.add_watch_folder(&lib.to_string_lossy()).unwrap();
     assert_eq!(res.existing, 2);
     let n = notices(&r.eng, NoticeKind::ExistingSongs);
