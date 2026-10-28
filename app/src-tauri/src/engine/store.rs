@@ -53,9 +53,17 @@ pub struct Pending {
 /// 处理记录。同一源路径 + 格式只留最新一条。
 #[derive(Debug, Default)]
 pub struct History {
-    done: HashMap<(PathBuf, Fmt), (Stat, PathBuf)>,
+    done: HashMap<(PathBuf, Fmt), (Stat, PathBuf, Option<String>)>,
+    /// 源文件内容哈希 + 格式 → 输出。
+    by_hash: HashMap<(String, Fmt), PathBuf>,
     ignored: HashMap<PathBuf, Stat>,
+    /// 转换失败（损坏、不支持等）时的样子；没变就不再自动入队。
+    failed: HashMap<PathBuf, Stat>,
     pub pending: Vec<Pending>,
+}
+
+fn non_empty(p: &Path) -> bool {
+    std::fs::metadata(p).is_ok_and(|m| m.len() > 0)
 }
 
 impl History {
@@ -75,11 +83,31 @@ impl History {
             .get(&(k.path.clone(), f))
             .filter(|d| d.0 == k.stat)
             .map(|d| d.1.clone())
-            .filter(|o| std::fs::metadata(o).is_ok_and(|m| m.len() > 0))
+            .filter(|o| non_empty(o))
     }
 
-    pub fn record(&mut self, k: Key, f: Fmt, output: PathBuf) {
-        self.done.insert((k.path, f), (k.stat, output));
+    /// 同内容同格式转过且输出仍在、非空。
+    pub fn same_content(&self, hash: &str, f: Fmt) -> Option<PathBuf> {
+        self.by_hash
+            .get(&(hash.to_string(), f))
+            .filter(|o| non_empty(o))
+            .cloned()
+    }
+
+    pub fn record(&mut self, k: Key, f: Fmt, output: PathBuf, hash: Option<String>) {
+        self.failed.remove(&k.path);
+        if let Some(h) = &hash {
+            self.by_hash.insert((h.clone(), f), output.clone());
+        }
+        self.done.insert((k.path, f), (k.stat, output, hash));
+    }
+
+    pub fn fail(&mut self, k: Key) {
+        self.failed.insert(k.path, k.stat);
+    }
+
+    pub fn failed(&self, path: &Path, stat: Stat) -> bool {
+        self.failed.get(path) == Some(&stat)
     }
 
     pub fn ignore(&mut self, keys: Vec<Key>) {
@@ -94,6 +122,7 @@ impl History {
 pub struct HistoryFile {
     done: Vec<DoneRec>,
     ignored: Vec<Key>,
+    failed: Vec<Key>,
     pending: Vec<Pending>,
 }
 
@@ -103,6 +132,9 @@ struct DoneRec {
     key: Key,
     format: Fmt,
     output: PathBuf,
+    /// 源文件 SHA-256；旧记录没有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hash: Option<String>,
 }
 
 impl From<HistoryFile> for History {
@@ -112,9 +144,12 @@ impl From<HistoryFile> for History {
             ..Default::default()
         };
         for d in f.done {
-            h.record(d.key, d.format, d.output);
+            h.record(d.key, d.format, d.output, d.hash);
         }
         h.ignore(f.ignored);
+        for k in f.failed {
+            h.fail(k);
+        }
         h
     }
 }
@@ -125,17 +160,26 @@ impl From<&History> for HistoryFile {
             done: h
                 .done
                 .iter()
-                .map(|((path, format), (stat, output))| DoneRec {
+                .map(|((path, format), (stat, output, hash))| DoneRec {
                     key: Key {
                         path: path.clone(),
                         stat: *stat,
                     },
                     format: *format,
                     output: output.clone(),
+                    hash: hash.clone(),
                 })
                 .collect(),
             ignored: h
                 .ignored
+                .iter()
+                .map(|(path, stat)| Key {
+                    path: path.clone(),
+                    stat: *stat,
+                })
+                .collect(),
+            failed: h
+                .failed
                 .iter()
                 .map(|(path, stat)| Key {
                     path: path.clone(),

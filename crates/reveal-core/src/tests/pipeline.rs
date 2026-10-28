@@ -1,6 +1,6 @@
 //! `convert` 端到端：ffmpeg 运行时生成明文，合成器包成 NCM / QMC v2 / musicex。
 
-use super::{build_ncm, make_ekey_v1, musicex, qmc2, qtag, Tmp};
+use super::{build_ncm, enc, make_ekey_v1, musicex, qmc2, qtag, Tmp};
 use crate::*;
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::prelude::{Accessor, ItemKey};
@@ -179,6 +179,86 @@ async fn ncm_flac_to_mp3_is_cbr_320_with_tags() {
     assert_eq!(tag.artist().as_deref(), Some("歌手甲, 歌手乙"));
     assert_eq!(tag.album().as_deref(), Some("测试专辑"));
     assert_eq!(tag.pictures().len(), 1);
+}
+
+fn ffprobe_tags(ff: &Path, p: &Path) -> Vec<(String, String)> {
+    let out = Command::new(ff.with_file_name("ffprobe"))
+        .args(["-v", "error", "-show_entries", "format_tags", "-of", "flat"])
+        .arg(p)
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .filter_map(|l| {
+            let (k, v) = l.strip_prefix("format.tags.")?.split_once('=')?;
+            Some((k.to_lowercase(), v.trim_matches('"').to_string()))
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn mp3_keeps_every_source_tag() {
+    let Some(ff) = ffmpeg() else { return };
+    if !ff.with_file_name("ffprobe").exists() {
+        return eprintln!("跳过：ffmpeg 旁没有 ffprobe");
+    }
+    let t = Tmp::new("pl-mp3keep");
+    let plain = flac24(
+        &ff,
+        &t,
+        &[
+            "-metadata",
+            "composer=Composer",
+            "-metadata",
+            "comment=KeepMe",
+            "-metadata",
+            "artist=原歌手",
+            "-metadata",
+            "title=原标题",
+            "-metadata",
+            "lyrics=[00:01.00]旧歌词",
+        ],
+    );
+    let input = t.write("src.ncm", &build_ncm(&plain, b"k", META, None));
+    let mut keys = vec![];
+    for fmt in [OutputFormat::Original, OutputFormat::Mp3] {
+        let out = t.0.join(format!("out-{fmt:?}"));
+        std::fs::create_dir_all(&out).unwrap();
+        let o = run(&input, &out, fmt, &LyricEnricher, None)
+            .await
+            .res
+            .unwrap();
+        let tags = ffprobe_tags(&ff, &o.output);
+        let get = |k: &str| {
+            tags.iter()
+                .filter(|(n, _)| n == k)
+                .map(|(_, v)| v.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(get("composer"), ["Composer"], "{fmt:?} {tags:?}");
+        assert_eq!(get("comment"), ["KeepMe"], "{fmt:?} {tags:?}");
+        assert_eq!(get("artist"), ["歌手甲, 歌手乙"], "{fmt:?} {tags:?}");
+        assert_eq!(get("title"), ["测试歌"], "{fmt:?} {tags:?}");
+        assert!(
+            !tags.iter().any(|(_, v)| v.contains("旧歌词")),
+            "{fmt:?} {tags:?}"
+        );
+        // ID3 的 USLT 在 ffprobe 里叫 lyrics-<语言>
+        let mut k: Vec<String> = tags
+            .into_iter()
+            .map(|(k, _)| {
+                if k.starts_with("lyrics") {
+                    "lyrics".into()
+                } else {
+                    k
+                }
+            })
+            .collect();
+        k.sort();
+        keys.push(k);
+    }
+    assert_eq!(keys[0], keys[1], "MP3 与原格式的标签集合不同");
 }
 
 #[tokio::test]
@@ -553,4 +633,110 @@ async fn existing_lrc_or_symlink_is_never_overwritten() {
     );
     assert_eq!(std::fs::read(&victim).unwrap(), b"victim");
     assert!(!out.join("歌手甲, 歌手乙 - 测试歌.flac").exists());
+}
+
+fn decodes_cleanly(ff: &Path, p: &Path) {
+    let dec = Command::new(ff)
+        .args(["-v", "error", "-i"])
+        .arg(p)
+        .args(["-f", "null", "-"])
+        .output()
+        .unwrap();
+    assert!(
+        dec.status.success() && dec.stderr.is_empty(),
+        "{}: {}",
+        p.display(),
+        String::from_utf8_lossy(&dec.stderr)
+    );
+}
+
+/// WMA / APE 解密后总要转码：APE → FLAC（原格式）或 MP3，WMA → MP3；文件自带标签保留。
+async fn legacy_container_case(ff: &Path, t: &Tmp, src: &str, plain: &[u8], expect: [&str; 2]) {
+    let input = t.write(src, &enc(&crate::qmc::Cipher::static_v1(), plain));
+    for (fmt, ext) in [OutputFormat::Original, OutputFormat::Mp3]
+        .into_iter()
+        .zip(expect)
+    {
+        let out = t.0.join(format!("out-{src}-{fmt:?}"));
+        std::fs::create_dir_all(&out).unwrap();
+        let r = run(&input, &out, fmt, &NoopEnricher, None).await;
+        let o = r.res.unwrap_or_else(|e| panic!("{src} {fmt:?}: {e}"));
+        assert_eq!(
+            name(&o.output),
+            format!("歌手 - 标题.{ext}"),
+            "{src} {fmt:?}"
+        );
+        assert_eq!(
+            r.stages,
+            vec![Stage::Decrypt, Stage::Transcode, Stage::Metadata]
+        );
+        decodes_cleanly(ff, &o.output);
+        let f = read_back(&o.output);
+        let tag = f.primary_tag().unwrap();
+        assert_eq!(tag.title().as_deref(), Some("标题"), "{src} {fmt:?}");
+        assert_eq!(tag.artist().as_deref(), Some("歌手"), "{src} {fmt:?}");
+        assert_eq!(
+            tag.get_string(ItemKey::Composer),
+            Some("作曲"),
+            "{src} {fmt:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn bkcwma_is_transcoded_to_mp3_in_both_modes() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("pl-wma");
+    let plain = gen(
+        &ff,
+        &t.0.join("p.wma"),
+        &[
+            "-c:a",
+            "wmav2",
+            "-b:a",
+            "64k",
+            "-metadata",
+            "title=标题",
+            "-metadata",
+            "artist=歌手",
+            "-metadata",
+            "composer=作曲",
+        ],
+    );
+    legacy_container_case(&ff, &t, "a.bkcwma", &plain, ["mp3", "mp3"]).await;
+}
+
+/// `tests/fixtures/sine.ape`：1 秒 440Hz 正弦波（ffmpeg lavfi 合成，22.05kHz 单声道），
+/// 用 Monkey's Audio SDK 1343 的 `mac s.wav s.ape -c2000` 编码；ffmpeg 不能编码 APE。
+#[tokio::test]
+async fn bkcape_becomes_flac_or_mp3() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("pl-ape");
+    let p = t.0.join("p.ape");
+    std::fs::copy(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sine.ape"),
+        &p,
+    )
+    .unwrap();
+    let mut f = read_back(&p);
+    let mut tag = lofty::tag::Tag::new(f.primary_tag_type());
+    tag.set_title("标题".into());
+    tag.set_artist("歌手".into());
+    tag.insert_text(ItemKey::Composer, "作曲".into());
+    f.insert_tag(tag);
+    f.save_to_path(&p, lofty::config::WriteOptions::default())
+        .unwrap();
+    let plain = std::fs::read(&p).unwrap();
+    legacy_container_case(&ff, &t, "a.bkcape", &plain, ["flac", "mp3"]).await;
+}
+
+#[tokio::test]
+async fn corrupt_source_is_reported_as_corrupt_with_the_same_text() {
+    let t = Tmp::new("pl-corrupt");
+    let input = t.write("a.ncm", b"definitely not an ncm file");
+    let out = out_dir(&t);
+    let r = run(&input, &out, OutputFormat::Original, &NoopEnricher, None).await;
+    let e = r.res.unwrap_err();
+    assert!(matches!(e, ConvertError::Corrupt(_)), "{e:?}");
+    assert_eq!(e.to_string(), "文件已损坏：不是 NCM 文件（魔数不符）");
 }

@@ -227,6 +227,9 @@ pub enum ConvertError {
     Cancelled,
     Incomplete,
     Unsupported(String),
+    /// 源文件本身坏了（解密 / 容器层面），重试也不会好。
+    Corrupt(String),
+    /// 其余失败，可能是暂时性或环境性的（网络、磁盘、ffmpeg 等）。
     Failed(String),
 }
 
@@ -237,6 +240,7 @@ impl std::fmt::Display for ConvertError {
             ConvertError::Cancelled => f.write_str("已取消"),
             ConvertError::Incomplete => f.write_str("文件不完整（可能仍在下载或已被截断）"),
             ConvertError::Unsupported(s) => write!(f, "不支持的格式：{s}"),
+            ConvertError::Corrupt(s) => write!(f, "文件已损坏：{s}"),
             ConvertError::Failed(s) => f.write_str(s),
         }
     }
@@ -250,6 +254,7 @@ impl From<crate::Error> for ConvertError {
         match e {
             E::Incomplete => ConvertError::Incomplete,
             E::Unsupported(s) => ConvertError::Unsupported(s),
+            E::Corrupt(s) => ConvertError::Corrupt(s),
             E::NeedsEkey | E::BadEkey => ConvertError::NeedsLogin,
             e => ConvertError::Failed(e.to_string()),
         }
@@ -333,8 +338,20 @@ fn ext(c: &Container) -> &'static str {
         Container::M4a => "m4a",
         Container::Mp3 => "mp3",
         Container::Wav => "wav",
+        Container::Wma => "wma",
+        Container::Ape => "ape",
     }
 }
+
+/// ffmpeg 从 MP4 容器 / 流信息里带出的、不属于歌曲标签的键。
+const CONTAINER_KEYS: [&str; 6] = [
+    "major_brand",
+    "minor_version",
+    "compatible_brands",
+    "handler_name",
+    "vendor_id",
+    "language",
+];
 
 fn read_audio(p: &Path) -> Result<TaggedFile, ConvertError> {
     lofty::probe::Probe::open(p)
@@ -597,24 +614,44 @@ pub async fn convert(
         })
         .await?
     };
-    let src_tags = read_audio(&cur)?;
-    let mut meta = merge(d.meta, tag_of(&src_tags));
-    drop(src_tags);
+    // lofty 读不了 ASF：WMA 的自带标签等转码后从 MP3 里读
+    let src_tags = match d.container {
+        Container::Wma => None,
+        _ => Some(read_audio(&cur)?),
+    };
 
     let mut container = d.container;
-    if opts.format == OutputFormat::Mp3 && container != Container::Mp3 {
+    // 已是 MP3 不重编码；WMA / APE 的标签 lofty 写不全，总要转成 MP3 / FLAC
+    let target = match (&container, opts.format) {
+        (Container::Mp3, _) => None,
+        (Container::Wma, _) | (_, OutputFormat::Mp3) => Some(Container::Mp3),
+        (Container::Ape, OutputFormat::Original) => Some(Container::Flac),
+        (_, OutputFormat::Original) => None,
+    };
+    if let Some(target) = target {
         let ff = opts
             .ffmpeg
             .clone()
             .ok_or_else(|| ConvertError::Failed("缺少 ffmpeg".into()))?;
         progress(Stage::Transcode);
-        let mp3 = parts.add(dir);
+        let next = parts.add(dir);
+        let codec: &[&str] = match target {
+            Container::Flac => &["-codec:a", "flac", "-f", "flac"],
+            _ => &["-codec:a", "libmp3lame", "-b:a", "320k", "-f", "mp3"],
+        };
         let mut child = tokio::process::Command::new(ff)
             .args(["-v", "error", "-nostdin", "-y", "-i"])
             .arg(&cur)
-            .args(["-map_metadata", "-1", "-vn", "-codec:a", "libmp3lame"])
-            .args(["-b:a", "320k", "-f", "mp3"])
-            .arg(&mp3)
+            // 原标签全部带上（Ogg 的标签在音频流上）；建模字段随后由 lofty 覆盖，封面也由 lofty 写
+            .args(["-map_metadata", "0", "-map_metadata", "0:s:a:0"])
+            .args(
+                CONTAINER_KEYS
+                    .iter()
+                    .flat_map(|k| ["-metadata".into(), format!("{k}=")]),
+            )
+            .args(["-vn"])
+            .args(codec)
+            .arg(&next)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -632,9 +669,15 @@ pub async fn convert(
         if !status.success() {
             return Err(ConvertError::Failed(format!("ffmpeg 转码失败（{status}）")));
         }
-        cur = mp3;
-        container = Container::Mp3;
+        cur = next;
+        container = target;
     }
+    let src_tags = match src_tags {
+        Some(t) => t,
+        None => read_audio(&cur)?,
+    };
+    let mut meta = merge(d.meta, tag_of(&src_tags));
+    drop(src_tags);
 
     progress(Stage::Metadata);
     tokio::select! {

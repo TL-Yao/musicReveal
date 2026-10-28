@@ -3,8 +3,7 @@
 use plist::Value;
 use std::fs::File;
 use std::io::{Cursor, ErrorKind};
-use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::path::Path;
 
 #[derive(Clone)]
 pub struct Credentials {
@@ -58,37 +57,31 @@ pub fn load_credentials(home: &Path) -> Result<Credentials, QqStatus> {
 }
 
 const PLIST: &str = "Library/Preferences/com.tencent.QQMusicMac.plist";
-const CONTAINER: &str = "Library/Containers/com.tencent.QQMusicMac/Data";
+const CONTAINER: &str = "Library/Containers/com.tencent.QQMusicMac";
 
+/// 先用非沙盒 plist；没有登录信息时才看旧沙盒容器，容器进不去就是 NeedsAuth。
 /// `system_apps` 是系统级 Applications 目录，测试时可替换。
 pub(crate) fn load_in(home: &Path, system_apps: &Path) -> Result<Credentials, QqStatus> {
-    // 用 metadata（不需要读权限）选较新者；较新者读不了就是 NeedsAuth，不回落旧文件
-    let mut best: Option<(SystemTime, PathBuf)> = None;
-    let mut denied = false;
-    for p in [home.join(PLIST), home.join(CONTAINER).join(PLIST)] {
-        match std::fs::metadata(&p) {
-            Ok(m) => {
-                let t = m.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-                if best.as_ref().is_none_or(|(b, _)| t > *b) {
-                    best = Some((t, p));
-                }
-            }
-            Err(e) => denied |= e.kind() == ErrorKind::PermissionDenied,
-        }
+    if let Some(c) = File::open(home.join(PLIST)).ok().and_then(parse) {
+        return Ok(c);
     }
-    match best {
-        Some((_, p)) => match File::open(&p) {
-            Ok(f) => parse(f).ok_or(QqStatus::LoggedOut),
-            Err(e) if e.kind() == ErrorKind::PermissionDenied => Err(QqStatus::NeedsAuth),
-            Err(_) => Err(QqStatus::LoggedOut),
-        },
-        None if denied => Err(QqStatus::NeedsAuth),
-        None if system_apps.join("QQMusic.app").exists()
-            || home.join("Applications/QQMusic.app").exists() =>
+    let container = home.join(CONTAINER);
+    match std::fs::metadata(&container) {
+        Ok(_) => {}
+        Err(e) if e.kind() == ErrorKind::PermissionDenied => return Err(QqStatus::NeedsAuth),
+        Err(_)
+            if home.join(PLIST).exists()
+                || system_apps.join("QQMusic.app").exists()
+                || home.join("Applications/QQMusic.app").exists() =>
         {
-            Err(QqStatus::LoggedOut)
+            return Err(QqStatus::LoggedOut)
         }
-        None => Err(QqStatus::NotInstalled),
+        Err(_) => return Err(QqStatus::NotInstalled),
+    }
+    match File::open(container.join("Data").join(PLIST)) {
+        Ok(f) => parse(f).ok_or(QqStatus::LoggedOut),
+        Err(e) if e.kind() == ErrorKind::PermissionDenied => Err(QqStatus::NeedsAuth),
+        Err(_) => Err(QqStatus::LoggedOut),
     }
 }
 

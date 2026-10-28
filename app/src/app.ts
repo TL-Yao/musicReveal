@@ -84,7 +84,7 @@ function renderFolders() {
       return `<div class="srow ${f.accessible ? "" : "bad"} ${fresh ? "added" : ""}" title="${p}">
       <span class="ico">${icon(f.accessible ? "folder" : "folder-warn")}</span>
       <span><div class="name">${esc(f.name)}</div><div class="path">${f.accessible ? esc(tilde(f.path)) : esc(f.reason ?? "无法访问")}</div></span>
-      <span>${f.accessible ? `<button class="icon-btn rm" data-rm="${p}" title="移除">${icon("minus")}</button>` : ""}</span>
+      <span><button class="icon-btn rm" data-rm="${p}" title="移除">${icon("minus")}</button></span>
       ${f.accessible ? "" : `<span class="fix"><button class="btn" data-fix="${p}">重新选择…</button></span>`}
     </div>`;
     })

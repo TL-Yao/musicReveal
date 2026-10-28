@@ -8,12 +8,13 @@ musicReveal 是一个 macOS 桌面工具：监听你指定的文件夹，把 QQ 
 
 - **支持的格式**
   - QQ 音乐新版加密格式（`mflac`、`mgg` 等 musicex 格式），需要本机已安装并登录 QQ 音乐；
-  - QQ 音乐旧格式（`qmcflac`、`qmcogg`、`qmc0`/`qmc2`/`qmc3`… 以及文件内自带密钥的 `mflac`/`mgg`）；
+  - QQ 音乐旧格式（`qmcflac`、`qmcogg`、`qmc0`/`qmc2`/`qmc3`、`bkc*`… 以及文件内自带密钥的 `mflac`/`mgg`）。**旧格式没有用真实文件验证过**：只用合成样本做了测试，并与参考项目的 Python 实现对同一输入的输出逐字节交叉核对；
   - 网易云音乐 `ncm`，无需登录。
-- **输出**：保持原格式（FLAC、OGG、M4A、MP3 等），或统一转为 MP3（320 kbps，由应用内置的 ffmpeg 完成，无需另行安装）。
+- **输出**：保持原格式（FLAC、OGG、M4A、MP3 等），或统一转为 MP3（由应用内置的 ffmpeg 完成，无需另行安装）：本来就是 MP3 的保留原码率、不重新编码，其余编码为 320 kbps。转 MP3 时保留文件自带的全部标签。
+  - 例外：解密后是 APE 或 WMA 的（`bkcape`、`bkcwma` 等），因为这两种格式无法可靠写入完整标签，无论输出格式怎么设置都会转换——APE 在「原格式」下转为 FLAC（无损到无损）、在「MP3」下转为 MP3；WMA 一律转为 320 kbps MP3。
 - **元数据补全**：保留文件自带的标签；再按文件里的歌曲 ID 向对应平台查询，补全年份、曲序、碟号、专辑艺人、高清封面和歌词（含翻译）。多位歌手全部保留。同时生成带时间轴的同名 `.lrc` 文件。
 - **自动监听**：窗口打开期间，监听文件夹里新下载完成的歌曲会自动转换；窗口关闭期间下载的歌曲，下次打开时自动补转。也可以把文件拖进窗口手动转换。
-- **不改动源文件**：转换结果写入输出目录（默认 `~/Music/musicReveal`），文件命名为「歌手 - 歌名」；同名文件自动加编号，不覆盖；已转换过的歌曲自动跳过。
+- **不改动源文件**：转换结果写入输出目录（默认 `~/Music/musicReveal`），文件命名为「歌手 - 歌名」；同名文件自动加编号，不覆盖；已转换过的歌曲自动跳过（内容完全相同、只是换了文件名或位置的也会跳过）。
 
 ## 系统要求
 
@@ -72,23 +73,30 @@ musicReveal 使用开发者自己生成的固定证书签名，没有经过 Appl
 需要：Xcode 命令行工具、Rust stable、Node.js 22，以及用于汇总依赖许可的 `cargo-about`（`cargo install --locked cargo-about`）。
 
 ```sh
+# 以下命令都在仓库根目录执行
+
 # 开发运行
-cd app && npm ci && npx tauri dev
+(cd app && npm ci && npx tauri dev)
 
 # 检查与测试
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cd app && npx tsc --noEmit && npx vite build
+(cd app && npx tsc --noEmit && npx vite build)
 
-# 打包：产出 dist/musicReveal.app 与 dist/musicReveal_<版本>_aarch64.dmg
+# 打包：产出 dist/musicReveal.app、dist/musicReveal_<版本>_aarch64.dmg
+# 与 dist/musicReveal_<版本>_ffmpeg-lame-source.tar
 scripts/package.sh
 ```
 
-`scripts/package.sh` 依次完成：编译内置 ffmpeg（见下）、生成 Rust 依赖许可清单、`tauri build`、签名、用 `hdiutil` 生成 `.dmg`。可以重复运行。
+`scripts/package.sh` 依次完成：编译内置 ffmpeg（见下）、生成 Rust 依赖许可清单、`tauri build`、签名、用 `hdiutil` 生成 `.dmg`，最后把内置 ffmpeg 对应的源码打成 `_ffmpeg-lame-source.tar`。可以重复运行。
 
-- **内置 ffmpeg**：`scripts/build-ffmpeg.sh` 从官方地址下载 FFmpeg 与 LAME 源码，校验 SHA-256 后编译一个只含转码所需组件的 LGPL 版本（arm64，macOS 11+，不依赖 Homebrew），结果缓存在 `build/ffmpeg/`，之后复用。传 `--force` 可重新编译。
+- **内置 ffmpeg**：`scripts/build-ffmpeg.sh` 从官方地址下载 FFmpeg 与 LAME 源码，校验 SHA-256 后编译一个只含转码所需组件的 LGPL 版本（arm64，macOS 11+，不依赖 Homebrew），结果缓存在 `build/ffmpeg/`，之后复用；脚本内容变了会自动重新编译，传 `--force` 可强制重新编译。
 - **签名**：`scripts/sign-local.sh` 第一次运行时用 openssl 生成自签名代码签名证书「musicReveal Local Signing」（有效期 10 年），保存在独立的钥匙串 `~/Library/Keychains/musicreveal-signing.keychain-db`，钥匙串密码保存在同目录的 `musicreveal-signing.password`（权限 600）。之后一直复用这张证书。它不会改动登录钥匙串、钥匙串搜索列表或系统信任设置，全程没有弹窗。删除这两个文件会生成新证书，已经给过的系统授权需要重新授予。
+
+### 发布
+
+发布时必须把 `dist/musicReveal_<版本>_ffmpeg-lame-source.tar` 与 `.dmg` 一起上传到同一个发布页。应用内置的 ffmpeg 以 LGPL 授权，这个 tar 是它的对应源码（未修改的 FFmpeg、LAME 源码包原样，加上构建脚本），按 LGPL 须与二进制在同一处提供；只上传 dmg 不符合许可要求。
 
 仓库中标记为 `#[ignore]` 的测试需要联网或本机真实文件，默认不运行。
 
