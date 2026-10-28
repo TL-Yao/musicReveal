@@ -69,9 +69,10 @@ pub(crate) fn load_in(home: &Path, system_apps: &Path) -> Result<Credentials, Qq
     match std::fs::metadata(&container) {
         Ok(_) => {}
         Err(e) if e.kind() == ErrorKind::PermissionDenied => return Err(QqStatus::NeedsAuth),
-        Err(_) if home.join(PLIST).exists()
-            || system_apps.join("QQMusic.app").exists()
-            || home.join("Applications/QQMusic.app").exists() =>
+        Err(_)
+            if home.join(PLIST).exists()
+                || system_apps.join("QQMusic.app").exists()
+                || home.join("Applications/QQMusic.app").exists() =>
         {
             return Err(QqStatus::LoggedOut)
         }

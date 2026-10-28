@@ -181,6 +181,86 @@ async fn ncm_flac_to_mp3_is_cbr_320_with_tags() {
     assert_eq!(tag.pictures().len(), 1);
 }
 
+fn ffprobe_tags(ff: &Path, p: &Path) -> Vec<(String, String)> {
+    let out = Command::new(ff.with_file_name("ffprobe"))
+        .args(["-v", "error", "-show_entries", "format_tags", "-of", "flat"])
+        .arg(p)
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .filter_map(|l| {
+            let (k, v) = l.strip_prefix("format.tags.")?.split_once('=')?;
+            Some((k.to_lowercase(), v.trim_matches('"').to_string()))
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn mp3_keeps_every_source_tag() {
+    let Some(ff) = ffmpeg() else { return };
+    if !ff.with_file_name("ffprobe").exists() {
+        return eprintln!("跳过：ffmpeg 旁没有 ffprobe");
+    }
+    let t = Tmp::new("pl-mp3keep");
+    let plain = flac24(
+        &ff,
+        &t,
+        &[
+            "-metadata",
+            "composer=Composer",
+            "-metadata",
+            "comment=KeepMe",
+            "-metadata",
+            "artist=原歌手",
+            "-metadata",
+            "title=原标题",
+            "-metadata",
+            "lyrics=[00:01.00]旧歌词",
+        ],
+    );
+    let input = t.write("src.ncm", &build_ncm(&plain, b"k", META, None));
+    let mut keys = vec![];
+    for fmt in [OutputFormat::Original, OutputFormat::Mp3] {
+        let out = t.0.join(format!("out-{fmt:?}"));
+        std::fs::create_dir_all(&out).unwrap();
+        let o = run(&input, &out, fmt, &LyricEnricher, None)
+            .await
+            .res
+            .unwrap();
+        let tags = ffprobe_tags(&ff, &o.output);
+        let get = |k: &str| {
+            tags.iter()
+                .filter(|(n, _)| n == k)
+                .map(|(_, v)| v.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(get("composer"), ["Composer"], "{fmt:?} {tags:?}");
+        assert_eq!(get("comment"), ["KeepMe"], "{fmt:?} {tags:?}");
+        assert_eq!(get("artist"), ["歌手甲, 歌手乙"], "{fmt:?} {tags:?}");
+        assert_eq!(get("title"), ["测试歌"], "{fmt:?} {tags:?}");
+        assert!(
+            !tags.iter().any(|(_, v)| v.contains("旧歌词")),
+            "{fmt:?} {tags:?}"
+        );
+        // ID3 的 USLT 在 ffprobe 里叫 lyrics-<语言>
+        let mut k: Vec<String> = tags
+            .into_iter()
+            .map(|(k, _)| {
+                if k.starts_with("lyrics") {
+                    "lyrics".into()
+                } else {
+                    k
+                }
+            })
+            .collect();
+        k.sort();
+        keys.push(k);
+    }
+    assert_eq!(keys[0], keys[1], "MP3 与原格式的标签集合不同");
+}
+
 #[tokio::test]
 async fn mp3_source_is_not_reencoded() {
     let Some(ff) = ffmpeg() else { return };

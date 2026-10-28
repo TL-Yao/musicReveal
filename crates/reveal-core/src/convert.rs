@@ -336,6 +336,16 @@ fn ext(c: &Container) -> &'static str {
     }
 }
 
+/// ffmpeg 从 MP4 容器 / 流信息里带出的、不属于歌曲标签的键。
+const CONTAINER_KEYS: [&str; 6] = [
+    "major_brand",
+    "minor_version",
+    "compatible_brands",
+    "handler_name",
+    "vendor_id",
+    "language",
+];
+
 fn read_audio(p: &Path) -> Result<TaggedFile, ConvertError> {
     lofty::probe::Probe::open(p)
         .and_then(|p| Ok(p.guess_file_type()?))
@@ -612,7 +622,14 @@ pub async fn convert(
         let mut child = tokio::process::Command::new(ff)
             .args(["-v", "error", "-nostdin", "-y", "-i"])
             .arg(&cur)
-            .args(["-map_metadata", "-1", "-vn", "-codec:a", "libmp3lame"])
+            // 原标签全部带上（Ogg 的标签在音频流上）；建模字段随后由 lofty 覆盖，封面也由 lofty 写
+            .args(["-map_metadata", "0", "-map_metadata", "0:s:a:0"])
+            .args(
+                CONTAINER_KEYS
+                    .iter()
+                    .flat_map(|k| ["-metadata".into(), format!("{k}=")]),
+            )
+            .args(["-vn", "-codec:a", "libmp3lame"])
             .args(["-b:a", "320k", "-f", "mp3"])
             .arg(&mp3)
             .stdin(std::process::Stdio::null())
