@@ -380,3 +380,67 @@ async fn blank_embedded_meta_does_not_hide_inner_tags() {
     assert_eq!(o.meta.album.as_deref(), Some("内层专辑"));
     assert_eq!(name(&o.output), "内层歌手 - 内层歌名.flac");
 }
+
+struct StuckEnricher;
+#[async_trait::async_trait]
+impl Enricher for StuckEnricher {
+    async fn enrich(&self, _meta: &mut TrackMeta) -> Result<(), String> {
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn cancel_interrupts_a_stuck_enricher() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("pl-stuck");
+    let plain = flac24(&ff, &t, &[]);
+    let input = t.write("src.ncm", &build_ncm(&plain, b"k", META, None));
+    let out = out_dir(&t);
+    let opts = ConvertOptions {
+        output_dir: out.clone(),
+        format: OutputFormat::Original,
+        ffmpeg: None,
+    };
+    // 1) enrich 进行中被取消
+    let cancel = CancelToken::default();
+    let c = cancel.clone();
+    let start = std::time::Instant::now();
+    let mut entered = None;
+    let mut progress = |s: Stage| {
+        if s == Stage::Metadata {
+            entered = Some(std::time::Instant::now());
+            let c = c.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                c.cancel();
+            });
+        }
+    };
+    let r = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        convert(&input, &opts, &StuckEnricher, None, &cancel, &mut progress),
+    )
+    .await;
+    assert!(matches!(r, Ok(Err(ConvertError::Cancelled))), "{r:?}");
+    let since = entered.unwrap().elapsed();
+    assert!(
+        since < std::time::Duration::from_millis(300),
+        "{since:?} / {:?}",
+        start.elapsed()
+    );
+    // 2) 进入 enrich 前已取消
+    let cancel = CancelToken::default();
+    let c = cancel.clone();
+    let mut progress = |s: Stage| {
+        if s == Stage::Metadata {
+            c.cancel();
+        }
+    };
+    let r = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        convert(&input, &opts, &StuckEnricher, None, &cancel, &mut progress),
+    )
+    .await;
+    assert!(matches!(r, Ok(Err(ConvertError::Cancelled))), "{r:?}");
+    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0);
+}

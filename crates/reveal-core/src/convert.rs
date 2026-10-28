@@ -132,15 +132,34 @@ pub enum Stage {
     Metadata,
 }
 
+#[derive(Debug, Default)]
+struct CancelInner {
+    flag: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
 #[derive(Debug, Clone, Default)]
-pub struct CancelToken(Arc<AtomicBool>);
+pub struct CancelToken(Arc<CancelInner>);
 
 impl CancelToken {
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::Relaxed);
+        self.0.flag.store(true, Ordering::SeqCst);
+        self.0.notify.notify_waiters();
     }
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
+        self.0.flag.load(Ordering::SeqCst)
+    }
+    /// 取消时完成；已取消则立即完成。
+    pub(crate) async fn cancelled(&self) {
+        loop {
+            let n = self.0.notify.notified();
+            tokio::pin!(n);
+            n.as_mut().enable();
+            if self.is_cancelled() {
+                return;
+            }
+            n.await;
+        }
     }
 }
 
@@ -476,14 +495,15 @@ pub async fn convert(
             media_filename,
         } => {
             let creds = creds.ok_or(ConvertError::NeedsLogin)?;
-            Some(
-                fetch_ekey(song_mid, media_filename, creds)
-                    .await
-                    .map_err(|e| match e {
-                        EkeyError::Rejected => ConvertError::NeedsLogin,
-                        EkeyError::Network(s) => ConvertError::Failed(format!("网络错误：{s}")),
-                    })?,
-            )
+            let r = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(ConvertError::Cancelled),
+                r = fetch_ekey(song_mid, media_filename, creds) => r,
+            };
+            Some(r.map_err(|e| match e {
+                EkeyError::Rejected => ConvertError::NeedsLogin,
+                EkeyError::Network(s) => ConvertError::Failed(format!("网络错误：{s}")),
+            })?)
         }
         _ => None,
     };
@@ -532,15 +552,13 @@ pub async fn convert(
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| ConvertError::Failed(format!("无法启动 ffmpeg：{e}")))?;
-        let status = loop {
-            if cancel.is_cancelled() {
+        let status = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
                 let _ = child.kill().await;
                 return Err(ConvertError::Cancelled);
             }
-            tokio::select! {
-                s = child.wait() => break s.map_err(io_err)?,
-                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
-            }
+            s = child.wait() => s.map_err(io_err)?,
         };
         if !status.success() {
             return Err(ConvertError::Failed(format!("ffmpeg 转码失败（{status}）")));
@@ -550,11 +568,12 @@ pub async fn convert(
     }
 
     progress(Stage::Metadata);
-    if let Err(e) = enricher.enrich(&mut meta).await {
-        log::warn!("元数据补全失败：{e}");
-    }
-    if cancel.is_cancelled() {
-        return Err(ConvertError::Cancelled);
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(ConvertError::Cancelled),
+        r = enricher.enrich(&mut meta) => if let Err(e) = r {
+            log::warn!("元数据补全失败：{e}");
+        },
     }
     let quality = {
         let (p, m, c) = (cur.clone(), meta.clone(), container.clone());
