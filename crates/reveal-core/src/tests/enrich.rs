@@ -100,3 +100,92 @@ fn qq_instrumental_or_credit_only_lyrics_are_none() {
         );
     }
 }
+
+fn ne(id: u64) -> TrackMeta {
+    blank(Platform::Netease, SongId::Netease(id))
+}
+
+#[test]
+fn netease_song_fills_fields_and_returns_pic_url() {
+    let mut m = ne(1352449924);
+    let pic = crate::enrich::netease_song(&fx("netease_song_1352449924.json"), &mut m).unwrap();
+    assert_eq!(
+        pic.as_deref(),
+        Some("https://p1.music.126.net/PbrTK_5IXnMNjQMh6zr-UQ==/109951163031204835.jpg")
+    );
+    assert_eq!(m.title.as_deref(), Some("雪乡游梦记（伴奏）"));
+    assert_eq!(m.artists, ["著小生zoki", "徵羽摩柯", "乐正龙牙", "Hanser"]);
+    assert_eq!(m.album.as_deref(), Some("半木生作品伴奏合集"));
+    assert_eq!(m.album_artist.as_deref(), Some("著小生zoki"));
+    assert_eq!((m.year, m.track, m.disc), (Some(2017), Some(4), Some(1)));
+
+    let mut m = ne(1982798727);
+    crate::enrich::netease_song(&fx("netease_song_1982798727.json"), &mut m).unwrap();
+    assert_eq!(m.album.as_deref(), Some("一抹憨色"));
+    assert_eq!(m.year, Some(2022));
+}
+
+#[test]
+fn netease_publish_time_year_is_utc_plus_8() {
+    // 2016-12-31T16:30:00Z = 北京时间 2017-01-01 00:30
+    let body =
+        br#"{"songs":[{"name":"N","no":0,"disc":"","album":{"publishTime":1483201800000}}]}"#;
+    let mut m = ne(1);
+    assert_eq!(crate::enrich::netease_song(body, &mut m).unwrap(), None);
+    assert_eq!(m.year, Some(2017));
+    assert_eq!((m.track, m.disc), (Some(9), Some(9)));
+    assert_eq!(m.artists, ["文件歌手"]);
+    assert_eq!(m.album_artist.as_deref(), Some("文件专辑艺人"));
+
+    let mut m = ne(1);
+    let body = br#"{"songs":[{"album":{"publishTime":0},"disc":"x"}]}"#;
+    crate::enrich::netease_song(body, &mut m).unwrap();
+    assert_eq!(m, ne(1));
+    assert!(crate::enrich::netease_song(br#"{"songs":[],"code":200}"#, &mut m).is_err());
+}
+
+#[test]
+fn netease_lyric_keeps_credits_when_body_exists() {
+    let l = crate::enrich::netease_lyric(&fx("netease_lyric_1982798727.json"))
+        .unwrap()
+        .unwrap();
+    assert!(
+        l.lrc.starts_with("[00:01.00]作曲\u{a0}Yunomi\n"),
+        "{}",
+        l.lrc
+    );
+    assert!(l.lrc.contains("[00:10.94]一个人的走廊 别回头张望"));
+    assert_eq!(l.translated_lrc, None);
+}
+
+#[test]
+fn netease_lyric_with_translation() {
+    let body = r#"{"lrc":{"lyric":"[00:01.00]こんにちは\n"},"tlyric":{"lyric":"[00:01.00]你好\n"},"code":200}"#;
+    let l = crate::enrich::netease_lyric(body.as_bytes())
+        .unwrap()
+        .unwrap();
+    assert_eq!(l.lrc, "[00:01.00]こんにちは");
+    assert_eq!(l.translated_lrc.as_deref(), Some("[00:01.00]你好"));
+}
+
+#[test]
+fn netease_instrumental_has_no_lyrics() {
+    // 伴奏的录制响应：只有未打时间轴的原唱歌词文本
+    assert_eq!(
+        crate::enrich::netease_lyric(&fx("netease_lyric_1352449924.json")).unwrap(),
+        None
+    );
+    for body in [
+        r#"{"nolyric":true,"code":200}"#,
+        r#"{"uncollected":true,"code":200}"#,
+        r#"{"nolyric":true,"lrc":{"lyric":"[00:01.00]词"},"code":200}"#,
+        r#"{"lrc":{"lyric":"[00:00.00]纯音乐，请欣赏\n"},"tlyric":{"lyric":""},"code":200}"#,
+        r#"{"lrc":{"lyric":"[00:01.00]作曲 Yunomi\n[00:02.00]编曲：Yunomi\n"},"code":200}"#,
+    ] {
+        assert_eq!(
+            crate::enrich::netease_lyric(body.as_bytes()).unwrap(),
+            None,
+            "{body}"
+        );
+    }
+}

@@ -195,3 +195,51 @@ pub(crate) fn qq_lyric(body: &[u8]) -> Result<Option<crate::Lyrics>, String> {
     let trans = v.get("trans").and_then(Value::as_str).map(unescape);
     Ok(lyrics(&lrc, trans.as_deref()))
 }
+
+/// 毫秒时间戳按北京时间（UTC+8）取年份；civil-from-days 算法。
+fn year_utc8(ms: i64) -> Option<u16> {
+    let z = (ms.div_euclid(1000) + 8 * 3600).div_euclid(86_400) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let march_based_month = (5 * doy + 2) / 153;
+    u16::try_from(yoe + era * 400 + i64::from(march_based_month >= 10)).ok()
+}
+
+/// 网易云 `api/song/detail` 响应 → meta；返回专辑封面 URL。
+pub(crate) fn netease_song(body: &[u8], meta: &mut TrackMeta) -> Result<Option<String>, String> {
+    let v = json(body)?;
+    let s = v.pointer("/songs/0").ok_or("网易云曲库没有这首歌")?;
+    set(&mut meta.title, str_at(s, "/name"));
+    set(&mut meta.album, str_at(s, "/album/name"));
+    set_list(meta, names(s, "/artists"), names(s, "/album/artists"));
+    if let Some(y) = s
+        .pointer("/album/publishTime")
+        .and_then(Value::as_i64)
+        .filter(|&t| t > 0)
+        .and_then(year_utc8)
+    {
+        meta.year = Some(y);
+    }
+    if let Some(n) = pos(s, "/no") {
+        meta.track = Some(n);
+    }
+    if let Some(n) = str_at(s, "/disc")
+        .and_then(|d| d.parse::<u32>().ok())
+        .filter(|&n| n > 0)
+    {
+        meta.disc = Some(n);
+    }
+    Ok(str_at(s, "/album/picUrl").map(str::to_owned))
+}
+
+/// 网易云 `api/song/lyric` 响应 → 歌词；`nolyric` / `uncollected` / 纯音乐占位返回 None。
+pub(crate) fn netease_lyric(body: &[u8]) -> Result<Option<crate::Lyrics>, String> {
+    let v = json(body)?;
+    let flag = |k: &str| v.get(k).and_then(Value::as_bool) == Some(true);
+    if flag("nolyric") || flag("uncollected") {
+        return Ok(None);
+    }
+    Ok(str_at(&v, "/lrc/lyric").and_then(|l| lyrics(l, str_at(&v, "/tlyric/lyric"))))
+}
