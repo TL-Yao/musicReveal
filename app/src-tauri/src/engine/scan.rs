@@ -1,4 +1,4 @@
-//! 文件夹扫描：只找加密格式候选文件，跳过隐藏项与输出目录，深度与条目数有上限。
+//! 文件夹扫描：监听找转换候选（跳过输出目录），资料库找可播放文件；都跳过隐藏项，深度与条目数有上限。
 
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -44,7 +44,7 @@ pub fn scan(root: &Path, skip: &Path) -> Result<Vec<(PathBuf, Stat)>, String> {
     if root.starts_with(skip) {
         return Ok(out);
     }
-    walk(root, 0, MAX_DEPTH, skip, &mut 0, &mut out)?;
+    walk(root, 0, MAX_DEPTH, Some(skip), &candidate, &mut 0, &mut out)?;
     Ok(out)
 }
 
@@ -52,8 +52,16 @@ pub fn scan(root: &Path, skip: &Path) -> Result<Vec<(PathBuf, Stat)>, String> {
 pub fn shallow(dir: &Path, skip: &Path) -> Vec<(PathBuf, Stat)> {
     let mut out = vec![];
     if !dir.starts_with(skip) {
-        let _ = walk(dir, 0, 0, skip, &mut 0, &mut out);
+        let _ = walk(dir, 0, 0, Some(skip), &candidate, &mut 0, &mut out);
     }
+    out
+}
+
+/// 资料库扫描：`root` 下 `keep` 认可的文件，隐藏项、深度与条目上限同监听扫描；
+/// 读不了的为空，超过上限时只取已看到的部分。
+pub fn files(root: &Path, keep: &dyn Fn(&Path) -> bool) -> Vec<(PathBuf, Stat)> {
+    let mut out = vec![];
+    let _ = walk(root, 0, MAX_DEPTH, None, keep, &mut 0, &mut out);
     out
 }
 
@@ -61,7 +69,8 @@ fn walk(
     dir: &Path,
     depth: u32,
     max_depth: u32,
-    skip: &Path,
+    skip: Option<&Path>,
+    keep: &dyn Fn(&Path) -> bool,
     n: &mut u32,
     out: &mut Vec<(PathBuf, Stat)>,
 ) -> Result<(), String> {
@@ -87,10 +96,10 @@ fn walk(
             continue;
         }
         if ft.is_dir() {
-            if depth < max_depth && !p.starts_with(skip) {
-                walk(&p, depth + 1, max_depth, skip, n, out)?;
+            if depth < max_depth && !skip.is_some_and(|s| p.starts_with(s)) {
+                walk(&p, depth + 1, max_depth, skip, keep, n, out)?;
             }
-        } else if ft.is_file() && candidate(&p) {
+        } else if ft.is_file() && keep(&p) {
             if let Some(s) = stat(&p) {
                 out.push((p, s));
             }

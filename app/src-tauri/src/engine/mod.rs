@@ -2,7 +2,7 @@
 
 mod model;
 mod real;
-mod scan;
+pub(crate) mod scan;
 mod store;
 
 pub use model::*;
@@ -132,7 +132,7 @@ fn id_of(s: &str) -> u64 {
 }
 
 /// 与前端 `convertFileSrc` 相同的 asset 协议地址（macOS）。
-fn asset_url(p: &Path) -> String {
+pub(crate) fn asset_url(p: &Path) -> String {
     let mut s = String::from("asset://localhost/");
     for b in p.to_string_lossy().bytes() {
         if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) {

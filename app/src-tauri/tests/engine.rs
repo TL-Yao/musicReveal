@@ -651,7 +651,10 @@ async fn watch_folder_equal_to_or_inside_output_dir_yields_nothing() {
     put(&inner, "b.mp3", b"x");
     for f in [&r.out, &inner] {
         assert_eq!(
-            r.eng.add_watch_folder(&f.to_string_lossy()).unwrap().existing,
+            r.eng
+                .add_watch_folder(&f.to_string_lossy())
+                .unwrap()
+                .existing,
             0
         );
     }
