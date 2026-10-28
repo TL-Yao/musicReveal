@@ -1,5 +1,6 @@
 //! 网易云 NCM。结构与密钥参考 music-geshizhuanhuan（MIT，Copyright (c) 2026
 //! music-geshizhuanhuan contributors）music_unlock/formats/ncm.py 与 ciphers.py。
+//! MIT 许可全文见 crates/reveal-core/THIRD_PARTY_LICENSES.md。
 
 use crate::{eof, pump, Container, Decrypted, EmbeddedMeta, Error, Platform, SongId};
 use aes::cipher::{BlockDecrypt, KeyInit};
@@ -33,7 +34,7 @@ fn block(f: &mut File, len: u32, file_len: u64) -> Result<Vec<u8>, Error> {
 }
 
 fn aes_ecb_unpad(key: &[u8; 16], mut data: Vec<u8>) -> Option<Vec<u8>> {
-    if data.is_empty() || data.len() % 16 != 0 {
+    if data.is_empty() || !data.len().is_multiple_of(16) {
         return None;
     }
     let c = aes::Aes128::new(key.into());

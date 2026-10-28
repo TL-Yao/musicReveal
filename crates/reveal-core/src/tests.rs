@@ -415,7 +415,7 @@ fn musicex(enc: &[u8]) -> Vec<u8> {
             .flat_map(u16::to_le_bytes)
             .collect::<Vec<u8>>()
     };
-    let mut f = vec![0u8; 0xC0];
+    let mut f = [0u8; 0xC0];
     f[0..12].copy_from_slice(&[0xAA; 12]);
     let m = utf16(MID);
     f[0x0C..0x0C + m.len()].copy_from_slice(&m);

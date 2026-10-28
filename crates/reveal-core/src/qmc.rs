@@ -1,5 +1,6 @@
 //! QQ 音乐 QMC。v1 静态密钥表、扩展名清单移植自 music-geshizhuanhuan（MIT，
 //! Copyright (c) 2026 music-geshizhuanhuan contributors）music_unlock/formats/qmc.py。
+//! MIT 许可全文见 crates/reveal-core/THIRD_PARTY_LICENSES.md。
 
 use crate::{Error, SourceKind};
 
@@ -174,7 +175,7 @@ fn tea_decrypt_block(blk: u64, k: &[u32; 4]) -> u64 {
 
 /// Tencent TEA tweaked-CBC 解密，剥掉 1+pad+2 字节头并校验 7 字节零尾。
 fn tea_cbc_decrypt(data: &[u8], key: &[u8; 16]) -> Option<Vec<u8>> {
-    if data.len() < 16 || data.len() % 8 != 0 {
+    if data.len() < 16 || !data.len().is_multiple_of(8) {
         return None;
     }
     let k: [u32; 4] =
