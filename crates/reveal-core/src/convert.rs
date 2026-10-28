@@ -566,6 +566,31 @@ pub(crate) fn merge_lrc(l: &Lyrics) -> String {
     out
 }
 
+/// 第一条附带图片流的原始字节；没有或抽不出来为 None。
+async fn attached_picture(
+    ff: &Path,
+    input: &Path,
+    cancel: &CancelToken,
+) -> Result<Option<Vec<u8>>, ConvertError> {
+    let child = tokio::process::Command::new(ff)
+        .args(["-v", "error", "-nostdin", "-i"])
+        .arg(input)
+        .args(["-an", "-map", "0:v:0", "-c", "copy", "-frames:v", "1"])
+        .args(["-f", "image2pipe", "-"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| ConvertError::Failed(format!("无法启动 ffmpeg：{e}")))?;
+    let out = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(ConvertError::Cancelled),
+        o = child.wait_with_output() => o.map_err(io_err)?,
+    };
+    Ok((out.status.success() && !out.stdout.is_empty()).then_some(out.stdout))
+}
+
 pub async fn convert(
     input: &Path,
     opts: &ConvertOptions,
@@ -624,6 +649,7 @@ pub async fn convert(
     };
 
     let mut container = d.container;
+    let mut own_cover = None;
     // 已是 MP3 不重编码；WMA / APE 的标签 lofty 写不全，总要转成 MP3 / FLAC
     let target = match (&container, opts.format) {
         (Container::Mp3, _) => None,
@@ -637,6 +663,10 @@ pub async fn convert(
             .clone()
             .ok_or_else(|| ConvertError::Failed("缺少 ffmpeg".into()))?;
         progress(Stage::Transcode);
+        // 转码用 -vn：WMA / APE 自带的封面（附带图片流）先原样抽出来
+        if matches!(container, Container::Wma | Container::Ape) {
+            own_cover = attached_picture(&ff, &cur, cancel).await?;
+        }
         let next = parts.add(dir);
         let codec: &[&str] = match target {
             Container::Flac => &["-codec:a", "flac", "-f", "flac"],
@@ -681,6 +711,9 @@ pub async fn convert(
     };
     let mut meta = merge(d.meta, tag_of(&src_tags));
     drop(src_tags);
+    if meta.cover.is_none() {
+        meta.cover = own_cover;
+    }
 
     progress(Stage::Metadata);
     tokio::select! {

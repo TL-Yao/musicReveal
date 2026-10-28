@@ -650,8 +650,15 @@ fn decodes_cleanly(ff: &Path, p: &Path) {
     );
 }
 
-/// WMA / APE 解密后总要转码：APE → FLAC（原格式）或 MP3，WMA → MP3；文件自带标签保留。
-async fn legacy_container_case(ff: &Path, t: &Tmp, src: &str, plain: &[u8], expect: [&str; 2]) {
+/// WMA / APE 解密后总要转码：APE → FLAC（原格式）或 MP3，WMA → MP3；文件自带标签与封面保留。
+async fn legacy_container_case(
+    ff: &Path,
+    t: &Tmp,
+    src: &str,
+    plain: &[u8],
+    cover: &[u8],
+    expect: [&str; 2],
+) {
     let input = t.write(src, &enc(&crate::qmc::Cipher::static_v1(), plain));
     for (fmt, ext) in [OutputFormat::Original, OutputFormat::Mp3]
         .into_iter()
@@ -680,6 +687,9 @@ async fn legacy_container_case(ff: &Path, t: &Tmp, src: &str, plain: &[u8], expe
             Some("作曲"),
             "{src} {fmt:?}"
         );
+        assert!(o.has_cover, "{src} {fmt:?}");
+        assert_eq!(tag.pictures().len(), 1, "{src} {fmt:?}");
+        assert_eq!(tag.pictures()[0].data(), cover, "{src} {fmt:?}");
     }
 }
 
@@ -687,23 +697,31 @@ async fn legacy_container_case(ff: &Path, t: &Tmp, src: &str, plain: &[u8], expe
 async fn bkcwma_is_transcoded_to_mp3_in_both_modes() {
     let Some(ff) = ffmpeg() else { return };
     let t = Tmp::new("pl-wma");
-    let plain = gen(
-        &ff,
-        &t.0.join("p.wma"),
-        &[
-            "-c:a",
-            "wmav2",
-            "-b:a",
-            "64k",
-            "-metadata",
-            "title=标题",
-            "-metadata",
-            "artist=歌手",
-            "-metadata",
-            "composer=作曲",
-        ],
-    );
-    legacy_container_case(&ff, &t, "a.bkcwma", &plain, ["mp3", "mp3"]).await;
+    let cover = png(&ff, &t);
+    let p = t.0.join("p.wma");
+    // ASF 的 WM/Picture 在 ffmpeg 里是一条附带图片的视频流
+    let st = Command::new(&ff)
+        .args([
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=f=440:d=2",
+            "-i",
+        ])
+        .arg(t.0.join("c.png"))
+        .args(["-map", "0:a", "-map", "1:v", "-c:a", "wmav2", "-b:a", "64k"])
+        .args(["-c:v", "copy", "-disposition:v", "attached_pic"])
+        .args(["-metadata", "title=标题", "-metadata", "artist=歌手"])
+        .args(["-metadata", "composer=作曲"])
+        .arg(&p)
+        .status()
+        .unwrap();
+    assert!(st.success());
+    let plain = std::fs::read(&p).unwrap();
+    legacy_container_case(&ff, &t, "a.bkcwma", &plain, &cover, ["mp3", "mp3"]).await;
 }
 
 /// `tests/fixtures/sine.ape`：1 秒 440Hz 正弦波（ffmpeg lavfi 合成，22.05kHz 单声道），
@@ -718,16 +736,21 @@ async fn bkcape_becomes_flac_or_mp3() {
         &p,
     )
     .unwrap();
-    let mut f = read_back(&p);
-    let mut tag = lofty::tag::Tag::new(f.primary_tag_type());
-    tag.set_title("标题".into());
-    tag.set_artist("歌手".into());
-    tag.insert_text(ItemKey::Composer, "作曲".into());
-    f.insert_tag(tag);
-    f.save_to_path(&p, lofty::config::WriteOptions::default())
+    // 直接写 APEv2：通用 Tag 存 APE 时不会写图片
+    use lofty::ape::{ApeItem, ApeTag};
+    use lofty::tag::{ItemValue, TagExt};
+    let cover = png(&ff, &t);
+    let mut tag = ApeTag::new();
+    let item = |k: &str, v: ItemValue| ApeItem::new(k.into(), v).unwrap();
+    tag.insert(item("Title", ItemValue::Text("标题".into())));
+    tag.insert(item("Artist", ItemValue::Text("歌手".into())));
+    tag.insert(item("Composer", ItemValue::Text("作曲".into())));
+    let pic = [&b"cover.png\0"[..], &cover].concat();
+    tag.insert(item("Cover Art (Front)", ItemValue::Binary(pic)));
+    tag.save_to_path(&p, lofty::config::WriteOptions::default())
         .unwrap();
     let plain = std::fs::read(&p).unwrap();
-    legacy_container_case(&ff, &t, "a.bkcape", &plain, ["flac", "mp3"]).await;
+    legacy_container_case(&ff, &t, "a.bkcape", &plain, &cover, ["flac", "mp3"]).await;
 }
 
 #[tokio::test]
