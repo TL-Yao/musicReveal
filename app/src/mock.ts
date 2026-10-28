@@ -77,10 +77,6 @@ function push() {
 function base(onboarded: boolean): Snapshot {
   return {
     onboarded,
-    suggestions: [
-      { path: `${HOME}/Music/QQ音乐`, name: "QQ音乐" },
-      { path: `${HOME}/Music/网易云音乐`, name: "网易云音乐" },
-    ],
     folders: onboarded
       ? [
           { path: `${HOME}/Music/QQ音乐`, name: "QQ音乐", accessible: true },

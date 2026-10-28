@@ -24,7 +24,6 @@ impl Fmt {
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
     pub onboarded: bool,
-    pub suggestions: Vec<Suggestion>,
     pub folders: Vec<Folder>,
     pub output_dir: String,
     pub format: Fmt,
@@ -33,12 +32,6 @@ pub struct Snapshot {
     pub notices: Vec<Notice>,
     pub busy: u32,
     pub waiting_login: u32,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct Suggestion {
-    pub path: String,
-    pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]

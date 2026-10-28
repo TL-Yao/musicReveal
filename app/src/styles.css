@@ -220,7 +220,6 @@ html.native .sidebar { background: transparent; backdrop-filter: none; box-shado
 .stage .box .srow { min-height: 40px; }
 .stage .box .srow + .srow { border-top: 0.5px solid var(--sep); border-radius: 0; }
 .stage .box .srow:first-child { border-radius: 7px 7px 0 0; } .stage .box .srow:last-child { border-radius: 0 0 7px 7px; }
-.stage .box .found { font-size: var(--fs-caption); color: var(--green); }
 .cb { width: 16px; height: 16px; border-radius: 4px; background: var(--accent); display: grid; place-items: center; color: #fff; box-shadow: inset 0 0 0 0.5px rgba(0,0,0,.08); }
 .cb svg { width: 10px; height: 10px; }
 .cb.off { background: var(--surface-1); box-shadow: inset 0 0 0 0.5px var(--bezel); color: transparent; }

@@ -22,10 +22,7 @@ const ob = {
 };
 const onboarding = () => !snap!.onboarded;
 const obFolders = () =>
-  [...snap!.suggestions.map((f) => ({ ...f, found: true })), ...ob.extra.map((f) => ({ ...f, found: false }))].map((f) => ({
-    ...f,
-    checked: !ob.unchecked.has(f.path),
-  }));
+  ob.extra.map((f) => ({ ...f, checked: !ob.unchecked.has(f.path) }));
 const outDir = () => (onboarding() ? (ob.outputDir ?? snap!.outputDir) : snap!.outputDir);
 const format = () => (onboarding() ? (ob.format ?? snap!.format) : snap!.format);
 
@@ -137,7 +134,7 @@ function renderSubtitle() {
   let html = "初始设置";
   if (!onboarding()) {
     const n = s.folders.filter((f) => f.accessible).length, bad = s.folders.length - n;
-    html = `<span class="live"></span>监听 ${n} 个文件夹`;
+    html = n ? `<span class="live"></span>监听 ${n} 个文件夹` : "未监听文件夹";
     if (bad) html += ` · ${bad} 个无法访问`;
     const busy = s.jobs.filter((j) => j.state === "decrypt" || j.state === "transcode" || j.state === "metadata").length;
     if (busy) html += ` · ${busy} 首处理中`;
@@ -186,7 +183,7 @@ const dots = () => [1, 2, 3].map((i) => `<i class="${i === ob.step ? "on" : i < 
 function cardHTML(k: string) {
   if (k === "ob1")
     return `<div class="stage-card" data-k="ob1"><div class="steps">${dots()}</div>
-      <h2>选择监听文件夹</h2><p class="lead">文件夹中新下载的歌曲将自动转换。</p>
+      <h2>选择监听文件夹</h2><p class="lead">文件夹中新下载的歌曲将自动转换。也可稍后在侧栏添加。</p>
       <div class="box"></div>
       <div class="cta"><span></span><button class="btn primary lg" id="obNext">继续</button></div></div>`;
   if (k === "ob2")
@@ -205,7 +202,7 @@ function cardHTML(k: string) {
       <div class="cta"><button class="btn quiet" id="obBack">上一步</button><button class="btn primary lg" id="obNext">开始监听</button></div></div>`;
   return `<div class="stage-card empty" data-k="empty">
       <div class="tile" style="--art-a:#55585F;--art-b:#1E2024;--art-c:#9AA0AA;--art-angle:150deg;--dev:0"><div class="art latent"></div><div class="art clear"></div><div class="dash"></div></div>
-      <h2></h2><p>新下载的歌曲将自动转换，也可将文件拖到此处。</p></div>`;
+      <h2></h2><p></p></div>`;
 }
 let boxSig = "";
 function renderStage() {
@@ -227,14 +224,17 @@ function renderStage() {
       $(".box", st).innerHTML =
         fs
           .map(
-            (f) => `<div class="srow" role="button" data-toggle="${esc(f.path)}"><span class="cb ${f.checked ? "" : "off"}">${icon("check")}</span><span><div class="name">${esc(f.name)}</div><div class="path">${esc(tilde(f.path))}</div></span><span class="found">${f.found ? "已检测到" : ""}</span></div>`,
+            (f) => `<div class="srow" role="button" data-toggle="${esc(f.path)}"><span class="cb ${f.checked ? "" : "off"}">${icon("check")}</span><span><div class="name">${esc(f.name)}</div><div class="path">${esc(tilde(f.path))}</div></span><span></span></div>`,
           )
           .join("") +
         `<div class="srow" id="obAdd" role="button"><span class="ico" style="color:var(--text-2)">${icon("plus")}</span><span><div class="name" style="color:var(--text-2)">添加文件夹…</div></span><span></span></div>`;
     }
-    $<HTMLButtonElement>("#obNext").disabled = !fs.some((f) => f.checked);
   }
-  if (k === "empty") $("h2", st).textContent = `正在监听 ${snap!.folders.filter((f) => f.accessible).length} 个文件夹`;
+  if (k === "empty") {
+    const n = snap!.folders.filter((f) => f.accessible).length;
+    $("h2", st).textContent = n ? `正在监听 ${n} 个文件夹` : "未监听文件夹";
+    $("p", st).textContent = n ? "新下载的歌曲将自动转换，也可将文件拖到此处。" : "将文件拖到此处，或在侧栏添加监听文件夹。";
+  }
 }
 function setObStep(n: number) {
   ob.step = Math.max(1, Math.min(3, n));

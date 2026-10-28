@@ -2,8 +2,6 @@
 
 export type Snapshot = {
   onboarded: boolean;
-  /** 引导第 1 步预勾：本机存在的 ~/Music/QQ音乐、~/Music/网易云音乐 */
-  suggestions: { path: string; name: string }[];
   /** accessible=false 时 reason 给出原因（不存在 / 无权限 / 条目超过 5000） */
   folders: { path: string; name: string; accessible: boolean; reason?: string }[];
   outputDir: string;

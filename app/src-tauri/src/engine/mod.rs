@@ -1131,18 +1131,8 @@ impl Engine {
             |f: &dyn Fn(JobState) -> bool| jobs.iter().filter(|j| f(j.state)).count() as u32;
         let busy = count(&|s| unfinished(s) && s != JobState::WaitLogin);
         let waiting_login = count(&|s| s == JobState::WaitLogin);
-        let home = store::home();
         Snapshot {
             onboarded: s.onboarded,
-            suggestions: ["Music/QQ音乐", "Music/网易云音乐"]
-                .iter()
-                .map(|r| home.join(r))
-                .filter(|p| p.is_dir())
-                .map(|p| Suggestion {
-                    name: name_of(&p),
-                    path: p.to_string_lossy().into_owned(),
-                })
-                .collect(),
             folders: s
                 .folders
                 .iter()
