@@ -66,6 +66,8 @@ struct State {
     running: Option<(u64, CancelToken)>,
     /// 已经纳入考虑的文件及其最近的大小与 mtime。
     seen: HashMap<PathBuf, Stat>,
+    /// 通知及其涉及的文件（existingSongs 用）。
+    notices: Vec<(Notice, Vec<Key>)>,
     next_id: u64,
     stopping: bool,
 }
@@ -142,6 +144,64 @@ impl State {
         id
     }
 
+    fn notice(&mut self, kind: NoticeKind, folder: Option<&Path>, files: Vec<Key>) {
+        self.next_id += 1;
+        let n = Notice {
+            id: format!("n{}", self.next_id),
+            kind,
+            folder: folder.map(|f| f.to_string_lossy().into_owned()),
+            count: files.len() as u32,
+        };
+        self.notices.push((n, files));
+    }
+
+    /// 扫描一个监听文件夹，全部记为已见；返回不在处理记录里的文件。
+    fn unknown_in(&mut self, folder: &Path) -> Vec<Key> {
+        let files = scan::scan(folder, &self.settings.output_dir).unwrap_or_default();
+        let mut out = vec![];
+        for (path, stat) in files {
+            self.seen.insert(path.clone(), stat);
+            let k = Key { path, stat };
+            if !self.history.known(&k) {
+                out.push(k);
+            }
+        }
+        out
+    }
+
+    /// 加入监听；已有的旧歌先发通知等用户选择。
+    fn add_folder(&mut self, folder: PathBuf) -> u32 {
+        if self.settings.folders.contains(&folder) {
+            return 0;
+        }
+        self.settings.folders.push(folder.clone());
+        let old = self.unknown_in(&folder);
+        let n = old.len() as u32;
+        if n > 0 {
+            self.notice(NoticeKind::ExistingSongs, Some(&folder), old);
+        }
+        n
+    }
+
+    fn take_notice(&mut self, folder: &Path) -> Vec<Key> {
+        let f = Some(folder.to_string_lossy().into_owned());
+        let mut out = vec![];
+        self.notices.retain_mut(|(n, files)| {
+            let hit = n.kind == NoticeKind::ExistingSongs && n.folder == f;
+            if hit {
+                out.append(files);
+            }
+            !hit
+        });
+        out
+    }
+
+    fn queue_new(&mut self, k: Key, folder: Option<PathBuf>) {
+        self.seen.insert(k.path.clone(), k.stat);
+        let id = self.new_task(k.path, folder, JobState::Queued);
+        self.enqueue(id);
+    }
+
     /// 以当前输出设置入队。
     fn enqueue(&mut self, id: u64) {
         let opts = ConvertOptions {
@@ -180,6 +240,7 @@ impl Engine {
                 queue: VecDeque::new(),
                 running: None,
                 seen: HashMap::new(),
+                notices: vec![],
                 next_id: 0,
                 stopping: false,
             }),
@@ -229,6 +290,18 @@ impl Engine {
         self.edit(|st| {
             st.settings = settings;
             st.history = history;
+            // 补转：关窗期间下载的、上次被中断的
+            let mut n = 0;
+            for folder in st.settings.folders.clone() {
+                for k in st.unknown_in(&folder) {
+                    st.queue_new(k, Some(folder.clone()));
+                    n += 1;
+                }
+            }
+            if n > 0 {
+                st.notice(NoticeKind::CaughtUp, None, vec![]);
+                st.notices.last_mut().unwrap().0.count = n;
+            }
         });
         tokio::spawn(self.clone().worker());
         tokio::spawn(self.clone().emitter());
@@ -397,6 +470,7 @@ impl Engine {
                         st.history.done.extend(done);
                         return Some(st.history.clone());
                     }
+                    Err(ConvertError::Cancelled) => {}
                     Err(ConvertError::Incomplete) => {
                         t.view.state = JobState::Downloading;
                         (t.last, t.same, t.incomplete) = (scan::stat(&t.src), 0, true);
@@ -455,6 +529,89 @@ impl Engine {
                 }
             }
         });
+    }
+
+    pub fn add_watch_folder(&self, path: &str) -> Result<AddFolderResult, String> {
+        if path.trim().is_empty() {
+            return Err("文件夹路径不能为空".into());
+        }
+        let existing = self.edit(|st| st.add_folder(path.into()));
+        self.save_settings();
+        Ok(AddFolderResult { existing })
+    }
+
+    /// 移除监听；该文件夹里还没开始的任务一并移出列表。
+    pub fn remove_watch_folder(&self, path: &str) {
+        let folder = PathBuf::from(path);
+        self.edit(|st| {
+            st.settings.folders.retain(|f| *f != folder);
+            st.take_notice(&folder);
+            st.seen.retain(|p, _| !p.starts_with(&folder));
+            let gone: Vec<u64> = st
+                .tasks
+                .iter()
+                .filter(|t| {
+                    t.folder.as_ref() == Some(&folder)
+                        && matches!(
+                            t.view.state,
+                            JobState::Downloading | JobState::Queued | JobState::WaitLogin
+                        )
+                })
+                .map(|t| id_of(&t.view.id))
+                .collect();
+            st.tasks.retain(|t| !gone.contains(&id_of(&t.view.id)));
+            st.queue.retain(|q| !gone.contains(q));
+        });
+        self.save_settings();
+    }
+
+    pub fn convert_existing(&self, path: &str) {
+        let folder = PathBuf::from(path);
+        self.edit(|st| {
+            for k in st.take_notice(&folder) {
+                st.queue_new(k, Some(folder.clone()));
+            }
+        });
+    }
+
+    pub fn ignore_existing(&self, path: &str) {
+        let h = self.edit(|st| {
+            let files = st.take_notice(Path::new(path));
+            st.history.ignored.extend(files);
+            st.history.clone()
+        });
+        store::save(&self.history_path(), &h);
+    }
+
+    /// 关掉通知；关掉「已有旧歌」的提问等于忽略。
+    pub fn dismiss_notice(&self, id: &str) {
+        let folder = self.lock().notices.iter().find_map(|(n, _)| {
+            (n.id == id && n.kind == NoticeKind::ExistingSongs)
+                .then(|| n.folder.clone())
+                .flatten()
+        });
+        match folder {
+            Some(f) => self.ignore_existing(&f),
+            None => self.edit(|st| st.notices.retain(|(n, _)| n.id != id)),
+        }
+    }
+
+    /// 取消当前任务并等它清理完（最多 3s）。被中断的任务不写记录。
+    pub async fn shutdown(&self) {
+        let tok = self.edit(|st| {
+            st.stopping = true;
+            st.running.as_ref().map(|(_, t)| t.clone())
+        });
+        self.0.wake.notify_one();
+        if let Some(t) = tok {
+            t.cancel();
+            let _ = tokio::time::timeout(Duration::from_secs(3), async {
+                while self.lock().running.is_some() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+        }
     }
 
     pub fn retry_job(&self, id: &str) {
@@ -520,7 +677,7 @@ impl Engine {
             busy,
             waiting_login,
             jobs,
-            notices: vec![],
+            notices: st.notices.iter().map(|(n, _)| n.clone()).collect(),
         }
     }
 
@@ -535,7 +692,10 @@ impl Engine {
             st.settings.onboarded = true;
             st.settings.output_dir = output_dir.into();
             st.settings.format = format;
-            st.settings.folders = folders.into_iter().map(PathBuf::from).collect();
+            st.settings.folders.clear();
+            for f in folders {
+                st.add_folder(f.into());
+            }
         });
         self.save_settings();
         Ok(())

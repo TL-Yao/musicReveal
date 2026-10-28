@@ -368,3 +368,116 @@ async fn output_settings_only_affect_later_jobs_and_dir_is_created() {
     assert_eq!(r.eng.snapshot().output_dir, out2.to_string_lossy());
     assert!(r.eng.set_format("wav").is_err());
 }
+
+fn notices(e: &Engine, kind: NoticeKind) -> Vec<Notice> {
+    e.snapshot()
+        .notices
+        .into_iter()
+        .filter(|n| n.kind == kind)
+        .collect()
+}
+
+#[tokio::test]
+async fn new_folder_asks_about_existing_songs_convert_branch() {
+    let r = Rig::new("existing").await;
+    let lib = r.t.dir("lib");
+    put(&lib, "old1.ncm", b"x");
+    put(&lib, "old2.mflac", b"x");
+    put(&lib, "song.mp3", b"x");
+    let res = r.eng.add_watch_folder(&lib.to_string_lossy()).unwrap();
+    assert_eq!(res.existing, 2);
+    let n = notices(&r.eng, NoticeKind::ExistingSongs);
+    assert_eq!(n.len(), 1);
+    assert_eq!(n[0].count, 2);
+    assert_eq!(n[0].folder.as_deref(), Some(&*lib.to_string_lossy()));
+    // 用户选择前不处理旧歌，但之后的新文件照常处理
+    put(&lib, "new.ncm", b"x");
+    settle(&r.eng);
+    r.wait("new.ncm", JobState::Done).await;
+    assert!(r.job("old1.ncm").is_none());
+    r.eng.convert_existing(&lib.to_string_lossy());
+    r.wait("old1.ncm", JobState::Done).await;
+    r.wait("old2.mflac", JobState::Done).await;
+    assert!(notices(&r.eng, NoticeKind::ExistingSongs).is_empty());
+    assert_eq!(r.fake.calls().len(), 3);
+}
+
+#[tokio::test]
+async fn ignored_existing_songs_are_never_asked_or_caught_up_again() {
+    let r = Rig::new("ignore").await;
+    let lib = r.t.dir("lib");
+    put(&lib, "old.ncm", b"x");
+    assert_eq!(
+        r.eng.add_watch_folder(&lib.to_string_lossy()).unwrap().existing,
+        1
+    );
+    r.eng.ignore_existing(&lib.to_string_lossy());
+    assert!(r.eng.snapshot().notices.is_empty());
+    settle(&r.eng);
+    assert!(r.job("old.ncm").is_none());
+    // 移除再加回：不再提示
+    r.eng.remove_watch_folder(&lib.to_string_lossy());
+    assert_eq!(
+        r.eng.add_watch_folder(&lib.to_string_lossy()).unwrap().existing,
+        0
+    );
+    // 重启：不补转
+    r.eng.shutdown().await;
+    let e2 = engine(&r.t, &r.fake).await;
+    assert!(e2.snapshot().jobs.is_empty());
+    assert!(e2.snapshot().notices.is_empty());
+    assert!(r.fake.calls().is_empty());
+}
+
+#[tokio::test]
+async fn onboarding_folders_follow_the_existing_songs_rule() {
+    let t = Tmp::new("onboard");
+    let fake = Arc::new(Fake::default());
+    let (a, out) = (t.dir("a"), t.dir("out"));
+    put(&a, "x.ncm", b"x");
+    let e = engine(&t, &fake).await;
+    assert!(!e.snapshot().onboarded);
+    e.complete_onboarding(
+        vec![a.to_string_lossy().into()],
+        out.to_string_lossy().into(),
+        "mp3",
+    )
+    .unwrap();
+    let s = e.snapshot();
+    assert!(s.onboarded);
+    assert_eq!(s.format, Fmt::Mp3);
+    assert_eq!(s.folders.len(), 1);
+    assert_eq!(notices(&e, NoticeKind::ExistingSongs)[0].count, 1);
+}
+
+#[tokio::test]
+async fn restart_catches_up_files_missed_while_closed() {
+    let r = Rig::new("catchup").await;
+    put(&r.watch, "a.ncm", b"x");
+    settle(&r.eng);
+    r.wait("a.ncm", JobState::Done).await;
+    r.eng.shutdown().await;
+    // 关窗期间下载了两首
+    put(&r.watch, "b.ncm", b"x");
+    let sub = r.watch.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    put(&sub, "c.mflac", b"x");
+    let e2 = engine(&r.t, &r.fake).await;
+    let n = notices(&e2, NoticeKind::CaughtUp);
+    assert_eq!(n.len(), 1);
+    assert_eq!(n[0].count, 2);
+    for _ in 0..500 {
+        if r.fake.calls().len() == 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let mut calls = r.fake.calls();
+    calls.sort();
+    assert_eq!(calls, vec!["a.ncm", "b.ncm", "c.mflac"]);
+    e2.dismiss_notice(&n[0].id);
+    assert!(e2.snapshot().notices.is_empty());
+    // 设置也恢复了
+    assert!(e2.snapshot().onboarded);
+    assert_eq!(e2.snapshot().output_dir, r.out.to_string_lossy());
+}
