@@ -3,7 +3,7 @@
 
 use aes::cipher::{BlockDecrypt, KeyInit};
 use base64::Engine;
-use reveal_core::{decrypt, sniff, Container, SourceKind};
+use reveal_core::{decrypt, read_track, sniff, Container, Platform, SongId, SourceKind};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -157,4 +157,37 @@ fn all_local_ncm_files_have_sniffable_container() {
     println!("NCM 统计：{stats:?}，失败 {}：{failed:#?}", failed.len());
     assert!(seen > 0, "{} 下没有 .ncm 文件", ncm_dir().display());
     assert!(failed.is_empty());
+}
+
+#[test]
+#[ignore]
+fn real_netease_mp3s_are_plain_with_163_key() {
+    let mut mp3s: Vec<PathBuf> = std::fs::read_dir(ncm_dir())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("mp3"))
+        .collect();
+    mp3s.sort();
+    assert!(mp3s.len() >= 5, "{} 下 .mp3 不足 5 个", ncm_dir().display());
+    // 均匀取 5 个；只读，解出的音频丢进 sink
+    for p in mp3s.iter().step_by(mp3s.len() / 5).take(5) {
+        let kind = sniff(p).unwrap();
+        assert_eq!(kind, SourceKind::Plain(Container::Mp3), "{}", p.display());
+        let t = read_track(p).unwrap();
+        assert!(t.title.is_some(), "{}", p.display());
+        let d = decrypt(p, &kind, None, &mut std::io::sink()).unwrap();
+        assert_eq!(d.meta.platform, Platform::Netease, "{}", p.display());
+        assert!(
+            matches!(d.meta.song_id, Some(SongId::Netease(id)) if id > 0),
+            "{}",
+            p.display()
+        );
+        println!(
+            "{}: {:?} {:?} {}",
+            p.display(),
+            t.title,
+            t.artists,
+            t.quality
+        );
+    }
 }

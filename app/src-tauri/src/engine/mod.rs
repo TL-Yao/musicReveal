@@ -246,10 +246,10 @@ impl State {
             id: format!("j{id}"),
             source: src.to_string_lossy().into_owned(),
             file_name: name_of(&src),
-            platform: if ext.as_deref() == Some("ncm") {
-                Platform::Netease
-            } else {
-                Platform::Qq
+            platform: match ext.as_deref() {
+                Some("ncm") => Platform::Netease,
+                Some("mp3" | "flac" | "ogg" | "m4a" | "wav") => Platform::Other,
+                _ => Platform::Qq,
             },
             state,
             queue_pos: None,
