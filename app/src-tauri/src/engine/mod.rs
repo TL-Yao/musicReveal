@@ -349,13 +349,41 @@ impl Engine {
                     }
                 });
             };
-            let _ = std::fs::create_dir_all(&opts.output_dir);
-            let r = self.0.conv.convert(&src, &opts, &tok, &mut progress).await;
-            self.edit(|st| {
+            let key = scan::stat(&src).map(|stat| Key {
+                path: src.clone(),
+                stat,
+            });
+            let fmt = match opts.format {
+                reveal_core::OutputFormat::Original => Fmt::Original,
+                reveal_core::OutputFormat::Mp3 => Fmt::Mp3,
+            };
+            let reuse = key
+                .as_ref()
+                .and_then(|k| self.lock().history.reusable(k, fmt));
+            let r = match (reuse, std::fs::create_dir_all(&opts.output_dir)) {
+                (Some(out), _) => {
+                    self.edit(|st| {
+                        st.running = None;
+                        if let Some(t) = st.task(id) {
+                            t.view.state = JobState::Skipped;
+                            t.view.output = Some(out.to_string_lossy().into_owned());
+                        }
+                    });
+                    continue;
+                }
+                (None, Err(e)) => Err(ConvertError::Failed(format!("无法创建输出目录：{e}"))),
+                (None, Ok(())) => self.0.conv.convert(&src, &opts, &tok, &mut progress).await,
+            };
+            let record = self.edit(|st| {
                 st.running = None;
-                let Some(t) = st.task(id) else { return };
+                let t = st.task(id)?;
                 match r {
                     Ok(o) => {
+                        let done = key.map(|key| store::Done {
+                            key,
+                            format: fmt,
+                            output: o.output.clone(),
+                        });
                         let v = &mut t.view;
                         v.state = JobState::Done;
                         v.title = o.meta.title;
@@ -366,6 +394,8 @@ impl Engine {
                         v.has_lyrics = o.has_lyrics;
                         v.renamed = o.renamed;
                         v.output = Some(o.output.to_string_lossy().into_owned());
+                        st.history.done.extend(done);
+                        return Some(st.history.clone());
                     }
                     Err(ConvertError::Incomplete) => {
                         t.view.state = JobState::Downloading;
@@ -376,8 +406,55 @@ impl Engine {
                         t.view.error = Some(reason(&e));
                     }
                 }
+                None
             });
+            if let Some(h) = record {
+                store::save(&self.history_path(), &h);
+            }
         }
+    }
+
+    fn save_settings(&self) {
+        let s = self.lock().settings.clone();
+        store::save(&self.settings_path(), &s);
+    }
+
+    pub fn set_output_dir(&self, path: &str) -> Result<(), String> {
+        if path.trim().is_empty() {
+            return Err("输出目录不能为空".into());
+        }
+        self.edit(|st| st.settings.output_dir = path.into());
+        self.save_settings();
+        Ok(())
+    }
+
+    pub fn set_format(&self, format: &str) -> Result<(), String> {
+        let f = Fmt::parse(format)?;
+        self.edit(|st| st.settings.format = f);
+        self.save_settings();
+        Ok(())
+    }
+
+    /// 拖入的文件或文件夹（只看一层），直接入队。
+    pub fn add_files(&self, paths: Vec<String>) {
+        self.edit(|st| {
+            for p in paths.into_iter().map(PathBuf::from) {
+                let files = if p.is_dir() {
+                    scan::shallow(&p)
+                } else if p.is_file() && scan::candidate(&p) {
+                    vec![p]
+                } else {
+                    vec![]
+                };
+                for f in files {
+                    if let Some(s) = scan::stat(&f) {
+                        st.seen.insert(f.clone(), s);
+                    }
+                    let id = st.new_task(f, None, JobState::Queued);
+                    st.enqueue(id);
+                }
+            }
+        });
     }
 
     pub fn retry_job(&self, id: &str) {
@@ -460,9 +537,7 @@ impl Engine {
             st.settings.format = format;
             st.settings.folders = folders.into_iter().map(PathBuf::from).collect();
         });
+        self.save_settings();
         Ok(())
     }
 }
-
-#[allow(dead_code)]
-fn _unused(_: Key) {}
