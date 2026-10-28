@@ -110,7 +110,7 @@ pub use enrich::OnlineEnricher;
 
 pub use convert::{
     convert, find_ffmpeg, strip_timestamps, CancelToken, ConvertError, ConvertOptions,
-    ConvertOutcome, Enricher, Lyrics, NoopEnricher, OutputFormat, Stage, TrackMeta,
+    ConvertOutcome, Enricher, Lyrics, NoopEnricher, OutputFormat, Stage, TrackMeta, PART_PREFIX,
 };
 
 pub use creds::{

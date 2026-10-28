@@ -188,9 +188,9 @@ async fn content_hash(p: PathBuf) -> Option<String> {
     .flatten()
 }
 
-/// reveal-core 的半成品命名：`.<小写十六进制>.part`。
+/// reveal-core 的半成品命名：`.musicreveal-<小写十六进制>.part`。
 fn is_leftover_part(name: &str) -> bool {
-    name.strip_prefix('.')
+    name.strip_prefix(reveal_core::PART_PREFIX)
         .and_then(|n| n.strip_suffix(".part"))
         .is_some_and(|h| {
             !h.is_empty()

@@ -265,13 +265,16 @@ fn io_err(e: std::io::Error) -> ConvertError {
     ConvertError::Failed(format!("读写失败：{e}"))
 }
 
+/// 半成品文件名前缀：`<前缀><小写十六进制>.part`，清理时只认这个形状。
+pub const PART_PREFIX: &str = ".musicreveal-";
+
 /// 本次转换创建的临时文件；无论成功失败，离开作用域时全部删除（成功时已落盘移走）。
 /// 被丢弃时先置 `gone`，让仍在后台跑的阻塞任务知道没人收尾了、自行删除产物。
 #[derive(Default)]
-struct Parts(Vec<PathBuf>, CancelToken);
+pub(crate) struct Parts(Vec<PathBuf>, CancelToken);
 
 impl Parts {
-    fn add(&mut self, dir: &Path) -> PathBuf {
+    pub(crate) fn add(&mut self, dir: &Path) -> PathBuf {
         use std::sync::atomic::AtomicU64;
         static N: AtomicU64 = AtomicU64::new(0);
         let nanos = std::time::SystemTime::now()
@@ -279,7 +282,7 @@ impl Parts {
             .map(|d| d.subsec_nanos())
             .unwrap_or(0);
         let p = dir.join(format!(
-            ".{:x}{nanos:x}{:x}.part",
+            "{PART_PREFIX}{:x}{nanos:x}{:x}.part",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         ));

@@ -1256,12 +1256,18 @@ async fn start_removes_leftover_part_files_only() {
         "a.part",
         ".1a2b.part.bak",
         ".XYZ.part",
+        ".bad.part",
+        ".face.part",
+        ".1a2b3c4d5e6f.part",
+        ".musicreveal-zz.part",
+        ".musicreveal-.part",
+        ".musicreveal-1a2b.part.bak",
         "song.flac",
     ];
     for n in keep {
         put(&r.out, n, b"x");
     }
-    put(&r.out, ".1a2b3c4d5e6f.part", b"half");
+    put(&r.out, ".musicreveal-1a2b3c4d5e6f.part", b"half");
     let _e2 = engine(&r.t, &r.fake).await;
     let mut left: Vec<String> = std::fs::read_dir(&r.out)
         .unwrap()
