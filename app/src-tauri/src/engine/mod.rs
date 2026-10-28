@@ -205,9 +205,23 @@ impl State {
         self.notices.push((n, files));
     }
 
+    /// 扫描监听文件夹并更新它的可访问状态。
+    fn scan_folder(&mut self, folder: &Path) -> Vec<(PathBuf, Stat)> {
+        match scan::scan(folder, &self.settings.output_dir) {
+            Ok(f) => {
+                self.folder_err.remove(folder);
+                f
+            }
+            Err(e) => {
+                self.folder_err.insert(folder.to_path_buf(), e);
+                vec![]
+            }
+        }
+    }
+
     /// 扫描一个监听文件夹，全部记为已见；返回不在处理记录里的文件。
     fn unknown_in(&mut self, folder: &Path) -> Vec<Key> {
-        let files = scan::scan(folder, &self.settings.output_dir).unwrap_or_default();
+        let files = self.scan_folder(folder);
         let mut out = vec![];
         for (path, stat) in files {
             self.seen.insert(path.clone(), stat);
@@ -229,11 +243,13 @@ impl State {
         let n = old.len() as u32;
         if n > 0 {
             self.notice(NoticeKind::ExistingSongs, Some(&folder), old);
+            self.history.pending.push(folder);
         }
         n
     }
 
     fn take_notice(&mut self, folder: &Path) -> Vec<Key> {
+        self.history.pending.retain(|p| p != folder);
         let f = Some(folder.to_string_lossy().into_owned());
         let mut out = vec![];
         self.notices.retain_mut(|(n, files)| {
@@ -379,7 +395,16 @@ impl Engine {
             // 补转：关窗期间下载的、上次被中断的
             let mut n = 0;
             for folder in st.settings.folders.clone() {
-                for k in st.unknown_in(&folder) {
+                let unknown = st.unknown_in(&folder);
+                if st.history.pending.contains(&folder) {
+                    if unknown.is_empty() {
+                        st.history.pending.retain(|p| *p != folder);
+                    } else {
+                        st.notice(NoticeKind::ExistingSongs, Some(&folder), unknown);
+                    }
+                    continue;
+                }
+                for k in unknown {
                     st.queue_new(k, Some(folder.clone()));
                     n += 1;
                 }
@@ -406,6 +431,7 @@ impl Engine {
     }
 
     async fn emitter(self) {
+        let mut last = None;
         loop {
             self.0.dirty.notified().await;
             // 合并 50ms 内的连续变化
@@ -413,7 +439,11 @@ impl Engine {
             if self.lock().stopping {
                 return;
             }
-            (self.0.on_change)(self.snapshot());
+            let s = self.snapshot();
+            if last.as_ref() != Some(&s) {
+                (self.0.on_change)(s.clone());
+                last = Some(s);
+            }
         }
     }
 
@@ -441,6 +471,9 @@ impl Engine {
                     t.view.error = Some(reason(&ConvertError::Incomplete));
                 }
             }
+            // 下载器的临时文件被改名或删掉了
+            st.tasks
+                .retain(|t| t.view.state != JobState::Downloading || t.last.is_some());
             let ready: Vec<u64> = st
                 .tasks
                 .iter()
@@ -450,18 +483,8 @@ impl Engine {
             for id in ready {
                 st.enqueue(id);
             }
-            let skip = st.settings.output_dir.clone();
             for folder in st.settings.folders.clone() {
-                let files = match scan::scan(&folder, &skip) {
-                    Ok(f) => {
-                        st.folder_err.remove(&folder);
-                        f
-                    }
-                    Err(e) => {
-                        st.folder_err.insert(folder, e);
-                        continue;
-                    }
-                };
+                let files = st.scan_folder(&folder);
                 for (p, s) in files {
                     if st.seen.get(&p) == Some(&s) {
                         continue;
@@ -491,12 +514,15 @@ impl Engine {
                 if st.stopping {
                     return None;
                 }
-                let id = st.queue.pop_front()?;
-                let tok = CancelToken::default();
-                st.running = Some((id, tok.clone()));
-                let t = st.task(id)?;
-                t.view.state = JobState::Decrypt;
-                Some((id, t.src.clone(), t.opts.clone()?, tok))
+                while let Some(id) = st.queue.pop_front() {
+                    let Some(t) = st.task(id) else { continue };
+                    let Some(opts) = t.opts.clone() else { continue };
+                    t.view.state = JobState::Decrypt;
+                    let (src, tok) = (t.src.clone(), CancelToken::default());
+                    st.running = Some((id, tok.clone()));
+                    return Some((id, src, opts, tok));
+                }
+                None
             });
             let Some((id, src, opts, tok)) = next else {
                 if self.lock().stopping {
@@ -602,8 +628,12 @@ impl Engine {
     }
 
     fn save_settings(&self) {
-        let s = self.lock().settings.clone();
+        let (s, h) = {
+            let st = self.lock();
+            (st.settings.clone(), st.history.clone())
+        };
         store::save(&self.settings_path(), &s);
+        store::save(&self.history_path(), &h);
     }
 
     pub fn set_output_dir(&self, path: &str) -> Result<(), String> {
@@ -686,6 +716,7 @@ impl Engine {
                 st.queue_new(k, Some(folder.clone()));
             }
         });
+        self.save_settings();
     }
 
     pub fn ignore_existing(&self, path: &str) {
@@ -807,8 +838,17 @@ impl Engine {
         });
     }
 
+    /// 失败或等登录的任务重新入队。
     pub fn retry_job(&self, id: &str) {
-        self.edit(|st| st.enqueue(id_of(id)));
+        let id = id_of(id);
+        self.edit(|st| {
+            if st
+                .task(id)
+                .is_some_and(|t| matches!(t.view.state, JobState::Failed | JobState::WaitLogin))
+            {
+                st.enqueue(id);
+            }
+        });
     }
 
     pub fn remove_job(&self, id: &str) {

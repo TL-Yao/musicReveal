@@ -758,3 +758,39 @@ async fn on_change_receives_snapshots() {
     let json = serde_json::to_value(got.last().unwrap()).unwrap();
     assert!(json.get("outputDir").is_some() && json.get("waitingLogin").is_some());
 }
+
+#[tokio::test]
+async fn unanswered_existing_songs_question_survives_restart() {
+    let r = Rig::new("pending").await;
+    let lib = r.t.dir("lib");
+    put(&lib, "old.ncm", b"x");
+    r.eng.add_watch_folder(&lib.to_string_lossy()).unwrap();
+    r.eng.shutdown().await;
+    let e2 = engine(&r.t, &r.fake).await;
+    assert!(notices(&e2, NoticeKind::CaughtUp).is_empty());
+    let n = notices(&e2, NoticeKind::ExistingSongs);
+    assert_eq!(n.len(), 1);
+    assert_eq!(n[0].count, 1);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(r.fake.calls().is_empty());
+    e2.convert_existing(&lib.to_string_lossy());
+    for _ in 0..500 {
+        if r.fake.calls().len() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(r.fake.calls(), vec!["old.ncm"]);
+}
+
+#[tokio::test]
+async fn vanished_download_is_dropped_from_the_list() {
+    let r = Rig::new("vanish").await;
+    let p = put(&r.watch, "tmp.ncm", b"x");
+    r.eng.tick();
+    assert_eq!(r.state("tmp.ncm"), Some(JobState::Downloading));
+    std::fs::remove_file(&p).unwrap();
+    r.eng.tick();
+    assert!(r.job("tmp.ncm").is_none());
+    assert!(r.fake.calls().is_empty());
+}

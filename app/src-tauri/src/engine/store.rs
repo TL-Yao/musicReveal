@@ -52,6 +52,8 @@ pub struct Done {
 pub struct History {
     pub done: Vec<Done>,
     pub ignored: Vec<Key>,
+    /// 「要转换已有的歌吗」还没回答的文件夹。
+    pub pending: Vec<PathBuf>,
 }
 
 impl History {
