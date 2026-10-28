@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -160,6 +160,31 @@ fn read_head(f: &mut File, n: usize) -> Result<Vec<u8>, Error> {
     Ok(v)
 }
 
+fn read_tail(f: &mut File) -> Result<Vec<u8>, Error> {
+    let len = f.metadata()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(qmc::TAIL)))?;
+    read_head(f, qmc::TAIL as usize)
+}
+
+/// QMC2：按文件尾确定音频长度，用 ekey 派生的主密钥流式解密。
+fn decrypt_qmc2(
+    mut f: File,
+    ekey: &str,
+    bad: fn() -> Error,
+    out: &mut dyn Write,
+) -> Result<Container, Error> {
+    let len = f.metadata()?.len();
+    let ft = qmc::parse_footer(&read_tail(&mut f)?)?.ok_or(Error::Incomplete)?;
+    let cipher = qmc::Cipher::new(&qmc::derive_key(ekey).ok_or_else(bad)?);
+    f.seek(SeekFrom::Start(0))?;
+    pump(
+        f.take(len - ft.size),
+        out,
+        |b, o| cipher.xor(b, o),
+        || Err(bad()),
+    )
+}
+
 pub fn sniff(path: &Path) -> Result<SourceKind, Error> {
     let mut f = File::open(path)?;
     let head = read_head(&mut f, 16)?;
@@ -182,11 +207,16 @@ pub fn sniff(path: &Path) -> Result<SourceKind, Error> {
     if head.is_empty() {
         return Err(Error::Incomplete);
     }
+    if v2 {
+        if let Some(ft) = qmc::parse_footer(&read_tail(&mut f)?)? {
+            return Ok(SourceKind::QmcV2 { ekey: ft.ekey });
+        }
+    }
     if let Some(c) = sniff_container(&head) {
         return Ok(SourceKind::Plain(c));
     }
     let mut h = head.clone();
-    qmc::Cipher::Static.xor(&mut h, 0);
+    qmc::Cipher::static_v1().xor(&mut h, 0);
     if v1 || sniff_container(&h).is_some() {
         return Ok(SourceKind::QmcV1);
     }
@@ -216,8 +246,17 @@ pub fn decrypt(
     let corrupt = || Err(Error::Corrupt("解密后不是可识别的音频".into()));
     let container = match kind {
         SourceKind::Ncm => return ncm::decrypt(f, out),
-        SourceKind::QmcV1 => pump(f, out, |b, o| qmc::Cipher::Static.xor(b, o), corrupt)?,
+        SourceKind::QmcV1 => {
+            let c = qmc::Cipher::static_v1();
+            pump(f, out, |b, o| c.xor(b, o), corrupt)?
+        }
         SourceKind::Plain(_) => pump(f, out, |_, _| {}, corrupt)?,
+        SourceKind::QmcV2 { ekey } => decrypt_qmc2(
+            f,
+            ekey,
+            || Error::Corrupt("内嵌 ekey 无法解密该文件".into()),
+            out,
+        )?,
         _ => return Err(Error::Unsupported("未实现".into())),
     };
     Ok(Decrypted {

@@ -190,7 +190,7 @@ fn qq_empty() -> EmbeddedMeta {
 fn static_key_known_answer() {
     let mask = |off: u64| {
         let mut b = [0u8; 4];
-        crate::qmc::Cipher::Static.xor(&mut b, off);
+        crate::qmc::Cipher::static_v1().xor(&mut b, off);
         b
     };
     assert_eq!(mask(0), [0xC3, 0x4A, 0xD6, 0xCA]);
@@ -202,7 +202,7 @@ fn static_key_known_answer() {
 fn qmc_v1_decrypts_across_boundary() {
     let t = Tmp::new("v1");
     let plain = audio(b"fLaC", 200_000);
-    let p = t.write("a.bkcflac", &enc(&crate::qmc::Cipher::Static, &plain));
+    let p = t.write("a.bkcflac", &enc(&crate::qmc::Cipher::static_v1(), &plain));
     let (kind, d, out) = run(&p, None).unwrap();
     assert_eq!(kind, SourceKind::QmcV1);
     assert!(out == plain);
@@ -214,7 +214,7 @@ fn qmc_v1_decrypts_across_boundary() {
 fn renamed_v1_without_footer_is_v1() {
     let t = Tmp::new("v1r");
     let plain = audio(b"OggS", 50_000);
-    let p = t.write("a.qmcogg", &enc(&crate::qmc::Cipher::Static, &plain));
+    let p = t.write("a.qmcogg", &enc(&crate::qmc::Cipher::static_v1(), &plain));
     let (kind, d, out) = run(&p, None).unwrap();
     assert_eq!(kind, SourceKind::QmcV1);
     assert!(out == plain);
@@ -230,4 +230,176 @@ fn plain_audio_with_encrypted_extension() {
     assert_eq!(kind, SourceKind::Plain(Container::Flac));
     assert!(out == plain);
     assert_eq!(d.container, Container::Flac);
+}
+
+// ---------- QMC v2（QTag / PcV1Legacy，Map / RC4，ekey v1 / EncV2）----------
+
+const SIMPLE_KEY: [u8; 8] = [0x69, 0x56, 0x46, 0x38, 0x2b, 0x20, 0x15, 0x0b];
+const ENC_V2_KEY1: &[u8; 16] = b"386ZJY!@#*$%^&)(";
+const ENC_V2_KEY2: &[u8; 16] = b"**#!(#$%&^a1cZ,T";
+
+/// Tencent TEA tweaked-CBC 加密（builders.py `tea_cbc_encrypt`，盐全 0）。
+fn tea_cbc_encrypt(plain: &[u8], key: &[u8; 16]) -> Vec<u8> {
+    let k: [u32; 4] =
+        std::array::from_fn(|i| u32::from_be_bytes(key[i * 4..i * 4 + 4].try_into().unwrap()));
+    let mix = |v: u32, s: u32, a: u32, b: u32| {
+        (v << 4).wrapping_add(a) ^ (v >> 5).wrapping_add(b) ^ s.wrapping_add(v)
+    };
+    let enc_block = |blk: u64| {
+        let (mut hi, mut lo) = ((blk >> 32) as u32, blk as u32);
+        let mut s = 0u32;
+        for _ in 0..16 {
+            s = s.wrapping_add(0x9E37_79B9);
+            hi = hi.wrapping_add(mix(lo, s, k[0], k[1]));
+            lo = lo.wrapping_add(mix(hi, s, k[2], k[3]));
+        }
+        (u64::from(hi) << 32) | u64::from(lo)
+    };
+    let pad = (8 - ((10 + plain.len()) & 7)) & 7;
+    let mut data = vec![0u8; 1 + pad + 2];
+    data[0] = pad as u8;
+    data.extend(plain);
+    data.extend([0u8; 7]);
+    let (mut iv1, mut iv2) = (0u64, 0u64);
+    let mut out = Vec::with_capacity(data.len());
+    for ch in data.chunks(8) {
+        let b = u64::from_be_bytes(ch.try_into().unwrap());
+        let next = b ^ iv1;
+        let c = enc_block(next) ^ iv2;
+        iv1 = c;
+        iv2 = next;
+        out.extend(c.to_be_bytes());
+    }
+    out
+}
+
+fn make_ekey_v1(master: &[u8]) -> String {
+    let mut tk = [0u8; 16];
+    for i in 0..8 {
+        tk[i * 2] = SIMPLE_KEY[i];
+        tk[i * 2 + 1] = master[i];
+    }
+    b64(&[&master[..8], &tea_cbc_encrypt(&master[8..], &tk)[..]].concat())
+}
+
+fn make_ekey_v2(master: &[u8]) -> String {
+    let inner = make_ekey_v1(master);
+    let layer = tea_cbc_encrypt(&tea_cbc_encrypt(inner.as_bytes(), ENC_V2_KEY2), ENC_V2_KEY1);
+    b64(&[&b"QQMusic EncV2,Key:"[..], &layer].concat())
+}
+
+fn qtag(enc: &[u8], ekey: &str) -> Vec<u8> {
+    let csv = format!("{ekey},12345,2");
+    [
+        enc,
+        csv.as_bytes(),
+        &(csv.len() as u32).to_be_bytes(),
+        b"QTag",
+    ]
+    .concat()
+}
+
+fn pc_legacy(enc: &[u8], ekey: &str) -> Vec<u8> {
+    [enc, ekey.as_bytes(), &(ekey.len() as u32).to_le_bytes()].concat()
+}
+
+fn qmc2(master: &[u8], plain: &[u8]) -> Vec<u8> {
+    enc(&crate::qmc::Cipher::new(master), plain)
+}
+
+#[test]
+fn map_known_answer() {
+    // qmunlock qmc2.rs map_matches_qmstreamencrypt_mapl
+    let mut v = [0u8; 16];
+    crate::qmc::Cipher::new(b"ABCDEFGHIJKLMNOP").xor(&mut v, 0);
+    assert_eq!(
+        v,
+        [
+            0x3f, 0x8a, 0xc1, 0x49, 0x3f, 0x49, 0xc1, 0x8a, 0x3f, 0x8a, 0xc1, 0x49, 0x3f, 0x49,
+            0xc1, 0x8a
+        ]
+    );
+}
+
+#[test]
+fn rc4_known_answer() {
+    // 参考 Python Rc4Stream 对 512 字节密钥输出的密钥流
+    let key: Vec<u8> = (0..512).map(|i| ((i * 37 + 11) & 0xff) as u8).collect();
+    let mut ks = vec![0u8; 0x3000];
+    crate::qmc::Cipher::new(&key).xor(&mut ks, 0);
+    let want = [
+        (0, 237),
+        (1, 228),
+        (127, 255),
+        (128, 248),
+        (5119, 195),
+        (5120, 12),
+        (5121, 171),
+        (10240, 39),
+        (12000, 123),
+    ];
+    for (o, b) in want {
+        assert_eq!(ks[o], b, "offset {o}");
+    }
+    // 从中途偏移开始解密，结果与整段一致
+    let mut tail = vec![0u8; 0x3000 - 5000];
+    crate::qmc::Cipher::new(&key).xor(&mut tail, 5000);
+    assert!(tail == ks[5000..]);
+}
+
+#[test]
+fn python_generated_ekeys_decrypt() {
+    let master: Vec<u8> = (0..16).collect();
+    let v1 = "AAECAwQFBgeBzTnbw+nPorrHOcngVrnWGcZGCK4Pm2Q=";
+    let v2 = "UVFNdXNpYyBFbmNWMixLZXk6cK1WMq9P7V5Ywyhh4Hmh14562uFpZK9n6q8ZFrWorXb7SKCsiuR9UbU0Gaeo3sCDMSeFvr2yJi/TzhdagaBUVnqmYNiNfQbM";
+    assert_eq!(make_ekey_v1(&master), v1);
+    let t = Tmp::new("pyekey");
+    let plain = mp3(10_000);
+    for (i, ek) in [v1, v2].into_iter().enumerate() {
+        let p = t.write(&format!("{i}.mflac"), &qtag(&qmc2(&master, &plain), ek));
+        let (kind, _, out) = run(&p, None).unwrap();
+        assert_eq!(kind, SourceKind::QmcV2 { ekey: ek.into() });
+        assert!(out == plain);
+    }
+}
+
+#[test]
+fn qmc_v2_map_and_rc4_with_both_footers_and_ekey_versions() {
+    let t = Tmp::new("v2");
+    let map_key: Vec<u8> = (0..256).map(|i| (i * 7 + 1) as u8).collect();
+    // 600 字节：n ≠ 512 覆盖段密钥 % n；EncV2 编码后仍在 PcV1Legacy 0x500 长度上限内
+    let rc4_key: Vec<u8> = (0..600).map(|i| (i * 13 + 5) as u8).collect();
+    let plain = audio(b"fLaC", 300_000);
+    let mut n = 0;
+    for master in [&map_key, &rc4_key] {
+        for ekey in [make_ekey_v1(master), make_ekey_v2(master)] {
+            for footer in [qtag, pc_legacy] {
+                n += 1;
+                let p = t.write(&format!("{n}.mgg"), &footer(&qmc2(master, &plain), &ekey));
+                let (kind, d, out) = run(&p, None).unwrap();
+                assert_eq!(kind, SourceKind::QmcV2 { ekey: ekey.clone() }, "case {n}");
+                assert!(out == plain, "case {n}");
+                assert_eq!(d.container, Container::Flac);
+                assert_eq!(d.meta, qq_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn stag_is_unsupported() {
+    let t = Tmp::new("stag");
+    let csv = b"123,2,003TestMid";
+    let data = [
+        &mp3(5000)[..],
+        csv,
+        &(csv.len() as u32).to_be_bytes(),
+        b"STag",
+    ]
+    .concat();
+    let p = t.write("a.mflac", &data);
+    match sniff(&p) {
+        Err(Error::Unsupported(msg)) => assert!(msg.contains("STag"), "{msg}"),
+        other => panic!("{other:?}"),
+    }
 }
