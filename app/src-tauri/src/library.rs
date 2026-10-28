@@ -286,8 +286,7 @@ impl Worker {
         let mut recs: Vec<Rec> = store::load(&file);
         // 缩略图没了的条目重读；没人用的缩略图删掉
         recs.retain(|r| r.cover.as_ref().is_none_or(|n| covers.join(n).exists()));
-        let used: std::collections::HashSet<&str> =
-            recs.iter().filter_map(|r| r.cover.as_deref()).collect();
+        let used: HashSet<&str> = recs.iter().filter_map(|r| r.cover.as_deref()).collect();
         for e in std::fs::read_dir(&covers).into_iter().flatten().flatten() {
             if !used.contains(&*e.file_name().to_string_lossy()) {
                 let _ = std::fs::remove_file(e.path());
