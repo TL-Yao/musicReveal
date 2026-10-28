@@ -12,13 +12,14 @@ LAME_SHA256=ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e
 LAME_URL="https://downloads.sourceforge.net/project/lame/lame/${LAME_VER}/lame-${LAME_VER}.tar.gz"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SELF="$ROOT/scripts/build-ffmpeg.sh"
 BASE="$ROOT/build/ffmpeg"
 DL="$BASE/dl"
 OUT="$BASE/out"
 WORK="$BASE/work"
 
 if [[ "${1:-}" != "--force" && -x "$OUT/ffmpeg" && -f "$OUT/licenses/SOURCE.md" ]] \
-  && cmp -s "$0" "$OUT/licenses/build-ffmpeg.sh"; then
+  && cmp -s "$SELF" "$OUT/licenses/build-ffmpeg.sh"; then
   echo "ffmpeg 已构建：$OUT/ffmpeg"
   exit 0
 fi
@@ -94,7 +95,7 @@ fi
 cp COPYING.LGPLv2.1 "$OUT/licenses/ffmpeg-COPYING.LGPLv2.1"
 cp LICENSE.md "$OUT/licenses/ffmpeg-LICENSE.md"
 cp "$WORK/lame-${LAME_VER}/COPYING" "$OUT/licenses/LAME-COPYING"
-cp "$0" "$OUT/licenses/build-ffmpeg.sh"
+cp "$SELF" "$OUT/licenses/build-ffmpeg.sh"
 LICENSE_LINE="$(grep -o '^License:.*' "$WORK/configure.log")"
 cat >"$OUT/licenses/SOURCE.md" <<EOF
 # 随附 ffmpeg 的来源说明
