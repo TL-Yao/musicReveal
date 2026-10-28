@@ -41,14 +41,23 @@ pub fn candidate(p: &Path) -> bool {
 /// 监听扫描。`Err` 是给用户看的「不可访问」原因。
 pub fn scan(root: &Path, skip: &Path) -> Result<Vec<(PathBuf, Stat)>, String> {
     let mut out = vec![];
-    let mut n = 0;
-    walk(root, 0, skip, &mut n, &mut out)?;
+    walk(root, 0, MAX_DEPTH, skip, &mut 0, &mut out)?;
     Ok(out)
+}
+
+/// 拖入的文件夹：只看一层，规则同监听扫描；超过条目上限时只取已看到的部分。
+pub fn shallow(dir: &Path, skip: &Path) -> Vec<(PathBuf, Stat)> {
+    let mut out = vec![];
+    if !dir.starts_with(skip) {
+        let _ = walk(dir, 0, 0, skip, &mut 0, &mut out);
+    }
+    out
 }
 
 fn walk(
     dir: &Path,
     depth: u32,
+    max_depth: u32,
     skip: &Path,
     n: &mut u32,
     out: &mut Vec<(PathBuf, Stat)>,
@@ -75,8 +84,8 @@ fn walk(
             continue;
         }
         if ft.is_dir() {
-            if depth < MAX_DEPTH && !p.starts_with(skip) {
-                walk(&p, depth + 1, skip, n, out)?;
+            if depth < max_depth && !p.starts_with(skip) {
+                walk(&p, depth + 1, max_depth, skip, n, out)?;
             }
         } else if ft.is_file() && candidate(&p) {
             if let Some(s) = stat(&p) {
@@ -85,15 +94,4 @@ fn walk(
         }
     }
     Ok(())
-}
-
-/// 拖入的文件夹：只看一层。
-pub fn shallow(dir: &Path) -> Vec<PathBuf> {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return vec![];
-    };
-    rd.flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_file() && candidate(p))
-        .collect()
 }

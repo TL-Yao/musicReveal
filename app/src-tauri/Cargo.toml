@@ -21,4 +21,4 @@ async-trait = "0.1.92"
 tokio = { version = "1.54.1", features = ["rt", "macros", "process", "time", "sync"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["rt-multi-thread", "test-util"] }

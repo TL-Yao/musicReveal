@@ -48,6 +48,10 @@ struct Fake {
     cover: Mutex<Option<Vec<u8>>>,
     hold: AtomicBool,
     release: AtomicBool,
+    /// 返回脚本里的 Incomplete 之前先给源文件追加一个字节（转换期间文件还在长）。
+    grow: AtomicBool,
+    /// 不理会取消：留下 .part，5s 后照样成功；future 被丢弃时删掉 .part。
+    stubborn: AtomicBool,
     calls: Mutex<Vec<String>>,
 }
 
@@ -77,6 +81,18 @@ impl Converter for Fake {
         let name = input.file_name().unwrap().to_string_lossy().to_string();
         self.calls.lock().unwrap().push(name.clone());
         progress(Stage::Decrypt);
+        if self.stubborn.load(Ordering::SeqCst) {
+            struct Part(PathBuf);
+            impl Drop for Part {
+                fn drop(&mut self) {
+                    let _ = std::fs::remove_file(&self.0);
+                }
+            }
+            let part = Part(opts.output_dir.join(format!(".{name}.part")));
+            std::fs::write(&part.0, b"half").unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            drop(part);
+        }
         while self.hold.load(Ordering::SeqCst) && !self.release.load(Ordering::SeqCst) {
             if cancel.is_cancelled() {
                 return Err(ConvertError::Cancelled);
@@ -90,6 +106,9 @@ impl Converter for Fake {
             .get_mut(&name)
             .and_then(|q| q.pop_front())
         {
+            if e == ConvertError::Incomplete && self.grow.load(Ordering::SeqCst) {
+                append(input, b"+");
+            }
             return Err(e);
         }
         progress(Stage::Metadata);
@@ -793,4 +812,300 @@ async fn vanished_download_is_dropped_from_the_list() {
     r.eng.tick();
     assert!(r.job("tmp.ncm").is_none());
     assert!(r.fake.calls().is_empty());
+}
+
+fn history_text(t: &Tmp) -> String {
+    std::fs::read_to_string(t.0.join("data/history.json")).unwrap_or_default()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_saves_never_leave_broken_or_stale_files() {
+    let r = Rig::new("concurrent").await;
+    let data = r.t.0.join("data");
+    let stop = Arc::new(AtomicBool::new(false));
+    let reader = {
+        let (data, stop) = (data.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut bad = vec![];
+            while !stop.load(Ordering::SeqCst) {
+                for f in ["settings.json", "history.json"] {
+                    if let Ok(b) = std::fs::read(data.join(f)) {
+                        if serde_json::from_slice::<serde_json::Value>(&b).is_err() {
+                            bad.push(f);
+                        }
+                    }
+                }
+            }
+            bad
+        })
+    };
+    let mut hs = vec![];
+    for i in 0..8 {
+        let e = r.eng.clone();
+        let lib = r.t.dir(&format!("lib{i}"));
+        put(&lib, "old.ncm", b"x");
+        hs.push(tokio::task::spawn_blocking(move || {
+            let lib = lib.to_string_lossy().to_string();
+            for k in 0..40 {
+                e.set_format(if (i + k) % 2 == 0 { "mp3" } else { "original" })
+                    .unwrap();
+                e.add_watch_folder(&lib).unwrap();
+                e.remove_watch_folder(&lib);
+            }
+        }));
+    }
+    for h in hs {
+        h.await.unwrap();
+    }
+    stop.store(true, Ordering::SeqCst);
+    assert_eq!(reader.join().unwrap(), Vec::<&str>::new(), "读到坏 JSON");
+    let leftovers: Vec<_> = std::fs::read_dir(&data)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(data.join("settings.json")).unwrap()).unwrap();
+    let fmt = serde_json::to_value(r.eng.snapshot().format).unwrap();
+    assert_eq!(saved["format"], fmt, "落盘的不是最新设置");
+}
+
+#[tokio::test]
+async fn queued_file_that_changes_goes_back_to_downloading() {
+    let r = Rig::new("requeue").await;
+    r.fake.hold.store(true, Ordering::SeqCst);
+    let a = put(&r.t.0, "a.ncm", b"x");
+    r.eng.add_files(vec![a.to_string_lossy().into()]);
+    r.wait("a.ncm", JobState::Decrypt).await;
+    let b = put(&r.watch, "b.ncm", b"x");
+    settle(&r.eng);
+    assert_eq!(r.state("b.ncm"), Some(JobState::Queued));
+    // 排队期间又在变：退回下载中，重新判稳定
+    append(&b, b"2");
+    r.eng.tick();
+    assert_eq!(r.state("b.ncm"), Some(JobState::Downloading));
+    r.eng.tick();
+    assert_eq!(r.state("b.ncm"), Some(JobState::Queued));
+    // 轮到它之前又变了一次（没等到下一次轮询）：开转前再核一次
+    append(&b, b"3");
+    r.fake.release.store(true, Ordering::SeqCst);
+    r.wait("b.ncm", JobState::Downloading).await;
+    assert_eq!(r.fake.calls(), vec!["a.ncm"]);
+    settle(&r.eng);
+    r.wait("b.ncm", JobState::Done).await;
+    assert_eq!(r.fake.calls(), vec!["a.ncm", "b.ncm"]);
+}
+
+#[tokio::test]
+async fn existing_song_waiting_for_an_answer_is_untouched_even_if_it_changes() {
+    let r = Rig::new("held").await;
+    let lib = r.t.dir("lib");
+    let old = put(&lib, "old.ncm", b"x");
+    assert_eq!(
+        r.eng
+            .add_watch_folder(&lib.to_string_lossy())
+            .unwrap()
+            .existing,
+        1
+    );
+    append(&old, b"2");
+    for _ in 0..3 {
+        r.eng.tick();
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(r.job("old.ncm").is_none());
+    assert!(r.fake.calls().is_empty());
+    r.eng.convert_existing(&lib.to_string_lossy());
+    settle(&r.eng);
+    r.wait("old.ncm", JobState::Done).await;
+    assert_eq!(r.fake.calls(), vec!["old.ncm"]);
+}
+
+#[tokio::test]
+async fn incomplete_baseline_is_the_stat_when_conversion_started() {
+    let r = Rig::new("baseline").await;
+    r.fake.grow.store(true, Ordering::SeqCst);
+    r.fake.fail("g.mflac", ConvertError::Incomplete);
+    put(&r.watch, "g.mflac", b"1");
+    settle(&r.eng);
+    r.wait("g.mflac", JobState::Downloading).await;
+    assert_eq!(r.fake.calls().len(), 1);
+    // 转换期间文件长了：这算「再变化」，稳定后应重试
+    settle(&r.eng);
+    r.wait("g.mflac", JobState::Done).await;
+    assert_eq!(r.fake.calls().len(), 2);
+}
+
+#[tokio::test]
+async fn restart_asks_only_about_the_original_existing_songs() {
+    let r = Rig::new("pendingset").await;
+    let lib = r.t.dir("lib");
+    put(&lib, "old.ncm", b"x");
+    r.eng.add_watch_folder(&lib.to_string_lossy()).unwrap();
+    r.eng.shutdown().await;
+    // 关窗期间新下载的
+    put(&lib, "new.ncm", b"x");
+    let e2 = engine(&r.t, &r.fake).await;
+    assert_eq!(notices(&e2, NoticeKind::ExistingSongs)[0].count, 1);
+    assert_eq!(notices(&e2, NoticeKind::CaughtUp)[0].count, 1);
+    for _ in 0..500 {
+        if !r.fake.calls().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(r.fake.calls(), vec!["new.ncm"]);
+}
+
+#[tokio::test]
+async fn same_source_is_not_listed_twice_while_unfinished() {
+    let r = Rig::new("dedupe").await;
+    r.fake.hold.store(true, Ordering::SeqCst);
+    let a = put(&r.t.0, "a.ncm", b"x");
+    let b = put(&r.t.0, "b.ncm", b"x");
+    let w = put(&r.watch, "w.ncm", b"x");
+    let add = |p: &Path| r.eng.add_files(vec![p.to_string_lossy().into()]);
+    add(&a);
+    r.wait("a.ncm", JobState::Decrypt).await;
+    add(&a);
+    add(&b);
+    add(&b);
+    add(&w);
+    settle(&r.eng);
+    let names: Vec<String> = r
+        .eng
+        .snapshot()
+        .jobs
+        .into_iter()
+        .map(|j| j.file_name)
+        .collect();
+    assert_eq!(names, vec!["w.ncm", "b.ncm", "a.ncm"]);
+    r.fake.release.store(true, Ordering::SeqCst);
+    r.wait("w.ncm", JobState::Done).await;
+    // 失败的再拖进来：重新入队，不另建
+    r.fake.fail("c.ncm", ConvertError::Failed("坏了".into()));
+    let c = put(&r.t.0, "c.ncm", b"x");
+    add(&c);
+    r.wait("c.ncm", JobState::Failed).await;
+    add(&c);
+    r.wait("c.ncm", JobState::Done).await;
+    assert_eq!(r.eng.snapshot().jobs.len(), 4);
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_drops_a_conversion_that_ignores_cancel() {
+    let r = Rig::new("stubborn").await;
+    r.fake.stubborn.store(true, Ordering::SeqCst);
+    put(&r.watch, "s.ncm", b"x");
+    settle(&r.eng);
+    r.wait("s.ncm", JobState::Decrypt).await;
+    assert!(r.out.join(".s.ncm.part").exists());
+    r.eng.shutdown().await;
+    assert!(
+        !r.out.join(".s.ncm.part").exists(),
+        "shutdown 返回时半成品还在"
+    );
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    assert!(!r.out.join("s.ncm").exists());
+    assert!(
+        !history_text(&r.t).contains("s.ncm"),
+        "shutdown 之后写了记录"
+    );
+}
+
+#[tokio::test]
+async fn dropped_folder_follows_the_watch_scan_rules() {
+    let r = Rig::new("dropdir").await;
+    r.fake.hold.store(true, Ordering::SeqCst);
+    let big = r.t.dir("big");
+    for i in 0..5001 {
+        std::fs::write(big.join(format!("{i}.ncm")), b"x").unwrap();
+    }
+    r.eng.add_files(vec![big.to_string_lossy().into()]);
+    assert_eq!(
+        r.eng.snapshot().jobs.len(),
+        5000,
+        "超过 5000 个条目只取前 5000"
+    );
+    // 输出目录本身拖进来不处理
+    put(&r.out, "o.ncm", b"x");
+    r.eng.add_files(vec![r.out.to_string_lossy().into()]);
+    assert_eq!(r.eng.snapshot().jobs.len(), 5000);
+    r.eng.shutdown().await;
+}
+
+#[tokio::test]
+async fn history_keeps_one_entry_per_source_and_format() {
+    let r = Rig::new("histdedupe").await;
+    let a = put(&r.t.0, "a.ncm", b"x");
+    let add = || r.eng.add_files(vec![a.to_string_lossy().into()]);
+    add();
+    r.wait("a.ncm", JobState::Done).await;
+    append(&a, b"2");
+    add();
+    for _ in 0..500 {
+        if r.fake.calls().len() == 2 && r.eng.snapshot().jobs[0].state == JobState::Done {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(r.fake.calls().len(), 2);
+    let h: serde_json::Value = serde_json::from_str(&history_text(&r.t)).unwrap();
+    assert_eq!(h["done"].as_array().unwrap().len(), 1, "{h}");
+}
+
+#[tokio::test]
+async fn start_is_fast_with_5000_candidates_and_50000_history() {
+    let t = Tmp::new("scale");
+    let fake = Arc::new(Fake::default());
+    let (watch, out, data) = (t.dir("watch"), t.dir("out"), t.dir("data"));
+    let mut done = vec![];
+    for i in 0..5000 {
+        let p = put(&watch, &format!("{i}.ncm"), b"x");
+        let m = std::fs::metadata(&p).unwrap();
+        let mtime = m
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        // 一半转过，一半是关窗期间的新歌
+        if i % 2 == 0 {
+            done.push(
+                serde_json::json!({"path": p, "size": m.len(), "mtime": mtime,
+                "format": "original", "output": out.join(format!("{i}.ncm"))}),
+            );
+        }
+    }
+    for i in 0..47500 {
+        done.push(
+            serde_json::json!({"path": format!("/gone/{i}.ncm"), "size": 1, "mtime": 1,
+            "format": "original", "output": format!("/gone/{i}.flac")}),
+        );
+    }
+    std::fs::write(
+        data.join("history.json"),
+        serde_json::to_vec(&serde_json::json!({ "done": done })).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        data.join("settings.json"),
+        serde_json::to_vec(&serde_json::json!({"onboarded": true, "folders": [watch],
+            "outputDir": out, "format": "original"}))
+        .unwrap(),
+    )
+    .unwrap();
+    fake.hold.store(true, Ordering::SeqCst);
+    let e = Engine::new(data, fake.clone(), Box::new(|_| {})).with_poll_interval(None);
+    let t0 = std::time::Instant::now();
+    e.start().await;
+    let took = t0.elapsed();
+    eprintln!("start 用时 {took:?}");
+    let _ = e.snapshot();
+    assert_eq!(notices(&e, NoticeKind::CaughtUp)[0].count, 2500);
+    assert!(took < Duration::from_secs(1), "start 用了 {took:?}");
+    e.shutdown().await;
 }

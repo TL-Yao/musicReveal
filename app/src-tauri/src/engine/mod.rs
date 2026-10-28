@@ -7,15 +7,17 @@ mod store;
 
 pub use model::*;
 pub use real::RealConverter;
-use reveal_core::{CancelToken, ConvertError, ConvertOptions, ConvertOutcome, QqStatus, Stage};
+use reveal_core::{
+    CancelToken, ConvertError, ConvertOptions, ConvertOutcome, OutputFormat, QqStatus, Stage,
+};
 use scan::Stat;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 pub use store::home;
-use store::{History, Key, Settings};
-use tokio::sync::Notify;
+use store::{History, HistoryFile, Key, Pending, Settings};
+use tokio::sync::{watch, Notify};
 
 #[async_trait::async_trait]
 pub trait Converter: Send + Sync {
@@ -39,6 +41,8 @@ pub const POLL: Duration = Duration::from_secs(2);
 const QQ_POLLS: u64 = 5;
 /// 不完整的文件 60s 不变就判失败。
 const INCOMPLETE_POLLS: u32 = 30;
+/// shutdown 先礼后兵：取消后等这么久，还没停就直接丢弃转换。
+const GRACE: Duration = Duration::from_secs(3);
 
 /// 给用户看的简短中文原因。
 fn reason(e: &ConvertError) -> String {
@@ -50,12 +54,25 @@ fn reason(e: &ConvertError) -> String {
     }
 }
 
+fn fmt_of(f: OutputFormat) -> Fmt {
+    match f {
+        OutputFormat::Original => Fmt::Original,
+        OutputFormat::Mp3 => Fmt::Mp3,
+    }
+}
+
+/// 还没有结果的状态：同一源路径此时不再另建任务。
+fn unfinished(s: JobState) -> bool {
+    !matches!(s, JobState::Done | JobState::Skipped | JobState::Failed)
+}
+
 struct Task {
+    id: u64,
     view: Job,
     src: PathBuf,
     /// 来自哪个监听文件夹；拖入的为 None。
     folder: Option<PathBuf>,
-    /// downloading 时最近一次看到的大小与 mtime，以及之后连续不变的轮询次数。
+    /// 最近一次确认的大小与 mtime；downloading 时之后连续不变的轮询次数。
     last: Option<Stat>,
     same: u32,
     /// 转换报不完整，等文件再变化。
@@ -66,12 +83,17 @@ struct Task {
 struct State {
     settings: Settings,
     history: History,
+    /// 按 id 升序（即创建顺序）。
     tasks: Vec<Task>,
     queue: VecDeque<u64>,
     running: Option<(u64, CancelToken)>,
     /// 已经纳入考虑的文件及其最近的大小与 mtime。
     seen: HashMap<PathBuf, Stat>,
-    /// 通知及其涉及的文件（existingSongs 用）。
+    /// 源路径 → 最近一条任务。
+    live: HashMap<PathBuf, u64>,
+    /// 「已有旧歌」还没回答的文件：用户选择前一律不处理。
+    held: HashSet<PathBuf>,
+    /// 通知及其涉及的文件。
     notices: Vec<(Notice, Vec<Key>)>,
     /// 不可访问的监听文件夹及原因。
     folder_err: HashMap<PathBuf, String>,
@@ -94,6 +116,11 @@ struct Inner {
     st: Mutex<State>,
     wake: Notify,
     dirty: Notify,
+    /// shutdown 宽限期过后丢弃当前转换。
+    kill: Notify,
+    /// 串行化落盘；true 表示已关闭，不再写。
+    saving: Mutex<bool>,
+    ready: watch::Sender<bool>,
 }
 
 #[derive(Clone)]
@@ -145,12 +172,32 @@ fn name_of(p: &Path) -> String {
         .unwrap_or_else(|| p.to_string_lossy().into_owned())
 }
 
+type ScanResult = Result<Vec<(PathBuf, Stat)>, String>;
+
 impl State {
     fn task(&mut self, id: u64) -> Option<&mut Task> {
-        self.tasks.iter_mut().find(|t| id_of(&t.view.id) == id)
+        let i = self.tasks.binary_search_by_key(&id, |t| t.id).ok()?;
+        Some(&mut self.tasks[i])
     }
 
-    fn new_task(&mut self, src: PathBuf, folder: Option<PathBuf>, state: JobState) -> u64 {
+    fn remove(&mut self, id: u64) {
+        self.tasks.retain(|t| t.id != id);
+        self.queue.retain(|q| *q != id);
+    }
+
+    /// 同一源路径最近一条任务的 id 与状态。
+    fn live_of(&mut self, p: &Path) -> Option<(u64, JobState)> {
+        let id = *self.live.get(p)?;
+        self.task(id).map(|t| (id, t.view.state))
+    }
+
+    fn new_task(
+        &mut self,
+        src: PathBuf,
+        folder: Option<PathBuf>,
+        state: JobState,
+        last: Stat,
+    ) -> u64 {
         self.next_id += 1;
         let id = self.next_id;
         let ext = src
@@ -179,19 +226,34 @@ impl State {
             output: None,
             playing: false,
         };
-        self.tasks.insert(
-            0,
-            Task {
-                view,
-                src,
-                folder,
-                last: None,
-                same: 0,
-                incomplete: false,
-                opts: None,
-            },
-        );
+        self.live.insert(src.clone(), id);
+        self.tasks.push(Task {
+            id,
+            view,
+            src,
+            folder,
+            last: Some(last),
+            same: 0,
+            incomplete: false,
+            opts: None,
+        });
         id
+    }
+
+    /// 要转换的文件：同一源路径已有未结束的任务就不动，失败的重新入队，其余新建。
+    fn submit(&mut self, path: PathBuf, folder: Option<PathBuf>, stat: Stat) {
+        self.seen.insert(path.clone(), stat);
+        match self.live_of(&path) {
+            Some((id, JobState::Failed)) => {
+                self.task(id).expect("刚查到").last = Some(stat);
+                self.enqueue(id);
+            }
+            Some((_, s)) if unfinished(s) => {}
+            _ => {
+                let id = self.new_task(path, folder, JobState::Queued, stat);
+                self.enqueue(id);
+            }
+        }
     }
 
     fn notice(&mut self, kind: NoticeKind, folder: Option<&Path>, files: Vec<Key>) {
@@ -205,9 +267,9 @@ impl State {
         self.notices.push((n, files));
     }
 
-    /// 扫描监听文件夹并更新它的可访问状态。
-    fn scan_folder(&mut self, folder: &Path) -> Vec<(PathBuf, Stat)> {
-        match scan::scan(folder, &self.settings.output_dir) {
+    /// 记下扫描结果对应的可访问状态，返回扫到的文件。
+    fn apply_scan(&mut self, folder: &Path, r: ScanResult) -> Vec<(PathBuf, Stat)> {
+        match r {
             Ok(f) => {
                 self.folder_err.remove(folder);
                 f
@@ -219,37 +281,38 @@ impl State {
         }
     }
 
-    /// 扫描一个监听文件夹，全部记为已见；返回不在处理记录里的文件。
-    fn unknown_in(&mut self, folder: &Path) -> Vec<Key> {
-        let files = self.scan_folder(folder);
-        let mut out = vec![];
-        for (path, stat) in files {
-            self.seen.insert(path.clone(), stat);
-            let k = Key { path, stat };
-            if !self.history.known(&k) {
-                out.push(k);
-            }
-        }
-        out
+    /// 问用户要不要转换这批旧歌；回答前它们一律不处理。
+    fn ask(&mut self, folder: &Path, files: Vec<Key>) {
+        self.held.extend(files.iter().map(|k| k.path.clone()));
+        self.history.pending.push(Pending {
+            folder: folder.to_path_buf(),
+            files: files.iter().map(|k| k.path.clone()).collect(),
+        });
+        self.notice(NoticeKind::ExistingSongs, Some(folder), files);
     }
 
     /// 加入监听；已有的旧歌先发通知等用户选择。
-    fn add_folder(&mut self, folder: PathBuf) -> u32 {
+    fn add_folder(&mut self, folder: PathBuf, r: ScanResult) -> u32 {
         if self.settings.folders.contains(&folder) {
             return 0;
         }
         self.settings.folders.push(folder.clone());
-        let old = self.unknown_in(&folder);
+        let mut old = vec![];
+        for (path, stat) in self.apply_scan(&folder, r) {
+            self.seen.insert(path.clone(), stat);
+            if !self.history.known(&path, stat) {
+                old.push(Key { path, stat });
+            }
+        }
         let n = old.len() as u32;
         if n > 0 {
-            self.notice(NoticeKind::ExistingSongs, Some(&folder), old);
-            self.history.pending.push(folder);
+            self.ask(&folder, old);
         }
         n
     }
 
     fn take_notice(&mut self, folder: &Path) -> Vec<Key> {
-        self.history.pending.retain(|p| p != folder);
+        self.history.pending.retain(|p| p.folder != folder);
         let f = Some(folder.to_string_lossy().into_owned());
         let mut out = vec![];
         self.notices.retain_mut(|(n, files)| {
@@ -259,34 +322,37 @@ impl State {
             }
             !hit
         });
+        for k in &out {
+            self.held.remove(&k.path);
+        }
         out
     }
 
     /// 刷新 QQ 登录态；刚登录上或 plist 变了，就把等登录的任务重新入队。
-    fn refresh_qq(&mut self, conv: &dyn Converter, stamp: Option<SystemTime>) {
-        let s = conv.qq_status();
+    fn refresh_qq(&mut self, s: QqStatus, stamp: Option<SystemTime>) {
         let logged = |q: &QqStatus| matches!(q, QqStatus::LoggedIn { .. });
         if (logged(&s) && !logged(&self.qq)) || stamp != self.qq_stamp {
             self.qq_rejected = false;
             let waiting: Vec<u64> = self
                 .tasks
                 .iter()
-                .rev()
                 .filter(|t| t.view.state == JobState::WaitLogin)
-                .map(|t| id_of(&t.view.id))
+                .map(|t| t.id)
                 .collect();
             for id in waiting {
-                self.enqueue(id);
+                self.requeue(id);
             }
         }
         self.qq = s;
         self.qq_stamp = stamp;
     }
 
-    fn queue_new(&mut self, k: Key, folder: Option<PathBuf>) {
-        self.seen.insert(k.path.clone(), k.stat);
-        let id = self.new_task(k.path, folder, JobState::Queued);
-        self.enqueue(id);
+    /// 重新入队，以文件当前的大小与 mtime 为准。
+    fn requeue(&mut self, id: u64) {
+        if let Some(t) = self.task(id) {
+            t.last = scan::stat(&t.src);
+            self.enqueue(id);
+        }
     }
 
     /// 以当前输出设置入队。
@@ -294,18 +360,105 @@ impl State {
         let opts = ConvertOptions {
             output_dir: self.settings.output_dir.clone(),
             format: match self.settings.format {
-                Fmt::Original => reveal_core::OutputFormat::Original,
-                Fmt::Mp3 => reveal_core::OutputFormat::Mp3,
+                Fmt::Original => OutputFormat::Original,
+                Fmt::Mp3 => OutputFormat::Mp3,
             },
             ffmpeg: None,
         };
-        if let Some(t) = self.task(id) {
-            t.view.state = JobState::Queued;
-            t.view.error = None;
-            t.opts = Some(opts);
-            self.queue.retain(|q| *q != id);
+        let Some(t) = self.task(id) else { return };
+        let was_queued = t.view.state == JobState::Queued;
+        t.view.state = JobState::Queued;
+        t.view.error = None;
+        t.opts = Some(opts);
+        if !was_queued || !self.queue.contains(&id) {
             self.queue.push_back(id);
         }
+    }
+
+    /// 一次轮询里，对一个下载中或排队中的任务看到的大小与 mtime。
+    fn track(&mut self, id: u64, now: Option<Stat>) {
+        let Some(t) = self.task(id) else { return };
+        if !matches!(t.view.state, JobState::Downloading | JobState::Queued) {
+            return;
+        }
+        if now.is_none() {
+            // 下载器的临时文件被改名或删掉了
+            self.remove(id);
+            return;
+        }
+        if t.view.state == JobState::Queued {
+            if now != t.last {
+                t.view.state = JobState::Downloading;
+                (t.last, t.same, t.incomplete) = (now, 0, false);
+                self.queue.retain(|q| *q != id);
+            }
+            return;
+        }
+        if now == t.last {
+            t.same = t.same.saturating_add(1);
+        } else {
+            (t.last, t.same, t.incomplete) = (now, 0, false);
+        }
+        if t.incomplete {
+            if t.same >= INCOMPLETE_POLLS {
+                t.view.state = JobState::Failed;
+                t.view.error = Some(reason(&ConvertError::Incomplete));
+            }
+        } else if t.same >= 1 {
+            self.enqueue(id);
+        }
+    }
+
+    /// 监听扫描看到的文件。
+    fn discover(&mut self, p: PathBuf, s: Stat, folder: &Path) {
+        if self.seen.get(&p) == Some(&s) {
+            return;
+        }
+        self.seen.insert(p.clone(), s);
+        if self.held.contains(&p) {
+            return;
+        }
+        match self.live_of(&p) {
+            Some((id, JobState::Failed)) => {
+                let t = self.task(id).expect("刚查到");
+                t.view.state = JobState::Downloading;
+                t.view.error = None;
+                (t.last, t.same, t.incomplete) = (Some(s), 0, false);
+            }
+            Some((_, st)) if unfinished(st) => {}
+            _ => {
+                self.new_task(p, Some(folder.to_path_buf()), JobState::Downloading, s);
+            }
+        }
+    }
+
+    /// 取下一首：开转前再核一次文件，变了就退回下载中。
+    fn next_job(&mut self) -> Option<(u64, PathBuf, ConvertOptions, CancelToken, Stat)> {
+        if self.stopping {
+            return None;
+        }
+        while let Some(id) = self.queue.pop_front() {
+            let Some(t) = self.task(id) else { continue };
+            if t.view.state != JobState::Queued {
+                continue;
+            }
+            let Some(opts) = t.opts.clone() else { continue };
+            let now = scan::stat(&t.src);
+            match now {
+                None => self.remove(id),
+                Some(stat) if Some(stat) == t.last => {
+                    t.view.state = JobState::Decrypt;
+                    let (src, tok) = (t.src.clone(), CancelToken::default());
+                    self.running = Some((id, tok.clone()));
+                    return Some((id, src, opts, tok, stat));
+                }
+                _ => {
+                    t.view.state = JobState::Downloading;
+                    (t.last, t.same, t.incomplete) = (now, 0, false);
+                }
+            }
+        }
+        None
     }
 }
 
@@ -327,6 +480,8 @@ impl Engine {
                 queue: VecDeque::new(),
                 running: None,
                 seen: HashMap::new(),
+                live: HashMap::new(),
+                held: HashSet::new(),
                 notices: vec![],
                 folder_err: HashMap::new(),
                 qq: QqStatus::LoggedOut,
@@ -339,6 +494,9 @@ impl Engine {
             }),
             wake: Notify::new(),
             dirty: Notify::new(),
+            kill: Notify::new(),
+            saving: Mutex::new(false),
+            ready: watch::Sender::new(false),
         }))
     }
 
@@ -379,38 +537,74 @@ impl Engine {
         self.0.data_dir.join("covers")
     }
 
+    /// 落盘当前设置与记录。串行；在锁内取快照，所以后写的一定是更新的版本。
+    // ponytail: 每次整份重写 history.json，记录到几十万条再改增量
+    fn persist(&self) {
+        let closed = self.0.saving.lock().unwrap_or_else(|e| e.into_inner());
+        if *closed {
+            return;
+        }
+        let (s, h) = {
+            let st = self.lock();
+            (st.settings.clone(), HistoryFile::from(&st.history))
+        };
+        store::save(&self.settings_path(), &s);
+        store::save(&self.history_path(), &h);
+    }
+
+    /// `start()` 完成后返回。
+    pub async fn ready(&self) {
+        let _ = self.0.ready.subscribe().wait_for(|r| *r).await;
+    }
+
     pub async fn start(&self) {
         // 任务只属于本次运行，上次的缩略图没用了
         let _ = std::fs::remove_dir_all(self.covers_dir());
-        let (settings, history) = (
-            store::load::<Settings>(&self.settings_path()),
-            store::load::<History>(&self.history_path()),
-        );
-        let conv = self.0.conv.clone();
+        let settings: Settings = store::load(&self.settings_path());
+        let history: History = store::load::<HistoryFile>(&self.history_path()).into();
+        let (qq, stamp) = (self.0.conv.qq_status(), self.0.conv.qq_stamp());
+        let scans: Vec<(PathBuf, ScanResult)> = settings
+            .folders
+            .iter()
+            .map(|f| (f.clone(), scan::scan(f, &settings.output_dir)))
+            .collect();
         self.edit(|st| {
             st.settings = settings;
             st.history = history;
-            st.qq = conv.qq_status();
-            st.qq_stamp = conv.qq_stamp();
-            // 补转：关窗期间下载的、上次被中断的
+            st.qq = qq;
+            st.qq_stamp = stamp;
+            // 没回答的旧歌提问照旧挂着；其余没记录的是关窗期间下载的、或上次被中断的：补转
+            let pending = std::mem::take(&mut st.history.pending);
             let mut caught = vec![];
-            for folder in st.settings.folders.clone() {
-                let unknown = st.unknown_in(&folder);
-                if st.history.pending.contains(&folder) {
-                    if unknown.is_empty() {
-                        st.history.pending.retain(|p| *p != folder);
-                    } else {
-                        st.notice(NoticeKind::ExistingSongs, Some(&folder), unknown);
+            for (folder, r) in scans {
+                let asked: HashSet<&PathBuf> = pending
+                    .iter()
+                    .filter(|p| p.folder == folder)
+                    .flat_map(|p| &p.files)
+                    .collect();
+                let mut held = vec![];
+                for (path, stat) in st.apply_scan(&folder, r) {
+                    st.seen.insert(path.clone(), stat);
+                    if st.history.known(&path, stat) {
+                        continue;
                     }
-                    continue;
+                    let k = Key { path, stat };
+                    if asked.contains(&k.path) {
+                        held.push(k);
+                    } else {
+                        caught.push((k, folder.clone()));
+                    }
                 }
-                for k in unknown {
-                    caught.push(k.clone());
-                    st.queue_new(k, Some(folder.clone()));
+                if !held.is_empty() {
+                    st.ask(&folder, held);
                 }
             }
             if !caught.is_empty() {
-                st.notice(NoticeKind::CaughtUp, None, caught);
+                let keys = caught.iter().map(|(k, _)| k.clone()).collect();
+                for (k, folder) in caught {
+                    st.submit(k.path, Some(folder), k.stat);
+                }
+                st.notice(NoticeKind::CaughtUp, None, keys);
             }
         });
         tokio::spawn(self.clone().worker());
@@ -427,6 +621,7 @@ impl Engine {
                 }
             });
         }
+        self.0.ready.send_replace(true);
     }
 
     async fn emitter(self) {
@@ -446,62 +641,51 @@ impl Engine {
         }
     }
 
-    /// 一次轮询：跟踪下载中的文件，发现新文件。
+    /// 一次轮询：跟踪下载中与排队中的文件，发现新文件，按时刷新 QQ 状态。读盘都在锁外。
     pub fn tick(&self) {
-        let conv = self.0.conv.clone();
-        self.edit(|st| {
+        let (folders, skip, tracked, due, old_stamp) = {
+            let mut st = self.lock();
             st.ticks += 1;
-            let stamp = conv.qq_stamp();
-            if st.ticks % QQ_POLLS == 0 || stamp != st.qq_stamp {
-                st.refresh_qq(&*conv, stamp);
-            }
-            for t in st.tasks.iter_mut() {
-                if t.view.state != JobState::Downloading {
-                    continue;
-                }
-                let now = scan::stat(&t.src);
-                if now == t.last {
-                    t.same += 1;
-                } else {
-                    (t.last, t.same, t.incomplete) = (now, 0, false);
-                }
-                if t.incomplete && t.same >= INCOMPLETE_POLLS {
-                    t.view.state = JobState::Failed;
-                    t.view.error = Some(reason(&ConvertError::Incomplete));
-                }
-            }
-            // 下载器的临时文件被改名或删掉了
-            st.tasks
-                .retain(|t| t.view.state != JobState::Downloading || t.last.is_some());
-            let ready: Vec<u64> = st
+            let tracked: Vec<(u64, PathBuf)> = st
                 .tasks
                 .iter()
-                .filter(|t| t.view.state == JobState::Downloading && !t.incomplete && t.same >= 1)
-                .map(|t| id_of(&t.view.id))
+                .filter(|t| matches!(t.view.state, JobState::Downloading | JobState::Queued))
+                .map(|t| (t.id, t.src.clone()))
                 .collect();
-            for id in ready {
-                st.enqueue(id);
+            (
+                st.settings.folders.clone(),
+                st.settings.output_dir.clone(),
+                tracked,
+                st.ticks % QQ_POLLS == 0,
+                st.qq_stamp,
+            )
+        };
+        let stamp = self.0.conv.qq_stamp();
+        let qq = (due || stamp != old_stamp).then(|| self.0.conv.qq_status());
+        let stats: Vec<(u64, Option<Stat>)> = tracked
+            .into_iter()
+            .map(|(id, p)| (id, scan::stat(&p)))
+            .collect();
+        let scans: Vec<(PathBuf, ScanResult)> = folders
+            .into_iter()
+            .map(|f| {
+                let r = scan::scan(&f, &skip);
+                (f, r)
+            })
+            .collect();
+        self.edit(|st| {
+            if let Some(q) = qq {
+                st.refresh_qq(q, stamp);
             }
-            for folder in st.settings.folders.clone() {
-                let files = st.scan_folder(&folder);
-                for (p, s) in files {
-                    if st.seen.get(&p) == Some(&s) {
-                        continue;
-                    }
-                    st.seen.insert(p.clone(), s);
-                    let live = st.tasks.iter_mut().find(|t| {
-                        t.src == p && !matches!(t.view.state, JobState::Done | JobState::Skipped)
-                    });
-                    if let Some(t) = live {
-                        if t.view.state == JobState::Failed {
-                            t.view.state = JobState::Downloading;
-                            t.view.error = None;
-                            (t.last, t.same, t.incomplete) = (Some(s), 0, false);
-                        }
-                        continue;
-                    }
-                    let id = st.new_task(p, Some(folder.clone()), JobState::Downloading);
-                    st.task(id).unwrap().last = Some(s);
+            for (id, now) in stats {
+                st.track(id, now);
+            }
+            for (folder, r) in scans {
+                if !st.settings.folders.contains(&folder) {
+                    continue;
+                }
+                for (p, s) in st.apply_scan(&folder, r) {
+                    st.discover(p, s, &folder);
                 }
             }
         });
@@ -509,68 +693,55 @@ impl Engine {
 
     async fn worker(self) {
         loop {
-            let next = self.edit(|st| {
-                if st.stopping {
-                    return None;
-                }
-                while let Some(id) = st.queue.pop_front() {
-                    let Some(t) = st.task(id) else { continue };
-                    let Some(opts) = t.opts.clone() else { continue };
-                    t.view.state = JobState::Decrypt;
-                    let (src, tok) = (t.src.clone(), CancelToken::default());
-                    st.running = Some((id, tok.clone()));
-                    return Some((id, src, opts, tok));
-                }
-                None
-            });
-            let Some((id, src, opts, tok)) = next else {
+            let Some((id, src, opts, tok, stat)) = self.edit(|st| st.next_job()) else {
                 if self.lock().stopping {
                     return;
                 }
-                self.lock().running = None;
                 self.0.wake.notified().await;
                 continue;
             };
-            let me = self.clone();
-            let mut progress = move |s: Stage| {
-                me.edit(|st| {
-                    if let Some(t) = st.task(id) {
-                        t.view.state = match s {
-                            Stage::Decrypt => JobState::Decrypt,
-                            Stage::Transcode => JobState::Transcode,
-                            Stage::Metadata => JobState::Metadata,
-                        };
-                    }
-                });
-            };
-            let key = scan::stat(&src).map(|stat| Key {
+            let key = Key {
                 path: src.clone(),
                 stat,
-            });
-            let fmt = match opts.format {
-                reveal_core::OutputFormat::Original => Fmt::Original,
-                reveal_core::OutputFormat::Mp3 => Fmt::Mp3,
             };
-            let reuse = key
-                .as_ref()
-                .and_then(|k| self.lock().history.reusable(k, fmt));
-            let r = match (reuse, std::fs::create_dir_all(&opts.output_dir)) {
-                (Some(out), _) => {
-                    self.edit(|st| {
-                        st.running = None;
-                        if let Some(t) = st.task(id) {
-                            t.view.state = JobState::Skipped;
-                            t.view.output = Some(out.to_string_lossy().into_owned());
-                        }
-                    });
-                    continue;
+            let fmt = fmt_of(opts.format);
+            let reuse = self.lock().history.reusable(&key, fmt);
+            if let Some(out) = reuse {
+                self.edit(|st| {
+                    st.running = None;
+                    if let Some(t) = st.task(id) {
+                        t.view.state = JobState::Skipped;
+                        t.view.output = Some(out.to_string_lossy().into_owned());
+                    }
+                });
+                continue;
+            }
+            let r = match std::fs::create_dir_all(&opts.output_dir) {
+                Err(e) => Err(ConvertError::Failed(format!("无法创建输出目录：{e}"))),
+                Ok(()) => {
+                    let me = self.clone();
+                    let mut progress = move |s: Stage| {
+                        me.edit(|st| {
+                            if let Some(t) = st.task(id) {
+                                t.view.state = match s {
+                                    Stage::Decrypt => JobState::Decrypt,
+                                    Stage::Transcode => JobState::Transcode,
+                                    Stage::Metadata => JobState::Metadata,
+                                };
+                            }
+                        });
+                    };
+                    let conv = self.0.conv.clone();
+                    // 被 kill 时丢弃 future：reveal-core 借此清理 .part
+                    tokio::select! {
+                        r = conv.convert(&src, &opts, &tok, &mut progress) => r,
+                        _ = self.0.kill.notified() => Err(ConvertError::Cancelled),
+                    }
                 }
-                (None, Err(e)) => Err(ConvertError::Failed(format!("无法创建输出目录：{e}"))),
-                (None, Ok(())) => self.0.conv.convert(&src, &opts, &tok, &mut progress).await,
             };
-            let record = self.edit(|st| {
+            let save = self.edit(|st| {
                 st.running = None;
-                let t = st.task(id)?;
+                let Some(t) = st.task(id) else { return false };
                 match r {
                     Ok(o) => {
                         if let Some(c) = o.meta.cover.clone() {
@@ -586,11 +757,6 @@ impl Engine {
                                 });
                             });
                         }
-                        let done = key.map(|key| store::Done {
-                            key,
-                            format: fmt,
-                            output: o.output.clone(),
-                        });
                         let v = &mut t.view;
                         v.state = JobState::Done;
                         v.title = o.meta.title;
@@ -601,8 +767,8 @@ impl Engine {
                         v.has_lyrics = o.has_lyrics;
                         v.renamed = o.renamed;
                         v.output = Some(o.output.to_string_lossy().into_owned());
-                        st.history.done.extend(done);
-                        return Some(st.history.clone());
+                        st.history.record(key, fmt, o.output);
+                        return true;
                     }
                     Err(ConvertError::Cancelled) => {}
                     Err(ConvertError::NeedsLogin) => {
@@ -610,29 +776,21 @@ impl Engine {
                         st.qq_rejected = true;
                     }
                     Err(ConvertError::Incomplete) => {
+                        // 以开转时的样子为基线：转换期间长了也算「再变化」
                         t.view.state = JobState::Downloading;
-                        (t.last, t.same, t.incomplete) = (scan::stat(&t.src), 0, true);
+                        (t.last, t.same, t.incomplete) = (Some(stat), 0, true);
                     }
                     Err(e) => {
                         t.view.state = JobState::Failed;
                         t.view.error = Some(reason(&e));
                     }
                 }
-                None
+                false
             });
-            if let Some(h) = record {
-                store::save(&self.history_path(), &h);
+            if save {
+                self.persist();
             }
         }
-    }
-
-    fn save_settings(&self) {
-        let (s, h) = {
-            let st = self.lock();
-            (st.settings.clone(), st.history.clone())
-        };
-        store::save(&self.settings_path(), &s);
-        store::save(&self.history_path(), &h);
     }
 
     pub fn set_output_dir(&self, path: &str) -> Result<(), String> {
@@ -640,35 +798,31 @@ impl Engine {
             return Err("输出目录不能为空".into());
         }
         self.edit(|st| st.settings.output_dir = path.into());
-        self.save_settings();
+        self.persist();
         Ok(())
     }
 
     pub fn set_format(&self, format: &str) -> Result<(), String> {
         let f = Fmt::parse(format)?;
         self.edit(|st| st.settings.format = f);
-        self.save_settings();
+        self.persist();
         Ok(())
     }
 
-    /// 拖入的文件或文件夹（只看一层），直接入队。
+    /// 拖入的文件或文件夹（只看一层，规则同监听扫描），直接入队。
     pub fn add_files(&self, paths: Vec<String>) {
+        let skip = self.lock().settings.output_dir.clone();
+        let mut files = vec![];
+        for p in paths.into_iter().map(PathBuf::from) {
+            if p.is_dir() {
+                files.extend(scan::shallow(&p, &skip));
+            } else if scan::candidate(&p) {
+                files.extend(scan::stat(&p).map(|s| (p, s)));
+            }
+        }
         self.edit(|st| {
-            for p in paths.into_iter().map(PathBuf::from) {
-                let files = if p.is_dir() {
-                    scan::shallow(&p)
-                } else if p.is_file() && scan::candidate(&p) {
-                    vec![p]
-                } else {
-                    vec![]
-                };
-                for f in files {
-                    if let Some(s) = scan::stat(&f) {
-                        st.seen.insert(f.clone(), s);
-                    }
-                    let id = st.new_task(f, None, JobState::Queued);
-                    st.enqueue(id);
-                }
+            for (f, s) in files {
+                st.submit(f, None, s);
             }
         });
     }
@@ -677,8 +831,10 @@ impl Engine {
         if path.trim().is_empty() {
             return Err("文件夹路径不能为空".into());
         }
-        let existing = self.edit(|st| st.add_folder(path.into()));
-        self.save_settings();
+        let folder = PathBuf::from(path);
+        let r = scan::scan(&folder, &self.lock().settings.output_dir.clone());
+        let existing = self.edit(|st| st.add_folder(folder, r));
+        self.persist();
         Ok(AddFolderResult { existing })
     }
 
@@ -690,7 +846,7 @@ impl Engine {
             st.folder_err.remove(&folder);
             st.take_notice(&folder);
             st.seen.retain(|p, _| !p.starts_with(&folder));
-            let gone: Vec<u64> = st
+            let gone: HashSet<u64> = st
                 .tasks
                 .iter()
                 .filter(|t| {
@@ -700,31 +856,30 @@ impl Engine {
                             JobState::Downloading | JobState::Queued | JobState::WaitLogin
                         )
                 })
-                .map(|t| id_of(&t.view.id))
+                .map(|t| t.id)
                 .collect();
-            st.tasks.retain(|t| !gone.contains(&id_of(&t.view.id)));
+            st.tasks.retain(|t| !gone.contains(&t.id));
             st.queue.retain(|q| !gone.contains(q));
         });
-        self.save_settings();
+        self.persist();
     }
 
     pub fn convert_existing(&self, path: &str) {
         let folder = PathBuf::from(path);
         self.edit(|st| {
             for k in st.take_notice(&folder) {
-                st.queue_new(k, Some(folder.clone()));
+                st.submit(k.path, Some(folder.clone()), k.stat);
             }
         });
-        self.save_settings();
+        self.persist();
     }
 
     pub fn ignore_existing(&self, path: &str) {
-        let h = self.edit(|st| {
+        self.edit(|st| {
             let files = st.take_notice(Path::new(path));
-            st.history.ignored.extend(files);
-            st.history.clone()
+            st.history.ignore(files);
         });
-        store::save(&self.history_path(), &h);
+        self.persist();
     }
 
     /// 关掉通知；关掉「已有旧歌」的提问等于忽略。
@@ -740,7 +895,8 @@ impl Engine {
         }
     }
 
-    /// 取消当前任务并等它清理完（最多 3s）。被中断的任务不写记录。
+    /// 取消当前任务并等它清理完；宽限期过了还没停就丢弃它。返回后不再写盘。
+    /// 被中断的任务不写记录。
     pub async fn shutdown(&self) {
         self.stop_preview();
         let tok = self.edit(|st| {
@@ -750,13 +906,17 @@ impl Engine {
         self.0.wake.notify_one();
         if let Some(t) = tok {
             t.cancel();
-            let _ = tokio::time::timeout(Duration::from_secs(3), async {
+            let idle = || async {
                 while self.lock().running.is_some() {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-            })
-            .await;
+            };
+            if tokio::time::timeout(GRACE, idle()).await.is_err() {
+                self.0.kill.notify_one();
+                let _ = tokio::time::timeout(Duration::from_secs(1), idle()).await;
+            }
         }
+        *self.0.saving.lock().unwrap_or_else(|e| e.into_inner()) = true;
     }
 
     fn output_of(&self, id: &str) -> Result<PathBuf, String> {
@@ -765,6 +925,14 @@ impl Engine {
             .and_then(|t| t.view.output.clone())
             .map(PathBuf::from)
             .ok_or_else(|| "还没有输出文件".into())
+    }
+
+    pub fn open_qq_music(&self) -> Result<(), String> {
+        std::process::Command::new("open")
+            .args(["-b", "com.tencent.QQMusicMac"])
+            .spawn()
+            .map(drop)
+            .map_err(|e| format!("无法打开 QQ 音乐：{e}"))
     }
 
     pub fn reveal_in_finder(&self, id: &str) -> Result<(), String> {
@@ -845,7 +1013,7 @@ impl Engine {
                 .task(id)
                 .is_some_and(|t| matches!(t.view.state, JobState::Failed | JobState::WaitLogin))
             {
-                st.enqueue(id);
+                st.requeue(id);
             }
         });
     }
@@ -853,8 +1021,7 @@ impl Engine {
     pub fn remove_job(&self, id: &str) {
         let id = id_of(id);
         self.edit(|st| {
-            st.tasks.retain(|t| id_of(&t.view.id) != id);
-            st.queue.retain(|q| *q != id);
+            st.remove(id);
             if st.preview.as_ref().is_some_and(|p| p.0 == id) {
                 if let Some((_, _, mut c)) = st.preview.take() {
                     let _ = c.start_kill();
@@ -869,24 +1036,26 @@ impl Engine {
     pub fn snapshot(&self) -> Snapshot {
         let st = self.lock();
         let s = &st.settings;
-        let mut jobs: Vec<Job> = st.tasks.iter().map(|t| t.view.clone()).collect();
+        let pos: HashMap<u64, u32> = st
+            .queue
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (*id, i as u32 + 1))
+            .collect();
         let playing = st.preview.as_ref().map(|p| p.0);
-        for j in jobs.iter_mut() {
-            j.playing = Some(id_of(&j.id)) == playing;
-        }
-        for (i, id) in st.queue.iter().enumerate() {
-            if let Some(j) = jobs.iter_mut().find(|j| id_of(&j.id) == *id) {
-                j.queue_pos = Some(i as u32 + 1);
-            }
-        }
+        let jobs: Vec<Job> = st
+            .tasks
+            .iter()
+            .rev()
+            .map(|t| Job {
+                queue_pos: pos.get(&t.id).copied(),
+                playing: Some(t.id) == playing,
+                ..t.view.clone()
+            })
+            .collect();
         let count =
             |f: &dyn Fn(JobState) -> bool| jobs.iter().filter(|j| f(j.state)).count() as u32;
-        let busy = count(&|s| {
-            !matches!(
-                s,
-                JobState::Done | JobState::Skipped | JobState::WaitLogin | JobState::Failed
-            )
-        });
+        let busy = count(&|s| unfinished(s) && s != JobState::WaitLogin);
         let waiting_login = count(&|s| s == JobState::WaitLogin);
         let home = store::home();
         Snapshot {
@@ -945,16 +1114,25 @@ impl Engine {
         format: &str,
     ) -> Result<(), String> {
         let format = Fmt::parse(format)?;
+        let out = PathBuf::from(output_dir);
+        let scans: Vec<(PathBuf, ScanResult)> = folders
+            .into_iter()
+            .map(PathBuf::from)
+            .map(|f| {
+                let r = scan::scan(&f, &out);
+                (f, r)
+            })
+            .collect();
         self.edit(|st| {
             st.settings.onboarded = true;
-            st.settings.output_dir = output_dir.into();
+            st.settings.output_dir = out;
             st.settings.format = format;
             st.settings.folders.clear();
-            for f in folders {
-                st.add_folder(f.into());
+            for (f, r) in scans {
+                st.add_folder(f, r);
             }
         });
-        self.save_settings();
+        self.persist();
         Ok(())
     }
 }
