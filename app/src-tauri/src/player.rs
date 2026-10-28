@@ -4,6 +4,7 @@ use rodio::source::EmptyCallback;
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Source};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -191,6 +192,8 @@ struct St {
     sink: Option<rodio::Player>,
     /// 曲目编号：曲终回调带着它，过期的回调据此忽略。
     gen: u64,
+    /// 已放完的曲目编号：曲终回调在音频线程上先记下它，再发消息。
+    finished: Arc<AtomicU64>,
     ended: mpsc::Sender<u64>,
 }
 
@@ -200,6 +203,8 @@ struct Inner {
     st: Mutex<St>,
     /// 系统媒体键与「正在播放」；只有 App 里开（测试不碰系统）。
     media: Mutex<Option<Media>>,
+    /// 后台线程处理每条消息前先拿它；测试借此把消息压在队列里。
+    hold: Mutex<()>,
 }
 
 pub struct Player(Arc<Inner>);
@@ -225,15 +230,18 @@ impl Player {
                 out: None,
                 sink: None,
                 gen: 0,
+                finished: Arc::new(AtomicU64::new(0)),
                 ended,
             }),
             media: Mutex::new(None),
+            hold: Mutex::new(()),
         });
         // 曲终前进与播放中每秒推送都在这条线程上；Player 丢掉后它随之退出。
         let weak = Arc::downgrade(&inner);
         std::thread::spawn(move || loop {
             let msg = rx.recv_timeout(Duration::from_secs(1));
             let Some(inner) = weak.upgrade() else { return };
+            drop(inner.hold.lock().unwrap_or_else(|e| e.into_inner()));
             let p = Player(inner);
             match msg {
                 Ok(gen) => p.ended(gen),
@@ -320,10 +328,26 @@ impl Player {
             } else {
                 ms
             };
-            if let Some(s) = &st.sink {
-                let _ = s.try_seek(Duration::from_millis(ms));
+            let pos = Duration::from_millis(ms);
+            if let Some(s) = st.sink.as_ref().filter(|_| !st.ended()) {
+                let _ = s.try_seek(pos);
+            }
+            // 本曲已放完（曲终消息可能已在路上）：重开再定位；新编号让那条消息作废
+            if st.ended() {
+                if let Some(id) = st.track.clone() {
+                    st.load(id);
+                    if let Some(s) = &st.sink {
+                        let _ = s.try_seek(pos);
+                    }
+                }
             }
         });
+    }
+
+    /// 测试用：持有期间后台线程不处理曲终等消息。
+    #[doc(hidden)]
+    pub fn hold_events(&self) -> MutexGuard<'_, ()> {
+        self.0.hold.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// 退出前调用：停播并关掉音频设备。
@@ -480,6 +504,11 @@ impl St {
         }
     }
 
+    /// 当前曲的音源已放完。
+    fn ended(&self) -> bool {
+        self.sink.is_some() && self.finished.load(Ordering::SeqCst) == self.gen
+    }
+
     fn current(&self) -> Option<String> {
         self.queue.as_ref()?.current().map(str::to_owned)
     }
@@ -561,9 +590,10 @@ impl St {
         let sink = rodio::Player::connect_new(out.mixer());
         sink.set_volume(self.prefs.volume);
         self.gen += 1;
-        let (gen, tx) = (self.gen, self.ended.clone());
+        let (gen, tx, done) = (self.gen, self.ended.clone(), self.finished.clone());
         sink.append(dec);
         sink.append(EmptyCallback::new(Box::new(move || {
+            done.store(gen, Ordering::SeqCst);
             let _ = tx.send(gen);
         })));
         self.sink = Some(sink);

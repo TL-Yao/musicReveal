@@ -475,6 +475,31 @@ fn toggle_next_and_prev_drive_playback() {
     );
 }
 
+/// 曲终消息已发出、还没被处理时拖动进度：留在本曲的新位置继续播，不跳到下一首。
+#[test]
+#[ignore = "需要音频设备"]
+fn seek_after_track_ended_but_before_advance_stays_on_track() {
+    let _g = audio();
+    let t = Tmp::new("seekend");
+    let a = make(&t.0, "a.wav").unwrap();
+    let b = make(&t.0, "b.wav").unwrap();
+    let p = quiet(&t, noop());
+    p.play(vec![a.clone(), b], 0).unwrap();
+    p.seek(1900);
+    let hold = p.hold_events();
+    // 剩 100ms：等足 600ms，曲终消息必已排队
+    std::thread::sleep(Duration::from_millis(600));
+    p.seek(500);
+    drop(hold);
+    std::thread::sleep(Duration::from_millis(300));
+    let s = p.state();
+    assert!(
+        s.playing && s.track_id.as_deref() == Some(a.as_str()),
+        "{s:?}"
+    );
+    assert!((500..1500).contains(&s.position_ms), "{s:?}");
+}
+
 fn bad(dir: &Path) -> String {
     let p = dir.join("bad.mp3");
     std::fs::write(&p, "not audio\n".repeat(500)).unwrap();
