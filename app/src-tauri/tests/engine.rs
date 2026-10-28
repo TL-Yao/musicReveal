@@ -1306,3 +1306,85 @@ async fn start_removes_leftover_part_files_only() {
     want.sort();
     assert_eq!(left, want);
 }
+
+/// 普通音频入库：监听文件夹里的 mp3 经真实转换器进输出文件夹；快照回调交给资料库观察，
+/// 它据此换到输出文件夹，并在任务完成时立即重扫（资料库不自动轮询）。
+#[tokio::test(flavor = "multi_thread")]
+async fn plain_audio_is_ingested_and_shows_up_in_library() {
+    use musicreveal_app::library::Library;
+    let ff = reveal_core::find_ffmpeg().expect("需要 ffmpeg");
+    let t = Tmp::new("plain");
+    let (watch, out) = (t.dir("watch"), t.dir("out"));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let lib = Library::new(
+        t.0.join("data"),
+        Box::new(move |v| {
+            let _ = tx.send(v);
+        }),
+    )
+    .with_poll_interval(None);
+    let l = lib.clone();
+    let eng = Engine::new(
+        t.0.join("data"),
+        Arc::new(RealConverter::new(t.0.clone())),
+        Box::new(move |s| l.observe(&s)),
+    )
+    .with_poll_interval(None);
+    eng.start().await;
+    eng.complete_onboarding(
+        vec![watch.to_string_lossy().into()],
+        out.to_string_lossy().into(),
+        "original",
+    )
+    .unwrap();
+    // 先等资料库在空的输出文件夹上扫完：之后能看到新歌只能靠任务完成时的重扫
+    loop {
+        let v = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("资料库没换到输出文件夹");
+        if v.dir == out.to_string_lossy() && !v.scanning {
+            break;
+        }
+    }
+    let tmp = t.0.join("歌.mp3");
+    let st = std::process::Command::new(ff)
+        .args(["-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=440:d=1"])
+        .args(["-c:a", "libmp3lame", "-metadata", "title=入库", "-metadata"])
+        .arg("artist=某人")
+        .arg(&tmp)
+        .status()
+        .unwrap();
+    assert!(st.success());
+    std::fs::rename(&tmp, watch.join("歌.mp3")).unwrap();
+    settle(&eng);
+
+    let mut job = None;
+    for _ in 0..3000 {
+        job = eng
+            .snapshot()
+            .jobs
+            .into_iter()
+            .find(|j| j.state == JobState::Done);
+        if job.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let job = job.unwrap_or_else(|| panic!("没完成：{:?}", eng.snapshot().jobs));
+    assert_eq!(job.platform, Platform::Other);
+    let output = PathBuf::from(job.output.unwrap());
+    assert!(output.starts_with(&out) && output.exists(), "{output:?}");
+
+    let id = output.to_string_lossy().into_owned();
+    let v = loop {
+        let v = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("资料库没看到新歌");
+        if v.tracks.iter().any(|t| t.id == id) {
+            break v;
+        }
+    };
+    assert_eq!(v.dir, out.to_string_lossy());
+    assert_eq!(lib.track(&id).unwrap().title, "入库");
+    eng.shutdown().await;
+}

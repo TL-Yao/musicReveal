@@ -3,8 +3,9 @@
 
 use crate::engine::scan::{self, Stat};
 use crate::engine::store;
+use crate::engine::{JobState, Snapshot};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -103,6 +104,8 @@ struct State {
     dir: PathBuf,
     tracks: BTreeMap<PathBuf, Track>,
     scanning: bool,
+    /// 上一份快照里已完成的任务 id。
+    done: HashSet<String>,
 }
 
 #[derive(Default)]
@@ -496,6 +499,7 @@ impl Library {
                 dir: PathBuf::new(),
                 tracks: BTreeMap::new(),
                 scanning: true,
+                done: HashSet::new(),
             }),
             sig: sig.clone(),
         });
@@ -532,6 +536,26 @@ impl Library {
             st.scanning = true;
         }
         self.refresh();
+    }
+
+    /// 跟着引擎快照走：输出文件夹变了就换过去；有任务新完成就立即重扫，好让新歌尽快出现。
+    pub fn observe(&self, s: &Snapshot) {
+        self.set_dir(Path::new(&s.output_dir));
+        let done: HashSet<String> = s
+            .jobs
+            .iter()
+            .filter(|j| j.state == JobState::Done)
+            .map(|j| j.id.clone())
+            .collect();
+        let fresh = {
+            let mut st = lock(&self.0.st);
+            let fresh = !done.is_subset(&st.done);
+            st.done = done;
+            fresh
+        };
+        if fresh {
+            self.refresh();
+        }
     }
 
     pub fn view(&self) -> LibraryView {
