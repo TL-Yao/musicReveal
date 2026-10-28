@@ -77,6 +77,8 @@ struct State {
     /// 最近一次 QQ 新格式转换被拒（登录过期）。
     qq_rejected: bool,
     ticks: u64,
+    /// 正在试听：任务 id、本次编号、afplay 子进程。
+    preview: Option<(u64, u64, tokio::process::Child)>,
     next_id: u64,
     stopping: bool,
 }
@@ -96,6 +98,42 @@ pub struct Engine(Arc<Inner>);
 
 fn id_of(s: &str) -> u64 {
     s.trim_start_matches('j').parse().unwrap_or(0)
+}
+
+/// 与前端 `convertFileSrc` 相同的 asset 协议地址（macOS）。
+fn asset_url(p: &Path) -> String {
+    let mut s = String::from("asset://localhost/");
+    for b in p.to_string_lossy().bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) {
+            s.push(b as char);
+        } else {
+            s += &format!("%{b:02X}");
+        }
+    }
+    s
+}
+
+/// 用 macOS 自带的 sips 把封面缩成 ≤256px 的 JPEG。
+async fn thumbnail(cover: &[u8], dir: &Path, out: &Path) -> Option<PathBuf> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    out.hash(&mut h);
+    let base = dir.join(format!("{:016x}", h.finish()));
+    let (src, jpg) = (base.with_extension("src"), base.with_extension("jpg"));
+    std::fs::create_dir_all(dir).ok()?;
+    std::fs::write(&src, cover).ok()?;
+    let ok = tokio::process::Command::new("sips")
+        .args(["-Z", "256", "-s", "format", "jpeg"])
+        .arg(&src)
+        .arg("--out")
+        .arg(&jpg)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .is_ok_and(|s| s.success());
+    let _ = std::fs::remove_file(&src);
+    ok.then_some(jpg)
 }
 
 fn name_of(p: &Path) -> String {
@@ -276,6 +314,7 @@ impl Engine {
                 qq_stamp: None,
                 qq_rejected: false,
                 ticks: 0,
+                preview: None,
                 next_id: 0,
                 stopping: false,
             }),
@@ -317,7 +356,13 @@ impl Engine {
         self.0.data_dir.join("history.json")
     }
 
+    fn covers_dir(&self) -> PathBuf {
+        self.0.data_dir.join("covers")
+    }
+
     pub async fn start(&self) {
+        // 任务只属于本次运行，上次的缩略图没用了
+        let _ = std::fs::remove_dir_all(self.covers_dir());
         let (settings, history) = (
             store::load::<Settings>(&self.settings_path()),
             store::load::<History>(&self.history_path()),
@@ -503,6 +548,19 @@ impl Engine {
                 let t = st.task(id)?;
                 match r {
                     Ok(o) => {
+                        if let Some(c) = o.meta.cover.clone() {
+                            let (me, out) = (self.clone(), o.output.clone());
+                            tokio::spawn(async move {
+                                let Some(jpg) = thumbnail(&c, &me.covers_dir(), &out).await else {
+                                    return;
+                                };
+                                me.edit(|st| {
+                                    if let Some(t) = st.task(id) {
+                                        t.view.cover_url = Some(asset_url(&jpg));
+                                    }
+                                });
+                            });
+                        }
                         let done = key.map(|key| store::Done {
                             key,
                             format: fmt,
@@ -654,6 +712,7 @@ impl Engine {
 
     /// 取消当前任务并等它清理完（最多 3s）。被中断的任务不写记录。
     pub async fn shutdown(&self) {
+        self.stop_preview();
         let tok = self.edit(|st| {
             st.stopping = true;
             st.running.as_ref().map(|(_, t)| t.clone())
@@ -670,6 +729,82 @@ impl Engine {
         }
     }
 
+    fn output_of(&self, id: &str) -> Result<PathBuf, String> {
+        self.lock()
+            .task(id_of(id))
+            .and_then(|t| t.view.output.clone())
+            .map(PathBuf::from)
+            .ok_or_else(|| "还没有输出文件".into())
+    }
+
+    pub fn reveal_in_finder(&self, id: &str) -> Result<(), String> {
+        let out = self.output_of(id)?;
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(out)
+            .spawn()
+            .map(drop)
+            .map_err(|e| format!("无法打开 Finder：{e}"))
+    }
+
+    pub fn open_auth_settings(&self) -> Result<(), String> {
+        std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+            .spawn()
+            .map(drop)
+            .map_err(|e| format!("无法打开系统设置：{e}"))
+    }
+
+    /// 用 afplay 试听；再次调用会先停掉上一个。
+    pub fn play_preview(&self, id: &str) -> Result<(), String> {
+        let out = self.output_of(id)?;
+        let ext = out.extension().map(|e| e.to_string_lossy().to_ascii_lowercase());
+        if ext.as_deref() == Some("ogg") {
+            return Err("该格式暂不支持试听".into());
+        }
+        self.stop_preview();
+        let child = tokio::process::Command::new("afplay")
+            .arg(&out)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| format!("无法试听：{e}"))?;
+        let gen = self.edit(|st| {
+            st.next_id += 1;
+            st.preview = Some((id_of(id), st.next_id, child));
+            st.next_id
+        });
+        let me = self.clone();
+        tokio::spawn(async move {
+            // ponytail: 200ms 轮询子进程是否结束，够用
+            loop {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                let ended = match me.lock().preview.as_mut() {
+                    Some((_, g, c)) if *g == gen => c.try_wait().map_or(true, |s| s.is_some()),
+                    _ => return,
+                };
+                if ended {
+                    me.edit(|st| {
+                        if st.preview.as_ref().is_some_and(|p| p.1 == gen) {
+                            st.preview = None;
+                        }
+                    });
+                    return;
+                }
+            }
+        });
+        Ok(())
+    }
+
+    pub fn stop_preview(&self) {
+        self.edit(|st| {
+            if let Some((_, _, mut c)) = st.preview.take() {
+                let _ = c.start_kill();
+            }
+        });
+    }
+
     pub fn retry_job(&self, id: &str) {
         self.edit(|st| st.enqueue(id_of(id)));
     }
@@ -679,6 +814,11 @@ impl Engine {
         self.edit(|st| {
             st.tasks.retain(|t| id_of(&t.view.id) != id);
             st.queue.retain(|q| *q != id);
+            if st.preview.as_ref().is_some_and(|p| p.0 == id) {
+                if let Some((_, _, mut c)) = st.preview.take() {
+                    let _ = c.start_kill();
+                }
+            }
             if let Some((_, tok)) = st.running.as_ref().filter(|(r, _)| *r == id) {
                 tok.cancel();
             }
@@ -689,6 +829,10 @@ impl Engine {
         let st = self.lock();
         let s = &st.settings;
         let mut jobs: Vec<Job> = st.tasks.iter().map(|t| t.view.clone()).collect();
+        let playing = st.preview.as_ref().map(|p| p.0);
+        for j in jobs.iter_mut() {
+            j.playing = Some(id_of(&j.id)) == playing;
+        }
         for (i, id) in st.queue.iter().enumerate() {
             if let Some(j) = jobs.iter_mut().find(|j| id_of(&j.id) == *id) {
                 j.queue_pos = Some(i as u32 + 1);

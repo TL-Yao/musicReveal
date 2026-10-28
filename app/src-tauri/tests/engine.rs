@@ -39,12 +39,13 @@ impl Drop for Tmp {
     }
 }
 
-/// 默认：写出 `<输出目录>/<源文件名去扩展名>.<源扩展名>` 并成功。
+/// 默认：把五个字节写到 `<输出目录>/<源文件名>` 并成功。
 #[derive(Default)]
 struct Fake {
     script: Mutex<HashMap<String, VecDeque<ConvertError>>>,
     status: Mutex<Option<QqStatus>>,
     stamp: Mutex<Option<std::time::SystemTime>>,
+    cover: Mutex<Option<Vec<u8>>>,
     hold: AtomicBool,
     release: AtomicBool,
     calls: Mutex<Vec<String>>,
@@ -92,7 +93,11 @@ impl Converter for Fake {
             return Err(e);
         }
         progress(Stage::Metadata);
-        let output = opts.output_dir.join(input.file_name().unwrap());
+        // mgg 的真实产物是 ogg；其余与源同名
+        let output = match input.extension().and_then(|e| e.to_str()) {
+            Some("mgg") => opts.output_dir.join(input.with_extension("ogg").file_name().unwrap()),
+            _ => opts.output_dir.join(input.file_name().unwrap()),
+        };
         std::fs::write(&output, b"audio").unwrap();
         Ok(ConvertOutcome {
             output,
@@ -105,7 +110,7 @@ impl Converter for Fake {
                 year: None,
                 track: None,
                 disc: None,
-                cover: None,
+                cover: self.cover.lock().unwrap().clone(),
                 lyrics: None,
                 song_id: None,
                 platform: CorePlatform::Qq,
@@ -628,4 +633,100 @@ async fn too_many_entries_marks_folder_inaccessible() {
     let f = &r.eng.snapshot().folders[0];
     assert!(!f.accessible);
     assert!(f.reason.as_deref().unwrap().contains("5000"));
+}
+
+#[tokio::test]
+async fn cover_becomes_small_thumbnail_url() {
+    let r = Rig::new("cover").await;
+    let png = r.t.0.join("big.png");
+    let ok = std::process::Command::new("/opt/homebrew/bin/ffmpeg")
+        .args(["-v", "error", "-y", "-f", "lavfi", "-i", "color=red:s=800x600"])
+        .args(["-frames:v", "1"])
+        .arg(&png)
+        .status()
+        .is_ok_and(|s| s.success());
+    if !ok {
+        eprintln!("跳过：没有 ffmpeg 生成测试图");
+        return;
+    }
+    *r.fake.cover.lock().unwrap() = Some(std::fs::read(&png).unwrap());
+    let src = put(&r.t.0, "c.ncm", b"x");
+    r.eng.add_files(vec![src.to_string_lossy().into()]);
+    r.wait("c.ncm", JobState::Done).await;
+    let mut url = None;
+    for _ in 0..300 {
+        url = r.job("c.ncm").unwrap().cover_url;
+        if url.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let url = url.expect("应有 coverUrl");
+    let enc = url.strip_prefix("asset://localhost/").expect(&url);
+    assert!(!enc.contains('/'), "路径整体编码：{url}");
+    let thumb = std::fs::read_dir(r.t.0.join("data/covers"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let out = std::process::Command::new("sips")
+        .args(["-g", "pixelWidth", "-g", "pixelHeight"])
+        .arg(&thumb)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let dims: Vec<u32> = text
+        .lines()
+        .filter_map(|l| l.split(':').nth(1)?.trim().parse().ok())
+        .collect();
+    assert_eq!(dims, vec![256, 192], "{text}");
+}
+
+#[tokio::test]
+async fn preview_reports_playing_until_it_ends_and_rejects_ogg() {
+    let r = Rig::new("preview").await;
+    let a = put(&r.t.0, "a.ncm", b"x");
+    let o = put(&r.t.0, "o.mgg", b"x");
+    r.eng
+        .add_files(vec![a.to_string_lossy().into(), o.to_string_lossy().into()]);
+    let ja = r.wait("a.ncm", JobState::Done).await;
+    let jo = r.wait("o.mgg", JobState::Done).await;
+    assert_eq!(
+        r.eng.play_preview(&jo.id).unwrap_err(),
+        "该格式暂不支持试听"
+    );
+    // 「audio」五个字节不是音频，afplay 很快退出 → playing 回到 false
+    r.eng.play_preview(&ja.id).unwrap();
+    assert!(r.job("a.ncm").unwrap().playing);
+    for _ in 0..500 {
+        if !r.job("a.ncm").unwrap().playing {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!r.job("a.ncm").unwrap().playing);
+    r.eng.stop_preview();
+}
+
+#[tokio::test]
+async fn on_change_receives_snapshots() {
+    let t = Tmp::new("emit");
+    let fake = Arc::new(Fake::default());
+    let got = Arc::new(Mutex::new(vec![]));
+    let g = got.clone();
+    let e = Engine::new(
+        t.0.join("data"),
+        fake.clone(),
+        Box::new(move |s: Snapshot| g.lock().unwrap().push(s)),
+    )
+    .with_poll_interval(None);
+    e.start().await;
+    e.set_format("mp3").unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let got = got.lock().unwrap();
+    assert!(!got.is_empty());
+    assert_eq!(got.last().unwrap().format, Fmt::Mp3);
+    let json = serde_json::to_value(got.last().unwrap()).unwrap();
+    assert!(json.get("outputDir").is_some() && json.get("waitingLogin").is_some());
 }
