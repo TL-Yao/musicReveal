@@ -189,3 +189,77 @@ fn netease_instrumental_has_no_lyrics() {
         );
     }
 }
+
+fn png(w: u32, h: u32) -> Vec<u8> {
+    let mut v = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    v.extend(w.to_be_bytes());
+    v.extend(h.to_be_bytes());
+    v.extend([8, 6, 0, 0, 0]);
+    v
+}
+
+fn jpeg(w: u16, h: u16) -> Vec<u8> {
+    let mut v = vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 4, 0, 0]; // SOI + 空 APP0 段
+    v.extend([0xFF, 0xC2, 0, 11, 8]); // SOF2（渐进式）
+    v.extend(h.to_be_bytes());
+    v.extend(w.to_be_bytes());
+    v.extend([1, 1, 0x11, 0]);
+    v
+}
+
+#[test]
+fn cover_with_more_pixels_wins_ties_go_online() {
+    use crate::enrich::pick_cover;
+    assert_eq!(
+        pick_cover(Some(png(1280, 1280)), jpeg(1000, 1000)),
+        png(1280, 1280)
+    );
+    assert_eq!(
+        pick_cover(Some(png(500, 500)), jpeg(1200, 1200)),
+        jpeg(1200, 1200)
+    );
+    assert_eq!(
+        pick_cover(Some(jpeg(800, 800)), png(800, 800)),
+        png(800, 800)
+    );
+    assert_eq!(pick_cover(None, png(10, 10)), png(10, 10));
+    // 解析不了的尺寸视为 0
+    assert_eq!(pick_cover(Some(b"garbage".to_vec()), png(1, 1)), png(1, 1));
+    assert_eq!(
+        pick_cover(Some(png(2, 2)), b"\xFF\xD8\xFF".to_vec()),
+        png(2, 2)
+    );
+    assert_eq!(pick_cover(Some(vec![0xFF]), vec![0x89]), vec![0x89]);
+}
+
+#[test]
+fn qq_trailing_copyright_notice_is_dropped() {
+    let lyric = |l: &str| {
+        let body = serde_json::json!({"retcode": 0, "lyric": l, "trans": ""}).to_string();
+        crate::enrich::qq_lyric(body.as_bytes())
+            .unwrap()
+            .map(|l| l.lrc)
+    };
+    assert_eq!(
+        lyric("[ti:]\n[00:01.00]词\n[02:58.00]未经许可,不得翻唱或使用\n").as_deref(),
+        Some("[ti:]\n[00:01.00]词")
+    );
+    assert_eq!(
+        lyric("[00:01.00]词\n[02:58.00]未经著作权人许可，不得使用\n[03:00.00]\n").as_deref(),
+        Some("[00:01.00]词\n[03:00.00]")
+    );
+    // 不在末尾的不动
+    assert_eq!(
+        lyric("[00:01.00]未经许可的爱\n[00:02.00]词").as_deref(),
+        Some("[00:01.00]未经许可的爱\n[00:02.00]词")
+    );
+    assert_eq!(lyric("[00:01.00]未经许可,不得翻唱或使用"), None);
+    let rec = crate::enrich::qq_lyric(&fx("qq_lyric_0015IeIl3kBP3P.json"))
+        .unwrap()
+        .unwrap();
+    assert!(
+        rec.lrc.ends_with("[02:31.86]耗尽了精力用尽了力气"),
+        "{}",
+        rec.lrc
+    );
+}

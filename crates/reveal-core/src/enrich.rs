@@ -188,10 +188,28 @@ fn lyrics(lrc: &str, trans: Option<&str>) -> Option<crate::Lyrics> {
     })
 }
 
+/// 最后一条正文行若是「未经许可…」这类版权声明，删掉它。
+fn drop_notice(lrc: &str) -> String {
+    let mut lines: Vec<&str> = lrc.lines().collect();
+    let last = lines.iter().rposition(|l| {
+        let (tags, text) = crate::convert::split_line(l);
+        !tags.is_empty() && !text.trim().is_empty()
+    });
+    if let Some(i) = last {
+        let text = crate::convert::split_line(lines[i]).1.trim();
+        if text.starts_with("未经许可") || text.starts_with("未经著作权人许可") {
+            lines.remove(i);
+        }
+    }
+    lines.join("\n")
+}
+
 /// QQ `fcg_query_lyric_new`（nobase64）响应 → 歌词；没有歌词返回 None。
 pub(crate) fn qq_lyric(body: &[u8]) -> Result<Option<crate::Lyrics>, String> {
     let v = json(body)?;
-    let lrc = unescape(v.get("lyric").and_then(Value::as_str).unwrap_or(""));
+    let lrc = drop_notice(&unescape(
+        v.get("lyric").and_then(Value::as_str).unwrap_or(""),
+    ));
     let trans = v.get("trans").and_then(Value::as_str).map(unescape);
     Ok(lyrics(&lrc, trans.as_deref()))
 }
@@ -286,7 +304,7 @@ fn api(id: &crate::SongId) -> Api {
             lyric_url: format!("https://music.163.com/api/song/lyric?id={id}&lv=1&tv=1"),
             song: netease_song,
             lyric: netease_lyric,
-            covers: |pic| vec![format!("{pic}?param=1400y1400"), pic.to_owned()],
+            covers: |pic| vec![pic.to_owned(), format!("{pic}?param=1400y1400")],
         },
     }
 }
@@ -324,11 +342,11 @@ impl OnlineEnricher {
         Ok(r.bytes().await.map_err(|e| e.to_string())?.to_vec())
     }
 
-    /// 依次试，取第一个 2xx 且像张图（> 1KB）的。
+    /// 依次试，取第一个 2xx、像张图（> 1KB）且不超过 8MB 的。
     async fn cover(&self, urls: &[String], referer: &str) -> Option<Vec<u8>> {
         for u in urls {
             if let Ok(b) = self.get(u, referer).await {
-                if b.len() > 1024 {
+                if (1025..=8 << 20).contains(&b.len()) {
                     return Some(b);
                 }
             }
@@ -350,7 +368,7 @@ impl crate::Enricher for OnlineEnricher {
         let mut errs = vec![];
         match song.and_then(|b| (api.song)(&b, meta)) {
             Ok(Some(r)) => match self.cover(&(api.covers)(&r), api.referer).await {
-                Some(c) => meta.cover = Some(c),
+                Some(c) => meta.cover = Some(pick_cover(meta.cover.take(), c)),
                 None => errs.push("封面下载失败".to_owned()),
             },
             Ok(None) => {}
@@ -366,5 +384,47 @@ impl crate::Enricher for OnlineEnricher {
         } else {
             Err(errs.join("；"))
         }
+    }
+}
+
+/// PNG / JPEG 头里的像素数；认不出返回 0。
+fn pixels(b: &[u8]) -> u64 {
+    let be16 = |i: usize| {
+        b.get(i..i + 2)
+            .map(|x| u64::from(u16::from_be_bytes([x[0], x[1]])))
+    };
+    let be32 = |i: usize| {
+        b.get(i..i + 4)
+            .map(|x| u64::from(u32::from_be_bytes([x[0], x[1], x[2], x[3]])))
+    };
+    if b.starts_with(b"\x89PNG\r\n\x1a\n") && b.get(12..16) == Some(b"IHDR") {
+        return be32(16).zip(be32(20)).map_or(0, |(w, h)| w * h);
+    }
+    if !b.starts_with(&[0xFF, 0xD8]) {
+        return 0;
+    }
+    let mut i = 2;
+    while b.get(i) == Some(&0xFF) {
+        let Some(&m) = b.get(i + 1) else { return 0 };
+        match m {
+            0xFF => i += 1,
+            0x01 | 0xD0..=0xD7 => i += 2,
+            0xC0..=0xCF if !matches!(m, 0xC4 | 0xC8 | 0xCC) => {
+                return be16(i + 5).zip(be16(i + 7)).map_or(0, |(h, w)| w * h)
+            }
+            _ => match be16(i + 2) {
+                Some(len) => i += 2 + len as usize,
+                None => return 0,
+            },
+        }
+    }
+    0
+}
+
+/// 文件自带与在线封面都按 ID 精确对应：取像素多的，相等取在线。
+pub(crate) fn pick_cover(local: Option<Vec<u8>>, online: Vec<u8>) -> Vec<u8> {
+    match local {
+        Some(l) if pixels(&l) > pixels(&online) => l,
+        _ => online,
     }
 }
