@@ -428,3 +428,45 @@ fn same_name_lrc_gives_lyrics() {
     let (_, v) = settled(&r.rx);
     assert!(v.tracks.iter().find(|t| t.id == id(&c)).unwrap().has_lyrics);
 }
+
+#[test]
+fn trash_moves_song_and_its_lrc_to_the_trash_and_refuses_strangers() {
+    let r = Rig::new("trash");
+    let tag = format!(
+        "mr-trash-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let a = mp3(&r.out.join(format!("{tag}.mp3")), &[], None);
+    let lrc = r.out.join(format!("{tag}.lrc"));
+    std::fs::write(&lrc, "[00:01.00]词\n").unwrap();
+    let txt = r.out.join(format!("{tag}.txt"));
+    std::fs::write(&txt, "x").unwrap();
+    r.lib.set_dir(&r.out);
+    settled(&r.rx);
+
+    for stranger in [&txt, &lrc, &r.t.0.join("nope.mp3")] {
+        assert!(r.lib.trash(&id(stranger)).is_err(), "{stranger:?}");
+        assert!(r.lib.reveal(&id(stranger)).is_err(), "{stranger:?}");
+    }
+    assert!(txt.exists() && lrc.exists() && a.exists());
+
+    r.lib.trash(&id(&a)).unwrap();
+    let bin = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".Trash");
+    let gone: Vec<PathBuf> = [&a, &lrc]
+        .iter()
+        .map(|p| bin.join(p.file_name().unwrap()))
+        .collect();
+    let in_bin: Vec<bool> = gone.iter().map(|p| p.exists()).collect();
+    for p in &gone {
+        let _ = std::fs::remove_file(p);
+    }
+    assert_eq!(in_bin, [true, true], "废纸篓里应有同名项");
+    assert!(!a.exists() && !lrc.exists() && txt.exists());
+    assert!(r.lib.track(&id(&a)).is_none(), "立即从资料库消失");
+    let (_, v) = settled(&r.rx);
+    assert!(v.tracks.is_empty());
+}

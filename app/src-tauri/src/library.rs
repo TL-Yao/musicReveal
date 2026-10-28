@@ -433,6 +433,15 @@ fn lyrics(
     });
 }
 
+/// NSFileManager 移到废纸篓：不经 Finder，不会弹「想要控制 Finder」的授权。
+fn trash(p: &Path) -> Result<(), String> {
+    use objc2_foundation::{NSFileManager, NSURL};
+    let url = NSURL::from_file_path(p).ok_or("路径无效")?;
+    NSFileManager::defaultManager()
+        .trashItemAtURL_resultingItemURL_error(&url, None)
+        .map_err(|e| format!("无法移到废纸篓：{}", e.localizedDescription()))
+}
+
 fn drop_cover(covers: &Path, r: &Rec) {
     if let Some(n) = &r.cover {
         let _ = std::fs::remove_file(covers.join(n));
@@ -531,6 +540,29 @@ impl Library {
 
     pub fn track(&self, id: &str) -> Option<Track> {
         lock(&self.0.st).tracks.get(Path::new(id)).cloned()
+    }
+
+    /// 歌与同名 .lrc 移到废纸篓，立即从资料库去掉。只认资料库里的歌。
+    pub fn trash(&self, id: &str) -> Result<(), String> {
+        let t = self.track(id).ok_or("不在资料库里")?;
+        trash(Path::new(&t.id))?;
+        if let Some(l) = &t.lrc {
+            let _ = trash(l);
+        }
+        lock(&self.0.st).tracks.remove(Path::new(id));
+        self.refresh();
+        Ok(())
+    }
+
+    /// 在 Finder 里显示。只认资料库里的歌。
+    pub fn reveal(&self, id: &str) -> Result<(), String> {
+        self.track(id).ok_or("不在资料库里")?;
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(id)
+            .spawn()
+            .map(drop)
+            .map_err(|e| format!("无法打开 Finder：{e}"))
     }
 
     /// 资料库里这首歌的同名 .lrc 解析出的歌词；没有或解析为空为 None。
