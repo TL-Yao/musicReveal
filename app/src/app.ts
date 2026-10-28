@@ -103,7 +103,7 @@ function qqHTML() {
     expired: { name: "登录已过期", desc: "重新登录 QQ 音乐后，待登录的歌曲将自动继续。", acts: [["打开 QQ 音乐", "open_qq_music"]], hint: "" },
   }[q.state];
   return `<span class="dot"><i></i></span><span>
-    <div class="name">${m.name}${q.state === "loggedIn" && q.account ? ` <span class="masked">· ${esc(q.account)}</span>` : ""}</div>
+    <div class="name">${m.name}${q.state === "loggedIn" && q.account ? ` <span class="masked">· QQ ${esc(q.account)}</span>` : ""}</div>
     ${m.desc ? `<div class="desc">${m.desc}</div>` : ""}
     ${m.acts.length ? `<div class="acts">${m.acts.map(([t, cmd]) => `<button class="btn primary" data-cmd="${cmd}">${t}</button>`).join("")}</div>` : ""}
     ${m.hint ? `<div class="hint">${m.hint}</div>` : ""}

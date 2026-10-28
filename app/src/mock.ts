@@ -5,7 +5,7 @@ import type { Job, Snapshot } from "./types";
 
 const HOME = "/Users/me";
 const PROCESSING = ["decrypt", "transcode", "metadata"];
-type Extra = { title?: string; album?: string; quality: string; art: string[]; glyph: string };
+type Extra = { title?: string; artists: string[]; album?: string; quality: string; art: string[]; glyph: string };
 
 let snap: Snapshot;
 const extra = new Map<string, Extra>();
@@ -26,12 +26,12 @@ const ART: Record<string, string[]> = {
   violet: ["#2B1E6B", "#8A5BFF", "#FFB7E6"], moss: ["#1E3B2A", "#8BC34A", "#F6FFB3"], rose: ["#3A0E22", "#E04A6B", "#FFD1DC"],
 };
 
-type Song = { key: string; dir: string; file: string; qq: boolean; title?: string; artists: string[]; album?: string; quality: string; art: string; glyph: string; lyrics?: boolean };
+type Song = { key: string; dir: string; file: string; qq: boolean; title?: string; artists: string[]; album?: string; quality: string; art: string; glyph: string; lyrics?: boolean; renamed?: number };
 const SONGS: Record<string, Song> = {
   erciyuan: { key: "erciyuan", dir: "QQ音乐", file: "hanser-二次元凶.mflac", qq: true, title: "二次元凶", artists: ["Hanser"], album: "二次元凶", quality: "FLAC 24bit/48kHz", art: "pink", glyph: "凶" },
   dl: { key: "dl", dir: "QQ音乐", file: "yousa-星夜鸟语.mflac", qq: true, title: "星夜鸟语", artists: ["泠鸢yousa"], album: "星夜鸟语", quality: "FLAC 24bit/48kHz", art: "violet", glyph: "星" },
   rain: { key: "rain", dir: "网易云音乐", file: "DMYoung - 十一月的雨.ncm", qq: false, title: "十一月的雨", artists: ["DMYoung"], album: "十一月的雨", quality: "MP3 320k", art: "moss", glyph: "雨" },
-  jiaozhi: { key: "jiaozhi", dir: "网易云音乐", file: "DMYoung,Hanser,泠鸢yousa - 「交织together」.ncm", qq: false, title: "「交织together」", artists: ["DMYoung", "Hanser", "泠鸢yousa"], album: "交织together", quality: "MP3 320k", art: "teal", glyph: "织" },
+  jiaozhi: { key: "jiaozhi", dir: "网易云音乐", file: "DMYoung,Hanser,泠鸢yousa - 「交织together」.ncm", qq: false, title: "「交织together」", artists: ["DMYoung", "Hanser", "泠鸢yousa"], album: "交织together", quality: "MP3 320k", art: "teal", glyph: "织", renamed: 2 },
   xianxia: { key: "xianxia", dir: "QQ音乐", file: "hanser-不需要陪伴的闲暇.mflac", qq: true, title: "不需要陪伴的闲暇", artists: ["Hanser"], album: "一抹憨色", quality: "FLAC 16bit/44.1kHz", art: "amber", glyph: "闲" },
   xuexiang: { key: "xuexiang", dir: "网易云音乐", file: "著小生zoki,徵羽摩柯,乐正龙牙,Hanser - 雪乡游梦记（伴奏）.ncm", qq: false, title: "雪乡游梦记（伴奏）", artists: ["著小生zoki", "徵羽摩柯", "乐正龙牙", "Hanser"], album: "雪乡游梦记", quality: "MP3 320k", art: "ice", glyph: "雪", lyrics: false },
   dala: { key: "dala", dir: "QQ音乐", file: "hanser-达拉崩吧.mflac", qq: true, title: "达拉崩吧", artists: ["Hanser", "电鸟个灯泡", "尤超白"], album: "达拉崩吧", quality: "FLAC 16bit/44.1kHz", art: "comic", glyph: "崩" },
@@ -42,18 +42,20 @@ const SONGS: Record<string, Song> = {
 
 function job(s: Song, state: Job["state"]): Job {
   const id = `${s.key}-${uid++}`;
-  extra.set(id, { title: s.title, album: s.album, quality: s.quality, art: ART[s.art], glyph: s.glyph });
-  const j: Job = { id, source: `${HOME}/Music/${s.dir}/${s.file}`, fileName: s.file, platform: s.qq ? "qq" : "netease", state, artists: [], hasCover: true, hasLyrics: s.lyrics ?? true };
-  return setState(j, state, s.artists);
+  extra.set(id, { title: s.title, artists: s.artists, album: s.album, quality: s.quality, art: ART[s.art], glyph: s.glyph });
+  const j: Job = { id, source: `${HOME}/Music/${s.dir}/${s.file}`, fileName: s.file, platform: s.qq ? "qq" : "netease", state, artists: [], hasCover: true, hasLyrics: s.lyrics ?? true, renamed: s.renamed };
+  if (state !== "downloading") j.title = s.title;
+  if (!["downloading", "decrypt", "transcode"].includes(state)) j.album = s.album;
+  return setState(j, state);
 }
 /** 按状态补齐契约里「何时有」的字段：歌名在解密后、专辑在元数据阶段、封面与音质在完成后 */
-function setState(j: Job, state: Job["state"], artists = j.artists): Job {
+function setState(j: Job, state: Job["state"]): Job {
   const x = extra.get(j.id)!;
   j.state = state;
-  const known = !["downloading", "queued", "decrypt"].includes(state) && !!x.title;
+  const known = state !== "downloading" && !!x.title && (!!j.title || !["queued", "decrypt"].includes(state));
   j.title = known ? x.title : undefined;
-  j.artists = known ? artists : [];
-  j.album = known && ["metadata", "done", "skipped", "waitLogin"].includes(state) ? x.album : undefined;
+  j.artists = known ? x.artists : [];
+  j.album = known && (["metadata", "done", "skipped"].includes(state) || (!!j.album && !["decrypt", "transcode"].includes(state))) ? x.album : undefined;
   const fin = state === "done" || state === "skipped";
   j.quality = fin ? x.quality : undefined;
   j.coverUrl = fin ? cover(x.art, x.glyph) : undefined;
@@ -87,7 +89,7 @@ function base(onboarded: boolean): Snapshot {
       : [],
     outputDir: `${HOME}/Music/musicReveal`,
     format: "original",
-    qq: { state: "loggedIn", account: "QQ 12****89" },
+    qq: { state: "loggedIn", account: "12****89" },
     jobs: [],
     notices: [],
     busy: 0,
@@ -184,7 +186,7 @@ const MR = {
     await frames();
   },
   qq(state: Snapshot["qq"]["state"]) {
-    snap.qq = state === "loggedIn" ? { state, account: "QQ 12****89" } : { state };
+    snap.qq = state === "loggedIn" ? { state, account: "12****89" } : { state };
     if (state === "loggedIn") snap.jobs.filter((j) => j.state === "waitLogin").forEach((j, i) => setTimeout(() => run(j), i * 600));
     else snap.jobs.filter((j) => j.platform === "qq" && ["queued", ...PROCESSING].includes(j.state)).forEach((j) => (runs.delete(j.id), setState(j, "waitLogin")));
     push();
@@ -192,7 +194,7 @@ const MR = {
   task(state: Job["state"]) {
     const j = first();
     runs.delete(j.id);
-    setState(j, state, SONGS.erciyuan.artists);
+    setState(j, state);
     push();
   },
   drag(on: boolean) {
@@ -224,15 +226,15 @@ const MR = {
   /** 第 5 条验收：连推 50 次快照，同一行的 DOM 节点不得被替换 */
   async selfTest() {
     MR.scene("daily");
-    await frames(3);
-    const nodes = () => new Map([...document.querySelectorAll<HTMLElement>("#tasks .row-wrap")].map((el) => [el.dataset.id!, [el, el.querySelector(".row"), el.querySelector(".tile"), el.querySelector(".t1")]]));
+    await sleep(1000); // 等上一场景的行收起移除
+    const nodes = () => new Map([...document.querySelectorAll<HTMLElement>("#tasks .row-wrap:not(.collapsed)")].map((el) => [el.dataset.id!, [el, el.querySelector(".row"), el.querySelector(".tile"), el.querySelector(".t1")]]));
     const before = nodes();
     const cycle: Job["state"][] = ["downloading", "queued", "decrypt", "transcode", "metadata", "done", "playing" as never];
     const j = first(), done = snap.jobs.find((x) => x.state === "done")!, q = snap.jobs.find((x) => x.state === "queued")!;
     for (let i = 0; i < 50; i++) {
       const s = cycle[i % cycle.length];
       if (s === ("playing" as never)) j.playing = true;
-      else setState(j, s, SONGS.erciyuan.artists);
+      else setState(j, s);
       done.playing = i % 2 ? true : undefined;
       if (i % 5 === 4) snap.jobs.push(snap.jobs.splice(snap.jobs.indexOf(q), 1)[0]);
       push();
