@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 mod creds;
 mod naming;
+mod pipeline;
 
 // ---------- 通用工具 ----------
 

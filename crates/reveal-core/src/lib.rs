@@ -101,6 +101,11 @@ impl From<std::io::Error> for Error {
 mod convert;
 mod creds;
 
+pub use convert::{
+    convert, find_ffmpeg, CancelToken, ConvertError, ConvertOptions, ConvertOutcome, Enricher,
+    Lyrics, NoopEnricher, OutputFormat, Stage, TrackMeta,
+};
+
 pub use creds::{
     credentials_status, fetch_ekey, load_credentials, Credentials, EkeyError, QqStatus,
 };

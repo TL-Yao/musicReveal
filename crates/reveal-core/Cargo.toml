@@ -10,6 +10,7 @@ aes = "0.8"
 async-trait = "0.1.92"
 base64 = "0.22"
 lofty = "0.25.5"
+log = "0.4"
 plist = "1.10.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde_json = "1"
