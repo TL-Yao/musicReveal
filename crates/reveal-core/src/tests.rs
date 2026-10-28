@@ -6,6 +6,7 @@ use aes::cipher::{BlockEncrypt, KeyInit};
 use std::path::PathBuf;
 
 mod creds;
+mod enrich;
 mod flac_trim;
 mod lyrics;
 mod naming;

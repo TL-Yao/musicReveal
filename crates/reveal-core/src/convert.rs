@@ -481,7 +481,7 @@ fn parse_time(s: &str) -> Option<u64> {
 }
 
 /// 行首的时间标签（毫秒, 原文）与剩余正文。
-fn split_line(l: &str) -> (Vec<(u64, &str)>, &str) {
+pub(crate) fn split_line(l: &str) -> (Vec<(u64, &str)>, &str) {
     let mut tags = vec![];
     let mut r = l.trim_start();
     while let Some((inner, rest)) = r.strip_prefix('[').and_then(|x| x.split_once(']')) {
@@ -502,7 +502,7 @@ fn is_meta(l: &str) -> bool {
 }
 
 /// 去掉 LRC 时间轴与元信息行，只留歌词正文。
-pub(crate) fn strip_timestamps(lrc: &str) -> String {
+pub fn strip_timestamps(lrc: &str) -> String {
     lrc.lines()
         .filter_map(|l| {
             let (tags, text) = split_line(l);

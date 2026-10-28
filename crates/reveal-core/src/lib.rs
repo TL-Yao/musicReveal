@@ -100,11 +100,12 @@ impl From<std::io::Error> for Error {
 
 mod convert;
 mod creds;
+mod enrich;
 mod flac;
 
 pub use convert::{
-    convert, find_ffmpeg, CancelToken, ConvertError, ConvertOptions, ConvertOutcome, Enricher,
-    Lyrics, NoopEnricher, OutputFormat, Stage, TrackMeta,
+    convert, find_ffmpeg, strip_timestamps, CancelToken, ConvertError, ConvertOptions,
+    ConvertOutcome, Enricher, Lyrics, NoopEnricher, OutputFormat, Stage, TrackMeta,
 };
 
 pub use creds::{
