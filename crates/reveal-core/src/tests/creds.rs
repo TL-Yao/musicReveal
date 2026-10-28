@@ -154,3 +154,24 @@ fn debug_output_hides_secrets() {
         "{s}"
     );
 }
+
+#[test]
+fn unreadable_newer_plist_needs_auth_instead_of_falling_back() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new("cred-newer-locked");
+    let new = write_plist(&t.0, NEW, logged("a", 11111111));
+    let old = write_plist(&t.0, OLD, logged("b", 22222222));
+    let past = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    std::fs::File::options()
+        .write(true)
+        .open(&new)
+        .unwrap()
+        .set_modified(past)
+        .unwrap();
+    std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let st = credentials_status(&t.0);
+    let loaded = load_credentials(&t.0).map(|c| c.uin);
+    std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(st, QqStatus::NeedsAuth);
+    assert_eq!(loaded, Err(QqStatus::NeedsAuth));
+}

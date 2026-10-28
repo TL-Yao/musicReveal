@@ -3,7 +3,7 @@
 use plist::Value;
 use std::fs::File;
 use std::io::{Cursor, ErrorKind};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 #[derive(Clone)]
@@ -62,24 +62,26 @@ const CONTAINER: &str = "Library/Containers/com.tencent.QQMusicMac/Data";
 
 /// `system_apps` 是系统级 Applications 目录，测试时可替换。
 pub(crate) fn load_in(home: &Path, system_apps: &Path) -> Result<Credentials, QqStatus> {
-    let mut best: Option<(SystemTime, File)> = None;
+    // 用 metadata（不需要读权限）选较新者；较新者读不了就是 NeedsAuth，不回落旧文件
+    let mut best: Option<(SystemTime, PathBuf)> = None;
     let mut denied = false;
     for p in [home.join(PLIST), home.join(CONTAINER).join(PLIST)] {
-        match File::open(&p) {
-            Ok(f) => {
-                let t = f
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .unwrap_or(SystemTime::UNIX_EPOCH);
+        match std::fs::metadata(&p) {
+            Ok(m) => {
+                let t = m.modified().unwrap_or(SystemTime::UNIX_EPOCH);
                 if best.as_ref().is_none_or(|(b, _)| t > *b) {
-                    best = Some((t, f));
+                    best = Some((t, p));
                 }
             }
             Err(e) => denied |= e.kind() == ErrorKind::PermissionDenied,
         }
     }
     match best {
-        Some((_, f)) => parse(f).ok_or(QqStatus::LoggedOut),
+        Some((_, p)) => match File::open(&p) {
+            Ok(f) => parse(f).ok_or(QqStatus::LoggedOut),
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => Err(QqStatus::NeedsAuth),
+            Err(_) => Err(QqStatus::LoggedOut),
+        },
         None if denied => Err(QqStatus::NeedsAuth),
         None if system_apps.join("QQMusic.app").exists()
             || home.join("Applications/QQMusic.app").exists() =>
