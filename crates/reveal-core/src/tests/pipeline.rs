@@ -484,3 +484,73 @@ fn dropped_convert_future_leaves_no_part_files() {
         .collect();
     assert!(left.is_empty(), "{left:?}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_converts_with_same_name_never_overwrite() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("pl-race");
+    let plain = flac24(&ff, &t, &[]);
+    let input = t.write("src.ncm", &build_ncm(&plain, b"k", META, None));
+    let out = out_dir(&t);
+    const N: usize = 8;
+    let mut tasks = vec![];
+    for _ in 0..N {
+        let (input, out) = (input.clone(), out.clone());
+        tasks.push(tokio::spawn(async move {
+            let opts = ConvertOptions {
+                output_dir: out,
+                format: OutputFormat::Original,
+                ffmpeg: None,
+            };
+            convert(
+                &input,
+                &opts,
+                &LyricEnricher,
+                None,
+                &CancelToken::default(),
+                &mut |_| {},
+            )
+            .await
+            .unwrap()
+        }));
+    }
+    let mut outputs = vec![];
+    for t in tasks {
+        let o = t.await.unwrap();
+        outputs.push(o.output.clone());
+        outputs.push(o.lrc.unwrap());
+    }
+    outputs.sort();
+    outputs.dedup();
+    assert_eq!(outputs.len(), 2 * N, "有输出路径重复（被覆盖）");
+    let files = std::fs::read_dir(&out).unwrap().count();
+    assert_eq!(files, 2 * N);
+}
+
+#[tokio::test]
+async fn existing_lrc_or_symlink_is_never_overwritten() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("pl-lrc-exist");
+    let plain = flac24(&ff, &t, &[]);
+    let input = t.write("src.ncm", &build_ncm(&plain, b"k", META, None));
+    let out = out_dir(&t);
+    std::fs::write(out.join("歌手甲, 歌手乙 - 测试歌.lrc"), "keep").unwrap();
+    let victim = t.write("victim.txt", b"victim");
+    std::os::unix::fs::symlink(&victim, out.join("歌手甲, 歌手乙 - 测试歌 (2).lrc")).unwrap();
+    let o = run(&input, &out, OutputFormat::Original, &LyricEnricher, None)
+        .await
+        .res
+        .unwrap();
+    assert_eq!(name(&o.output), "歌手甲, 歌手乙 - 测试歌 (3).flac");
+    assert_eq!(
+        name(o.lrc.as_ref().unwrap()),
+        "歌手甲, 歌手乙 - 测试歌 (3).lrc"
+    );
+    assert_eq!(o.renamed, Some(3));
+    assert_eq!(
+        std::fs::read_to_string(out.join("歌手甲, 歌手乙 - 测试歌.lrc")).unwrap(),
+        "keep"
+    );
+    assert_eq!(std::fs::read(&victim).unwrap(), b"victim");
+    assert!(!out.join("歌手甲, 歌手乙 - 测试歌.flac").exists());
+}

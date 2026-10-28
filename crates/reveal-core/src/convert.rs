@@ -45,24 +45,71 @@ fn truncate(s: &str, max: usize) -> &str {
     clean(&s[..end])
 }
 
-/// 目录里第一个不存在的 `stem.ext` / `stem (n).ext`，整个文件名 ≤ 200 字节。
-pub(crate) fn unique_path(dir: &Path, stem: &str, ext: &str) -> (PathBuf, Option<u32>) {
-    let mut n = 1u32;
-    loop {
-        let suffix = if n == 1 {
-            format!(".{ext}")
-        } else {
-            format!(" ({n}).{ext}")
-        };
-        let p = dir.join(format!(
-            "{}{suffix}",
-            truncate(stem, MAX_NAME - suffix.len())
-        ));
-        if !p.exists() {
-            return (p, (n > 1).then_some(n));
+/// 第 n 个候选名：`stem.ext`、`stem (n).ext`，整个文件名 ≤ 200 字节。
+pub(crate) fn numbered(dir: &Path, stem: &str, n: u32, ext: &str) -> PathBuf {
+    let suffix = if n == 1 {
+        format!(".{ext}")
+    } else {
+        format!(" ({n}).{ext}")
+    };
+    dir.join(format!(
+        "{}{suffix}",
+        truncate(stem, MAX_NAME - suffix.len())
+    ))
+}
+
+/// 不覆盖地把 `src` 落到 `dst`；目标已存在（含悬空符号链接）返回 AlreadyExists。
+fn place(src: &Path, dst: &Path) -> std::io::Result<()> {
+    match std::fs::hard_link(src, dst) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(src);
+            Ok(())
         }
-        n += 1;
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
+        // 不支持硬链接的文件系统（exFAT 等）：先独占创建占位，再 rename 换进去
+        Err(_) => {
+            std::fs::File::create_new(dst)?;
+            std::fs::rename(src, dst).inspect_err(|_| {
+                let _ = std::fs::remove_file(dst);
+            })
+        }
     }
+}
+
+/// 依次试候选名，音频与同名 `.lrc`（有歌词时）都不覆盖任何已有文件。
+fn land(
+    dir: &Path,
+    stem: &str,
+    ext: &str,
+    audio: &Path,
+    lrc: Option<&str>,
+) -> std::io::Result<(PathBuf, Option<u32>, Option<PathBuf>)> {
+    use std::io::ErrorKind::AlreadyExists;
+    for n in 1.. {
+        let out = numbered(dir, stem, n, ext);
+        let lrc_out = out.with_extension("lrc");
+        if let Some(text) = lrc {
+            match std::fs::File::create_new(&lrc_out) {
+                Ok(mut f) => f.write_all(text.as_bytes()).inspect_err(|_| {
+                    let _ = std::fs::remove_file(&lrc_out);
+                })?,
+                Err(e) if e.kind() == AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        match place(audio, &out) {
+            Ok(()) => return Ok((out, (n > 1).then_some(n), lrc.map(|_| lrc_out))),
+            Err(e) => {
+                if lrc.is_some() {
+                    let _ = std::fs::remove_file(&lrc_out);
+                }
+                if e.kind() != AlreadyExists {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    unreachable!("候选编号用尽")
 }
 
 use crate::{
@@ -602,16 +649,9 @@ pub async fn convert(
 
     let fallback = input.file_stem().unwrap_or_default().to_string_lossy();
     let stem = file_stem(meta.title.as_deref(), &meta.artists, &fallback);
-    let (output, renamed) = unique_path(dir, &stem, ext(&container));
-    std::fs::rename(&cur, &output).map_err(io_err)?;
-    let lrc = match &meta.lyrics {
-        Some(l) => {
-            let p = output.with_extension("lrc");
-            std::fs::write(&p, merge_lrc(l)).map_err(io_err)?;
-            Some(p)
-        }
-        None => None,
-    };
+    let lrc_text = meta.lyrics.as_ref().map(merge_lrc);
+    let (output, renamed, lrc) =
+        land(dir, &stem, ext(&container), &cur, lrc_text.as_deref()).map_err(io_err)?;
     Ok(ConvertOutcome {
         output,
         lrc,
