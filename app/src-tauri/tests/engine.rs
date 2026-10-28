@@ -641,6 +641,53 @@ async fn output_dir_inside_watch_folder_is_not_rescanned() {
     assert_eq!(r.fake.calls().len(), 1);
 }
 
+/// 输出文件夹永不当输入：否则普通音频转完又被扫到，无限复制出「(2)」。
+#[tokio::test]
+async fn watch_folder_equal_to_or_inside_output_dir_yields_nothing() {
+    let r = Rig::new("loop").await;
+    let inner = r.out.join("sub");
+    std::fs::create_dir_all(&inner).unwrap();
+    put(&r.out, "a.mp3", b"x");
+    put(&inner, "b.mp3", b"x");
+    for f in [&r.out, &inner] {
+        assert_eq!(
+            r.eng
+                .add_watch_folder(&f.to_string_lossy())
+                .unwrap()
+                .existing,
+            0
+        );
+    }
+    for _ in 0..4 {
+        r.eng.tick();
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let s = r.eng.snapshot();
+    assert!(s.jobs.is_empty(), "{:?}", s.jobs);
+    assert!(s.notices.is_empty());
+    assert!(s.folders.iter().all(|f| f.accessible), "{:?}", s.folders);
+    assert!(r.fake.calls().is_empty());
+}
+
+/// 拖入或「添加文件…」：输出文件夹里（含子目录）的文件不当输入，否则会转出「(2)」副本。
+#[tokio::test]
+async fn added_files_inside_output_dir_are_ignored() {
+    let r = Rig::new("addout").await;
+    let sub = r.out.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    let a = put(&r.out, "a.mp3", b"x");
+    let b = put(&sub, "b.ncm", b"x");
+    r.eng
+        .add_files(vec![a.to_string_lossy().into(), b.to_string_lossy().into()]);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        r.eng.snapshot().jobs.is_empty(),
+        "{:?}",
+        r.eng.snapshot().jobs
+    );
+    assert!(r.fake.calls().is_empty());
+}
+
 #[tokio::test]
 async fn corrupt_settings_and_history_do_not_crash() {
     let t = Tmp::new("corrupt");
@@ -729,32 +776,6 @@ async fn cover_becomes_small_thumbnail_url() {
         .filter_map(|l| l.split(':').nth(1)?.trim().parse().ok())
         .collect();
     assert_eq!(dims, vec![256, 192], "{text}");
-}
-
-#[tokio::test]
-async fn preview_reports_playing_until_it_ends_and_rejects_ogg() {
-    let r = Rig::new("preview").await;
-    let a = put(&r.t.0, "a.ncm", b"x");
-    let o = put(&r.t.0, "o.mgg", b"x");
-    r.eng
-        .add_files(vec![a.to_string_lossy().into(), o.to_string_lossy().into()]);
-    let ja = r.wait("a.ncm", JobState::Done).await;
-    let jo = r.wait("o.mgg", JobState::Done).await;
-    assert_eq!(
-        r.eng.play_preview(&jo.id).unwrap_err(),
-        "该格式暂不支持试听"
-    );
-    // 「audio」五个字节不是音频，afplay 很快退出 → playing 回到 false
-    r.eng.play_preview(&ja.id).unwrap();
-    assert!(r.job("a.ncm").unwrap().playing);
-    for _ in 0..500 {
-        if !r.job("a.ncm").unwrap().playing {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert!(!r.job("a.ncm").unwrap().playing);
-    r.eng.stop_preview();
 }
 
 #[tokio::test]
@@ -1277,4 +1298,86 @@ async fn start_removes_leftover_part_files_only() {
     let mut want: Vec<String> = keep.iter().map(|s| s.to_string()).collect();
     want.sort();
     assert_eq!(left, want);
+}
+
+/// 普通音频入库：监听文件夹里的 mp3 经真实转换器进输出文件夹；快照回调交给资料库观察，
+/// 它据此换到输出文件夹，并在任务完成时立即重扫（资料库不自动轮询）。
+#[tokio::test(flavor = "multi_thread")]
+async fn plain_audio_is_ingested_and_shows_up_in_library() {
+    use musicreveal_app::library::Library;
+    let ff = reveal_core::find_ffmpeg().expect("需要 ffmpeg");
+    let t = Tmp::new("plain");
+    let (watch, out) = (t.dir("watch"), t.dir("out"));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let lib = Library::new(
+        t.0.join("data"),
+        Box::new(move |v| {
+            let _ = tx.send(v);
+        }),
+    )
+    .with_poll_interval(None);
+    let l = lib.clone();
+    let eng = Engine::new(
+        t.0.join("data"),
+        Arc::new(RealConverter::new(t.0.clone())),
+        Box::new(move |s| l.observe(&s)),
+    )
+    .with_poll_interval(None);
+    eng.start().await;
+    eng.complete_onboarding(
+        vec![watch.to_string_lossy().into()],
+        out.to_string_lossy().into(),
+        "original",
+    )
+    .unwrap();
+    // 先等资料库在空的输出文件夹上扫完：之后能看到新歌只能靠任务完成时的重扫
+    loop {
+        let v = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("资料库没换到输出文件夹");
+        if v.dir == out.to_string_lossy() && !v.scanning {
+            break;
+        }
+    }
+    let tmp = t.0.join("歌.mp3");
+    let st = std::process::Command::new(ff)
+        .args(["-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=440:d=1"])
+        .args(["-c:a", "libmp3lame", "-metadata", "title=入库", "-metadata"])
+        .arg("artist=某人")
+        .arg(&tmp)
+        .status()
+        .unwrap();
+    assert!(st.success());
+    std::fs::rename(&tmp, watch.join("歌.mp3")).unwrap();
+    settle(&eng);
+
+    let mut job = None;
+    for _ in 0..3000 {
+        job = eng
+            .snapshot()
+            .jobs
+            .into_iter()
+            .find(|j| j.state == JobState::Done);
+        if job.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let job = job.unwrap_or_else(|| panic!("没完成：{:?}", eng.snapshot().jobs));
+    assert_eq!(job.platform, Platform::Other);
+    let output = PathBuf::from(job.output.unwrap());
+    assert!(output.starts_with(&out) && output.exists(), "{output:?}");
+
+    let id = output.to_string_lossy().into_owned();
+    let v = loop {
+        let v = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("资料库没看到新歌");
+        if v.tracks.iter().any(|t| t.id == id) {
+            break v;
+        }
+    };
+    assert_eq!(v.dir, out.to_string_lossy());
+    assert_eq!(lib.track(&id).unwrap().title, "入库");
+    eng.shutdown().await;
 }

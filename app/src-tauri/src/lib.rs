@@ -1,8 +1,13 @@
-//! musicReveal 桌面应用：Tauri 外壳，把 `engine` 暴露成命令与 `snapshot` 事件。
+//! musicReveal 桌面应用：Tauri 外壳，把 `engine`、`library`、`player` 暴露成命令与
+//! `snapshot` / `library` / `player` 事件。
 
 pub mod engine;
+pub mod library;
+pub mod player;
 
 use engine::{AddFolderResult, Engine, RealConverter, Snapshot};
+use library::{Library, LibraryView, Lyric};
+use player::{Player, PlayerState};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
 
@@ -92,16 +97,102 @@ async fn reveal_in_finder(e: State<'_, Engine>, id: String) -> R<()> {
 }
 
 #[tauri::command]
-async fn play_preview(e: State<'_, Engine>, id: String) -> R<()> {
-    e.ready().await;
-    e.play_preview(&id)
+async fn player_play(p: State<'_, Player>, ids: Vec<String>, index: u32) -> R<()> {
+    p.play(ids, index as usize)
 }
 
 #[tauri::command]
-async fn stop_preview(e: State<'_, Engine>) -> R<()> {
-    e.ready().await;
-    e.stop_preview();
+async fn player_toggle(p: State<'_, Player>) -> R<()> {
+    p.toggle();
     Ok(())
+}
+
+#[tauri::command]
+async fn player_next(p: State<'_, Player>) -> R<()> {
+    p.next();
+    Ok(())
+}
+
+#[tauri::command]
+async fn player_prev(p: State<'_, Player>) -> R<()> {
+    p.prev();
+    Ok(())
+}
+
+#[tauri::command]
+async fn player_seek(p: State<'_, Player>, ms: u64) -> R<()> {
+    p.seek(ms);
+    Ok(())
+}
+
+#[tauri::command]
+async fn player_set_volume(p: State<'_, Player>, volume: f32) -> R<()> {
+    p.set_volume(volume);
+    Ok(())
+}
+
+#[tauri::command]
+async fn player_set_shuffle(p: State<'_, Player>, on: bool) -> R<()> {
+    p.set_shuffle(on);
+    Ok(())
+}
+
+#[tauri::command]
+async fn player_set_repeat(p: State<'_, Player>, mode: String) -> R<()> {
+    p.set_repeat(mode.parse()?);
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_player(p: State<'_, Player>) -> R<PlayerState> {
+    Ok(p.state())
+}
+
+#[tauri::command]
+async fn open_settings(app: AppHandle) -> R<()> {
+    show_settings(&app).map_err(|e| format!("无法打开设置：{e}"))
+}
+
+/// 设置窗口：已开就聚焦，不重复开。
+fn show_settings(app: &AppHandle) -> tauri::Result<()> {
+    if let Some(w) = app.get_webview_window("settings") {
+        w.show()?;
+        return w.set_focus();
+    }
+    tauri::WebviewWindowBuilder::new(
+        app,
+        "settings",
+        tauri::WebviewUrl::App("index.html?view=settings".into()),
+    )
+    .title("设置")
+    .inner_size(520.0, 440.0)
+    .resizable(false)
+    .build()
+    .map(drop)
+}
+
+/// 标准菜单，应用菜单里加「设置…」⌘,。
+fn menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+    let menu = Menu::default(app)?;
+    if let Some(first) = menu.items()?.first().and_then(|i| i.as_submenu().cloned()) {
+        // 「关于」与分隔线之后
+        first.insert_items(
+            &[
+                &MenuItem::with_id(app, "settings", "设置…", true, Some("CmdOrCtrl+,"))?,
+                &PredefinedMenuItem::separator(app)?,
+            ],
+            2,
+        )?;
+    }
+    Ok(menu)
+}
+
+fn show_main(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
 }
 
 #[tauri::command]
@@ -121,6 +212,26 @@ async fn dismiss_notice(e: State<'_, Engine>, id: String) -> R<()> {
     e.ready().await;
     e.dismiss_notice(&id);
     Ok(())
+}
+
+#[tauri::command]
+async fn get_library(l: State<'_, Library>) -> R<LibraryView> {
+    Ok(l.view())
+}
+
+#[tauri::command]
+async fn get_lyrics(l: State<'_, Library>, id: String) -> R<Option<Vec<Lyric>>> {
+    Ok(l.lyrics(&id))
+}
+
+#[tauri::command]
+async fn trash_track(l: State<'_, Library>, id: String) -> R<()> {
+    l.trash(&id)
+}
+
+#[tauri::command]
+async fn reveal_track(l: State<'_, Library>, id: String) -> R<()> {
+    l.reveal(&id)
 }
 
 #[tauri::command]
@@ -188,25 +299,55 @@ pub fn run() {
             }
             app.asset_protocol_scope()
                 .allow_directory(data.join("covers"), true)?;
+            app.asset_protocol_scope()
+                .allow_directory(library::covers_dir(&data), true)?;
             let h = app.handle().clone();
+            let lib = Library::new(
+                data.clone(),
+                Box::new(move |v| {
+                    let _ = h.emit("library", v);
+                }),
+            );
+            app.manage(lib.clone());
+            let h = app.handle().clone();
+            let data_dir = data.clone();
             let eng = Engine::new(
                 data,
                 Arc::new(RealConverter::new(engine::home())),
                 Box::new(move |s| {
+                    lib.observe(&s);
                     let _ = h.emit("snapshot", s);
                 }),
             );
             app.manage(eng.clone());
+            let h = app.handle().clone();
+            let player = Player::new(
+                data_dir,
+                Box::new(move |s| {
+                    let _ = h.emit("player", s);
+                }),
+            );
+            if let Err(e) = player.enable_media_controls() {
+                eprintln!("{e}");
+            }
+            app.manage(player);
             // 不在 setup 里同步等：命令会先等 start 完成
             tauri::async_runtime::spawn(async move { eng.start().await });
             Ok(())
         })
+        .menu(menu)
+        .on_menu_event(|app, ev| {
+            if ev.id() == "settings" {
+                let _ = show_settings(app);
+            }
+        })
         .on_window_event(|w, ev| {
-            // 关窗即退出：先取消当前任务并清理半成品
+            // 关主窗口只是隐藏：播放与转换照常进行，点 Dock 图标再显示，⌘Q 才退出
             if let tauri::WindowEvent::CloseRequested { api, .. } = ev {
-                api.prevent_close();
-                let _ = w.hide();
-                quit(w.app_handle().clone());
+                if w.label() == "main" {
+                    api.prevent_close();
+                    let _ = w.hide();
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -222,27 +363,36 @@ pub fn run() {
             retry_job,
             remove_job,
             reveal_in_finder,
-            play_preview,
-            stop_preview,
+            player_play,
+            player_toggle,
+            player_next,
+            player_prev,
+            player_seek,
+            player_set_volume,
+            player_set_shuffle,
+            player_set_repeat,
+            get_player,
+            open_settings,
             open_auth_settings,
             open_qq_music,
             pick_folder,
             dismiss_notice,
+            get_library,
+            get_lyrics,
+            trash_track,
+            reveal_track,
         ])
         .build(tauri::generate_context!())
         .expect("musicReveal 启动失败")
-        .run(|app, ev| {
+        .run(|app, ev| match ev {
             // ⌘Q、Dock 退出、系统注销走 applicationWillTerminate → RunEvent::Exit，
-            // 无法阻止；在返回前同步取消当前任务并清理半成品（关窗路径已做过，再调是空操作）。
-            if let RunEvent::Exit = ev {
+            // 无法阻止；在返回前先停播，再同步取消当前任务并清理半成品。
+            RunEvent::Exit => {
+                app.state::<Player>().stop();
                 tauri::async_runtime::block_on(app.state::<Engine>().shutdown());
             }
+            #[cfg(target_os = "macos")]
+            RunEvent::Reopen { .. } => show_main(app),
+            _ => {}
         });
-}
-
-fn quit(app: AppHandle) {
-    tauri::async_runtime::spawn(async move {
-        app.state::<Engine>().shutdown().await;
-        app.exit(0);
-    });
 }

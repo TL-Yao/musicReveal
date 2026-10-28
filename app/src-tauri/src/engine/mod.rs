@@ -2,8 +2,8 @@
 
 mod model;
 mod real;
-mod scan;
-mod store;
+pub(crate) mod scan;
+pub(crate) mod store;
 
 pub use model::*;
 pub use real::RealConverter;
@@ -103,8 +103,6 @@ struct State {
     /// 最近一次 QQ 新格式转换被拒（登录过期）。
     qq_rejected: bool,
     ticks: u64,
-    /// 正在试听：任务 id、本次编号、afplay 子进程。
-    preview: Option<(u64, u64, tokio::process::Child)>,
     next_id: u64,
     stopping: bool,
 }
@@ -132,7 +130,7 @@ fn id_of(s: &str) -> u64 {
 }
 
 /// 与前端 `convertFileSrc` 相同的 asset 协议地址（macOS）。
-fn asset_url(p: &Path) -> String {
+pub(crate) fn asset_url(p: &Path) -> String {
     let mut s = String::from("asset://localhost/");
     for b in p.to_string_lossy().bytes() {
         if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) {
@@ -263,7 +261,6 @@ impl State {
             renamed: None,
             error: None,
             output: None,
-            playing: false,
         };
         self.live.insert(src.clone(), id);
         self.tasks.push(Task {
@@ -535,7 +532,6 @@ impl Engine {
                 qq_stamp: None,
                 qq_rejected: false,
                 ticks: 0,
-                preview: None,
                 next_id: 0,
                 stopping: false,
             }),
@@ -878,14 +874,14 @@ impl Engine {
         Ok(())
     }
 
-    /// 拖入的文件或文件夹（只看一层，规则同监听扫描），直接入队。
+    /// 拖入的文件或文件夹（只看一层，规则同监听扫描），直接入队；输出文件夹里的不算。
     pub fn add_files(&self, paths: Vec<String>) {
         let skip = self.lock().settings.output_dir.clone();
         let mut files = vec![];
         for p in paths.into_iter().map(PathBuf::from) {
             if p.is_dir() {
                 files.extend(scan::shallow(&p, &skip));
-            } else if scan::candidate(&p) {
+            } else if scan::candidate(&p) && !p.starts_with(&skip) {
                 files.extend(scan::stat(&p).map(|s| (p, s)));
             }
         }
@@ -972,7 +968,6 @@ impl Engine {
     /// 取消当前任务并等它清理完；宽限期过了还没停就丢弃它。返回后不再写盘。
     /// 被中断的任务不写记录。
     pub async fn shutdown(&self) {
-        self.stop_preview();
         let tok = self.edit(|st| {
             st.stopping = true;
             st.running.as_ref().map(|(_, t)| t.clone())
@@ -1027,58 +1022,6 @@ impl Engine {
             .map_err(|e| format!("无法打开系统设置：{e}"))
     }
 
-    /// 用 afplay 试听；再次调用会先停掉上一个。
-    pub fn play_preview(&self, id: &str) -> Result<(), String> {
-        let out = self.output_of(id)?;
-        let ext = out
-            .extension()
-            .map(|e| e.to_string_lossy().to_ascii_lowercase());
-        if ext.as_deref() == Some("ogg") {
-            return Err("该格式暂不支持试听".into());
-        }
-        self.stop_preview();
-        let child = tokio::process::Command::new("afplay")
-            .arg(&out)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| format!("无法试听：{e}"))?;
-        let gen = self.edit(|st| {
-            st.next_id += 1;
-            st.preview = Some((id_of(id), st.next_id, child));
-            st.next_id
-        });
-        let me = self.clone();
-        tokio::spawn(async move {
-            // ponytail: 200ms 轮询子进程是否结束，够用
-            loop {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                let ended = match me.lock().preview.as_mut() {
-                    Some((_, g, c)) if *g == gen => c.try_wait().map_or(true, |s| s.is_some()),
-                    _ => return,
-                };
-                if ended {
-                    me.edit(|st| {
-                        if st.preview.as_ref().is_some_and(|p| p.1 == gen) {
-                            st.preview = None;
-                        }
-                    });
-                    return;
-                }
-            }
-        });
-        Ok(())
-    }
-
-    pub fn stop_preview(&self) {
-        self.edit(|st| {
-            if let Some((_, _, mut c)) = st.preview.take() {
-                let _ = c.start_kill();
-            }
-        });
-    }
-
     /// 失败或等登录的任务重新入队。
     pub fn retry_job(&self, id: &str) {
         let id = id_of(id);
@@ -1096,11 +1039,6 @@ impl Engine {
         let id = id_of(id);
         self.edit(|st| {
             st.remove(id);
-            if st.preview.as_ref().is_some_and(|p| p.0 == id) {
-                if let Some((_, _, mut c)) = st.preview.take() {
-                    let _ = c.start_kill();
-                }
-            }
             if let Some((_, tok)) = st.running.as_ref().filter(|(r, _)| *r == id) {
                 tok.cancel();
             }
@@ -1116,14 +1054,12 @@ impl Engine {
             .enumerate()
             .map(|(i, id)| (*id, i as u32 + 1))
             .collect();
-        let playing = st.preview.as_ref().map(|p| p.0);
         let jobs: Vec<Job> = st
             .tasks
             .iter()
             .rev()
             .map(|t| Job {
                 queue_pos: pos.get(&t.id).copied(),
-                playing: Some(t.id) == playing,
                 ..t.view.clone()
             })
             .collect();
