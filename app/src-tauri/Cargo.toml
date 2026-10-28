@@ -1,0 +1,24 @@
+[package]
+name = "musicreveal-app"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "musicReveal 桌面应用：监听、队列与 Tauri 外壳"
+
+[lib]
+name = "musicreveal_app"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+reveal-core = { path = "../../crates/reveal-core" }
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1.92"
+tokio = { version = "1.54.1", features = ["rt", "macros", "process", "time", "sync"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread"] }

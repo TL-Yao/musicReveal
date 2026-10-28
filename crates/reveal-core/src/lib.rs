@@ -205,6 +205,16 @@ fn decrypt_qmc2(
     )
 }
 
+/// 扩展名属于本库能处理的加密格式（NCM / QMC 各变体）。
+pub fn is_candidate(path: &Path) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    ext == "ncm" || qmc::V1_EXTS.contains(&ext.as_str()) || qmc::V2_EXTS.contains(&ext.as_str())
+}
+
 pub fn sniff(path: &Path) -> Result<SourceKind, Error> {
     let mut f = File::open(path)?;
     let head = read_head(&mut f, 16)?;
