@@ -125,7 +125,7 @@ pub(crate) fn trim_tail(path: &Path) -> std::io::Result<bool> {
         let mut ends = vec![];
         for (k, &b) in w[i..].iter().enumerate() {
             crc = crc16_step(crc, b);
-            if crc == 0 && k >= hlen + 1 {
+            if crc == 0 && k > hlen {
                 ends.push(k + 1);
             }
         }
