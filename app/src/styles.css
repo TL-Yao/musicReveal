@@ -403,10 +403,11 @@ input[type=range].slider::-webkit-slider-thumb { -webkit-appearance: none; width
 .lyr-lines { position: relative; overflow-y: auto; padding: 0 var(--s6) 0 var(--s3); scrollbar-width: none; -webkit-mask: linear-gradient(transparent, #000 14%, #000 84%, transparent); mask: linear-gradient(transparent, #000 14%, #000 84%, transparent); }
 .lyr-lines::-webkit-scrollbar { display: none; }
 .lyr-pad { height: var(--pad, 200px); }
-.ln { font-size: var(--fs-lyric); font-weight: 700; line-height: 1.3; letter-spacing: -.01em; color: var(--lyr-dim); padding: var(--s2) var(--s3); margin: 0 calc(-1 * var(--s3)); border-radius: var(--r-card); cursor: pointer; transform-origin: left center; filter: blur(var(--bl, 0px)); transition: color var(--dur-base), filter var(--dur-base), transform var(--dur-base) var(--spring-soft), background var(--dur-fast); }
-.ln.past { color: var(--lyr-past); }
-.ln.cur { color: var(--lyr-cur); transform: scale(1.03); --bl: 0px !important; }
-.ln:hover { background: rgba(255,255,255,.08); filter: blur(0); }
+/* 模糊用 text-shadow 画，不用 filter：WKWebView 里 filter: blur 的合成层会在文字末尾留下品红竖条 */
+.ln { --c: var(--lyr-dim); font-size: var(--fs-lyric); font-weight: 700; line-height: 1.3; letter-spacing: -.01em; color: transparent; text-shadow: 0 0 calc(var(--bl, 0px) * 2) var(--c); padding: var(--s2) var(--s3); margin: 0 calc(-1 * var(--s3)); border-radius: var(--r-card); cursor: pointer; transform-origin: left center; transition: text-shadow var(--dur-base), transform var(--dur-base) var(--spring-soft), background var(--dur-fast); }
+.ln.past { --c: var(--lyr-past); }
+.ln.cur { --c: var(--lyr-cur); transform: scale(1.03); --bl: 0px !important; }
+.ln:hover { background: rgba(255,255,255,.08); --bl: 0px !important; }
 .ln .tr { display: block; font-size: var(--fs-body); font-weight: 500; margin-top: 3px; opacity: .78; letter-spacing: 0; }
 .ln.gap { font-size: var(--fs-title); letter-spacing: .4em; }
 .lyr-none { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; }
@@ -461,7 +462,7 @@ input[type=range].slider::-webkit-slider-thumb { -webkit-appearance: none; width
 .tile .art.latent { filter: saturate(0) brightness(.5) !important; transform: none !important; }
 .tile .art.clear { clip-path: none; opacity: var(--dev); }
 .tile .wash, .fly { display: none; }
-.ln { filter: none !important; transform: none !important; }
+.ln { --bl: 0px !important; transform: none !important; }
 .stage, .stage-card, .notice, .swap, .qqcard { filter: none !important; transform: none !important; animation: none !important; }
 .eq i, .live, .dash::after, .tile .ring { animation: none !important; }
 }
