@@ -76,40 +76,41 @@ fn place(src: &Path, dst: &Path) -> std::io::Result<()> {
     }
 }
 
-/// 依次试候选名，音频与同名 `.lrc`（有歌词时）都不覆盖任何已有文件。
+/// 依次试候选名，不覆盖任何已有文件。
 fn land(
     dir: &Path,
     stem: &str,
     ext: &str,
     audio: &Path,
-    lrc: Option<&str>,
-) -> std::io::Result<(PathBuf, Option<u32>, Option<PathBuf>)> {
-    use std::io::ErrorKind::AlreadyExists;
+) -> std::io::Result<(PathBuf, Option<u32>)> {
     for n in 1.. {
         let out = numbered(dir, stem, n, ext);
-        let lrc_out = out.with_extension("lrc");
-        if let Some(text) = lrc {
-            match std::fs::File::create_new(&lrc_out) {
-                Ok(mut f) => f.write_all(text.as_bytes()).inspect_err(|_| {
-                    let _ = std::fs::remove_file(&lrc_out);
-                })?,
-                Err(e) if e.kind() == AlreadyExists => continue,
-                Err(e) => return Err(e),
-            }
-        }
         match place(audio, &out) {
-            Ok(()) => return Ok((out, (n > 1).then_some(n), lrc.map(|_| lrc_out))),
-            Err(e) => {
-                if lrc.is_some() {
-                    let _ = std::fs::remove_file(&lrc_out);
-                }
-                if e.kind() != AlreadyExists {
-                    return Err(e);
-                }
-            }
+            Ok(()) => return Ok((out, (n > 1).then_some(n))),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
         }
     }
     unreachable!("候选编号用尽")
+}
+
+/// 写 `<dir>/lrc/…` 下的 .lrc：覆盖已有的（是符号链接就换成普通文件，不写穿）。
+fn write_lrc(dir: &Path, audio: &Path, text: &str) -> std::io::Result<PathBuf> {
+    let p = lrc_home(dir, audio);
+    let parent = p.parent().unwrap_or(dir);
+    std::fs::create_dir_all(parent)?;
+    let mut parts = Parts::default();
+    let tmp = parts.add(parent);
+    std::fs::File::create_new(&tmp)?.write_all(text.as_bytes())?;
+    std::fs::rename(&tmp, &p)?;
+    Ok(p)
+}
+
+/// 普通音频源旁的同名 .lrc：解析得出带时间的行才算。
+fn sidecar_lrc(input: &Path) -> Option<String> {
+    let t = std::fs::read_to_string(input.with_extension("lrc")).ok()?;
+    let t = t.strip_prefix('\u{feff}').unwrap_or(&t);
+    (!parse_lrc(t).is_empty()).then(|| t.to_owned())
 }
 
 use crate::{
@@ -437,11 +438,13 @@ pub(crate) fn front_cover(tag: &Tag) -> Option<Vec<u8>> {
         .map(|p| p.data().to_vec())
 }
 
-/// 写入标签并返回音质描述。`src_lyrics`：源文件内嵌歌词，转码会丢，补全没给歌词时写回。
+/// 写入标签并返回音质描述。`lyrics`：要嵌入的歌词；`src_lyrics`：源文件内嵌歌词，转码会丢，
+/// 没有 `lyrics` 时写回。
 fn write_tags(
     p: &Path,
     m: &TrackMeta,
     c: &Container,
+    lyrics: Option<&str>,
     src_lyrics: Option<&str>,
 ) -> Result<String, ConvertError> {
     let mut f = read_audio(p)?;
@@ -476,9 +479,9 @@ fn write_tags(
         t.set_disk(v);
     }
     let key = lyrics_key(t);
-    match (&m.lyrics, src_lyrics) {
+    match (lyrics, src_lyrics) {
         (Some(l), _) => {
-            t.insert_text(key, strip_timestamps(&l.lrc));
+            t.insert_text(key, l.to_owned());
         }
         (None, Some(s)) if lyrics_of(&[t]).is_none() => {
             t.insert_text(key, s.to_owned());
@@ -690,6 +693,7 @@ pub async fn convert(
     progress: &mut (dyn FnMut(Stage) + Send),
 ) -> Result<ConvertOutcome, ConvertError> {
     let kind = sniff(input)?;
+    let plain = matches!(kind, SourceKind::Plain(_));
     let ekey = match &kind {
         SourceKind::MusicEx {
             song_mid,
@@ -821,9 +825,21 @@ pub async fn convert(
             log::warn!("元数据补全失败：{e}");
         },
     }
+    // 普通音频没有带时间的歌词时，收下源旁的 .lrc
+    let timed = |l: &str| !parse_lrc(l).is_empty();
+    let lrc_text = meta.lyrics.as_ref().map(merge_lrc).or_else(|| {
+        (plain && !src_lyrics.as_deref().is_some_and(timed))
+            .then(|| sidecar_lrc(input))
+            .flatten()
+    });
     let quality = {
-        let (p, m, c) = (cur.clone(), meta.clone(), container.clone());
-        blocking(move || write_tags(&p, &m, &c, src_lyrics.as_deref())).await?
+        let (p, m, c, l) = (
+            cur.clone(),
+            meta.clone(),
+            container.clone(),
+            lrc_text.clone(),
+        );
+        blocking(move || write_tags(&p, &m, &c, l.as_deref(), src_lyrics.as_deref())).await?
     };
     if cancel.is_cancelled() {
         return Err(ConvertError::Cancelled);
@@ -831,16 +847,20 @@ pub async fn convert(
 
     let fallback = input.file_stem().unwrap_or_default().to_string_lossy();
     let stem = file_stem(meta.title.as_deref(), &meta.artists, &fallback);
-    let lrc_text = meta.lyrics.as_ref().map(merge_lrc);
-    let (output, renamed, lrc) =
-        land(dir, &stem, ext(&container), &cur, lrc_text.as_deref()).map_err(io_err)?;
+    let (output, renamed) = land(dir, &stem, ext(&container), &cur).map_err(io_err)?;
+    // 歌词已嵌入音频：.lrc 写不成只记日志，不让已落盘的歌算作失败
+    let lrc = lrc_text.as_deref().and_then(|t| {
+        write_lrc(dir, &output, t)
+            .inspect_err(|e| log::warn!("写 .lrc 失败（{}）：{e}", output.display()))
+            .ok()
+    });
     Ok(ConvertOutcome {
         output,
         lrc,
         renamed,
         quality,
         has_cover: meta.cover.is_some(),
-        has_lyrics: meta.lyrics.is_some(),
+        has_lyrics: lrc_text.is_some(),
         meta,
     })
 }

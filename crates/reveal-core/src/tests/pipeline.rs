@@ -331,6 +331,9 @@ impl Enricher for LyricEnricher {
     }
 }
 
+/// `LyricEnricher` 的原文与译文按时刻合并后的 LRC。
+const MERGED: &str = "[ar:x]\n[00:01.00]第一句\n[00:02.50]second\n[00:02.50]第二句\n";
+
 #[tokio::test]
 async fn enricher_fields_and_lyrics_are_written() {
     let Some(ff) = ffmpeg() else { return };
@@ -344,14 +347,11 @@ async fn enricher_fields_and_lyrics_are_written() {
         .unwrap();
     assert!(o.has_lyrics);
     let lrc = o.lrc.unwrap();
-    assert_eq!(name(&lrc), "歌手甲、歌手乙 - 测试歌.lrc");
-    assert_eq!(
-        std::fs::read_to_string(&lrc).unwrap(),
-        "[ar:x]\n[00:01.00]第一句\n[00:02.50]second\n[00:02.50]第二句\n"
-    );
+    assert_eq!(lrc, out.join("lrc/歌手甲、歌手乙 - 测试歌.lrc"));
+    assert_eq!(std::fs::read_to_string(&lrc).unwrap(), MERGED);
     let f = read_back(&o.output);
     let tag = f.primary_tag().unwrap();
-    assert_eq!(tag.get_string(ItemKey::Lyrics), Some("第一句\nsecond"));
+    assert_eq!(tag.get_string(ItemKey::Lyrics), Some(MERGED));
     assert_eq!(tag.date().map(|d| d.year), Some(2021));
     assert_eq!((tag.track(), tag.disk()), (Some(3), Some(1)));
     assert_eq!(tag.get_string(ItemKey::AlbumArtist), Some("群星"));
@@ -427,7 +427,7 @@ async fn lyrics_are_embedded_in_every_format() {
         let lyr = tag
             .get_string(ItemKey::Lyrics)
             .or(tag.get_string(ItemKey::UnsyncLyrics));
-        assert_eq!(lyr, Some("第一句\nsecond"), "{ext}");
+        assert_eq!(lyr, Some(MERGED), "{ext}");
     }
 }
 
@@ -603,36 +603,130 @@ async fn concurrent_converts_with_same_name_never_overwrite() {
     outputs.sort();
     outputs.dedup();
     assert_eq!(outputs.len(), 2 * N, "有输出路径重复（被覆盖）");
-    let files = std::fs::read_dir(&out).unwrap().count();
-    assert_eq!(files, 2 * N);
+    let count = |d: &Path| std::fs::read_dir(d).unwrap().count();
+    assert_eq!(count(&out), N + 1, "N 首歌 + lrc 文件夹");
+    assert_eq!(count(&out.join("lrc")), N);
 }
 
 #[tokio::test]
-async fn existing_lrc_or_symlink_is_never_overwritten() {
+async fn lrc_in_lrc_folder_is_overwritten_and_never_affects_audio_numbering() {
     let Some(ff) = ffmpeg() else { return };
     let t = Tmp::new("pl-lrc-exist");
     let plain = flac24(&ff, &t, &[]);
     let input = t.write("src.ncm", &build_ncm(&plain, b"k", META, None));
     let out = out_dir(&t);
-    std::fs::write(out.join("歌手甲、歌手乙 - 测试歌.lrc"), "keep").unwrap();
-    let victim = t.write("victim.txt", b"victim");
-    std::os::unix::fs::symlink(&victim, out.join("歌手甲、歌手乙 - 测试歌 (2).lrc")).unwrap();
+    let lrcs = out.join("lrc");
+    std::fs::create_dir_all(&lrcs).unwrap();
+    // 旧版留在音频旁的 .lrc、lrc 文件夹里的同名 .lrc 都不再让音频换编号
+    std::fs::write(out.join("歌手甲、歌手乙 - 测试歌.lrc"), "旁边").unwrap();
+    std::fs::write(lrcs.join("歌手甲、歌手乙 - 测试歌.lrc"), "旧").unwrap();
     let o = run(&input, &out, OutputFormat::Original, &LyricEnricher, None)
         .await
         .res
         .unwrap();
-    assert_eq!(name(&o.output), "歌手甲、歌手乙 - 测试歌 (3).flac");
-    assert_eq!(
-        name(o.lrc.as_ref().unwrap()),
-        "歌手甲、歌手乙 - 测试歌 (3).lrc"
-    );
-    assert_eq!(o.renamed, Some(3));
+    assert_eq!(name(&o.output), "歌手甲、歌手乙 - 测试歌.flac");
+    assert_eq!(o.renamed, None);
+    assert_eq!(o.lrc, Some(lrcs.join("歌手甲、歌手乙 - 测试歌.lrc")));
+    assert_eq!(std::fs::read_to_string(o.lrc.unwrap()).unwrap(), MERGED);
     assert_eq!(
         std::fs::read_to_string(out.join("歌手甲、歌手乙 - 测试歌.lrc")).unwrap(),
-        "keep"
+        "旁边"
     );
+
+    // 音频照旧不覆盖、换编号；编号对应的 .lrc 若是符号链接，换成普通文件，不写穿到目标
+    let victim = t.write("victim.txt", b"victim");
+    std::os::unix::fs::symlink(&victim, lrcs.join("歌手甲、歌手乙 - 测试歌 (2).lrc")).unwrap();
+    let o = run(&input, &out, OutputFormat::Original, &LyricEnricher, None)
+        .await
+        .res
+        .unwrap();
+    assert_eq!(name(&o.output), "歌手甲、歌手乙 - 测试歌 (2).flac");
+    assert_eq!(o.renamed, Some(2));
+    let lrc = o.lrc.unwrap();
+    assert_eq!(lrc, lrcs.join("歌手甲、歌手乙 - 测试歌 (2).lrc"));
+    assert!(!std::fs::symlink_metadata(&lrc).unwrap().is_symlink());
+    assert_eq!(std::fs::read_to_string(&lrc).unwrap(), MERGED);
     assert_eq!(std::fs::read(&victim).unwrap(), b"victim");
-    assert!(!out.join("歌手甲、歌手乙 - 测试歌.flac").exists());
+    let hidden: Vec<_> = std::fs::read_dir(&lrcs)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with('.'))
+        .collect();
+    assert!(hidden.is_empty(), "{hidden:?}");
+}
+
+/// 普通音频，旁边放 `lrc`（为 None 不放），内嵌歌词 `embedded`；返回转换结果。
+async fn plain_with_sidecar(
+    tag: &str,
+    lrc: Option<&str>,
+    embedded: Option<&str>,
+) -> (Tmp, PathBuf, ConvertOutcome) {
+    let ff = find_ffmpeg().unwrap();
+    let t = Tmp::new(tag);
+    let src = t.0.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let input = src.join("旁带歌词.flac");
+    let mut args = vec!["-c:a", "flac", "-metadata", "title=旁带"];
+    let kv = embedded.map(|l| format!("lyrics={l}"));
+    if let Some(kv) = &kv {
+        args.extend(["-metadata", kv]);
+    }
+    gen(&ff, &input, &args);
+    if let Some(l) = lrc {
+        std::fs::write(input.with_extension("lrc"), l).unwrap();
+    }
+    let out = out_dir(&t);
+    let o = run(&input, &out, OutputFormat::Original, &NoopEnricher, None)
+        .await
+        .res
+        .unwrap();
+    if let Some(l) = lrc {
+        assert_eq!(
+            std::fs::read_to_string(input.with_extension("lrc")).unwrap(),
+            l,
+            "源旁的 .lrc 不动"
+        );
+    }
+    (t, out, o)
+}
+
+#[tokio::test]
+async fn plain_audio_takes_the_lrc_beside_it() {
+    if ffmpeg().is_none() {
+        return;
+    }
+    let text = "[ti:旁]\n[00:01.00]旁边的词\n";
+    let (_t, out, o) = plain_with_sidecar("pl-side", Some(text), None).await;
+    assert!(o.has_lyrics);
+    assert_eq!(read_lyrics(&o.output).as_deref(), Some(text));
+    assert_eq!(o.lrc, Some(out.join("lrc/旁带.lrc")));
+    assert_eq!(std::fs::read_to_string(o.lrc.unwrap()).unwrap(), text);
+
+    // 只有纯文本内嵌歌词：同样换成带时间的 .lrc
+    let (_t, _, o) = plain_with_sidecar("pl-side-plain", Some(text), Some("纯文本")).await;
+    assert_eq!(read_lyrics(&o.output).as_deref(), Some(text));
+    assert!(o.lrc.is_some());
+}
+
+#[tokio::test]
+async fn sidecar_without_timed_lines_or_with_timed_embedded_lyrics_is_ignored() {
+    if ffmpeg().is_none() {
+        return;
+    }
+    let (_t, out, o) =
+        plain_with_sidecar("pl-side-untimed", Some("[ti:只有标签]\n纯文本\n"), None).await;
+    assert!(!o.has_lyrics && o.lrc.is_none());
+    assert_eq!(read_lyrics(&o.output), None);
+    assert!(!out.join("lrc").exists());
+
+    let (_t, _, o) = plain_with_sidecar(
+        "pl-side-timed",
+        Some("[00:01.00]旁边\n"),
+        Some("[00:02.00]内嵌"),
+    )
+    .await;
+    assert_eq!(read_lyrics(&o.output).as_deref(), Some("[00:02.00]内嵌"));
+    assert!(o.lrc.is_none());
 }
 
 fn decodes_cleanly(ff: &Path, p: &Path) {
