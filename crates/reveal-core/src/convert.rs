@@ -227,6 +227,9 @@ pub enum ConvertError {
     Cancelled,
     Incomplete,
     Unsupported(String),
+    /// 源文件本身坏了（解密 / 容器层面），重试也不会好。
+    Corrupt(String),
+    /// 其余失败，可能是暂时性或环境性的（网络、磁盘、ffmpeg 等）。
     Failed(String),
 }
 
@@ -237,6 +240,7 @@ impl std::fmt::Display for ConvertError {
             ConvertError::Cancelled => f.write_str("已取消"),
             ConvertError::Incomplete => f.write_str("文件不完整（可能仍在下载或已被截断）"),
             ConvertError::Unsupported(s) => write!(f, "不支持的格式：{s}"),
+            ConvertError::Corrupt(s) => write!(f, "文件已损坏：{s}"),
             ConvertError::Failed(s) => f.write_str(s),
         }
     }
@@ -250,6 +254,7 @@ impl From<crate::Error> for ConvertError {
         match e {
             E::Incomplete => ConvertError::Incomplete,
             E::Unsupported(s) => ConvertError::Unsupported(s),
+            E::Corrupt(s) => ConvertError::Corrupt(s),
             E::NeedsEkey | E::BadEkey => ConvertError::NeedsLogin,
             e => ConvertError::Failed(e.to_string()),
         }

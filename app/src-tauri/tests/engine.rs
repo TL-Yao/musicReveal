@@ -1197,27 +1197,38 @@ async fn same_content_under_another_name_is_skipped() {
 #[tokio::test]
 async fn failed_file_is_not_caught_up_again_until_it_changes() {
     let r = Rig::new("failrec").await;
-    r.fake
-        .fail("bad.ncm", ConvertError::Failed("文件已损坏：x".into()));
+    r.fake.fail("bad.ncm", ConvertError::Corrupt("x".into()));
     r.fake.fail("inc.ncm", ConvertError::Incomplete);
+    r.fake.fail(
+        "net.mflac",
+        ConvertError::Failed("网络错误：timeout".into()),
+    );
     let bad = put(&r.watch, "bad.ncm", b"x");
     put(&r.watch, "inc.ncm", b"x");
+    put(&r.watch, "net.mflac", b"x");
     settle(&r.eng);
-    r.wait("bad.ncm", JobState::Failed).await;
+    let j = r.wait("bad.ncm", JobState::Failed).await;
+    assert_eq!(j.error.as_deref(), Some("文件已损坏"));
     r.wait("inc.ncm", JobState::Downloading).await;
+    r.wait("net.mflac", JobState::Failed).await;
     r.eng.shutdown().await;
     let e2 = engine(&r.t, &r.fake).await;
-    // 不完整的不算失败：照常补转；损坏且没变的不再自动入队
+    // 不完整、网络错误都不是文件本身的问题：照常补转；损坏且没变的不再自动入队
     let n = notices(&e2, NoticeKind::CaughtUp);
     assert_eq!(n.len(), 1);
-    assert_eq!(n[0].count, 1);
+    assert_eq!(n[0].count, 2);
     for _ in 0..500 {
-        if r.fake.calls().len() == 3 {
+        if r.fake.calls().len() == 5 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(r.fake.calls(), vec!["bad.ncm", "inc.ncm", "inc.ncm"]);
+    let mut calls = r.fake.calls();
+    calls.sort();
+    assert_eq!(
+        calls,
+        vec!["bad.ncm", "inc.ncm", "inc.ncm", "net.mflac", "net.mflac"]
+    );
     assert!(e2.snapshot().jobs.iter().all(|j| j.file_name != "bad.ncm"));
     // 文件变了就当新文件
     append(&bad, b"2");
@@ -1233,7 +1244,7 @@ async fn failed_file_is_not_caught_up_again_until_it_changes() {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(r.fake.calls().len(), 4);
+    assert_eq!(r.fake.calls().len(), 6);
 }
 
 #[tokio::test]

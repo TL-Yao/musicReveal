@@ -729,3 +729,14 @@ async fn bkcape_becomes_flac_or_mp3() {
     let plain = std::fs::read(&p).unwrap();
     legacy_container_case(&ff, &t, "a.bkcape", &plain, ["flac", "mp3"]).await;
 }
+
+#[tokio::test]
+async fn corrupt_source_is_reported_as_corrupt_with_the_same_text() {
+    let t = Tmp::new("pl-corrupt");
+    let input = t.write("a.ncm", b"definitely not an ncm file");
+    let out = out_dir(&t);
+    let r = run(&input, &out, OutputFormat::Original, &NoopEnricher, None).await;
+    let e = r.res.unwrap_err();
+    assert!(matches!(e, ConvertError::Corrupt(_)), "{e:?}");
+    assert_eq!(e.to_string(), "文件已损坏：不是 NCM 文件（魔数不符）");
+}

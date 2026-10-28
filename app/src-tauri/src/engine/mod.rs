@@ -49,6 +49,7 @@ fn reason(e: &ConvertError) -> String {
     match e {
         ConvertError::Unsupported(_) => "不支持的格式".into(),
         ConvertError::Incomplete => "文件不完整".into(),
+        ConvertError::Corrupt(_) => "文件已损坏".into(),
         ConvertError::Failed(s) => s.split(['：', '（']).next().unwrap_or(s).trim().into(),
         e => e.to_string(),
     }
@@ -846,7 +847,8 @@ impl Engine {
                     Err(e) => {
                         t.view.state = JobState::Failed;
                         t.view.error = Some(reason(&e));
-                        if matches!(e, ConvertError::Unsupported(_) | ConvertError::Failed(_)) {
+                        // 只记源文件本身的问题；网络、磁盘等暂时性失败下次启动照常补转
+                        if matches!(e, ConvertError::Unsupported(_) | ConvertError::Corrupt(_)) {
                             st.history.fail(key);
                             return true;
                         }
