@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# 构建随 musicReveal 分发的精简 ffmpeg：LGPL、arm64、macOS 11+，静态链接 LAME。
+# 产物：build/ffmpeg/out/ffmpeg 与 build/ffmpeg/out/licenses/。已存在则直接复用，
+# 传 --force 重新构建。源码包缓存在 build/ffmpeg/dl/，校验 SHA-256 后才使用。
+set -euo pipefail
+
+FFMPEG_VER=9.0.2
+FFMPEG_SHA256=8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e
+FFMPEG_URL="https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VER}.tar.xz"
+LAME_VER=3.100
+LAME_SHA256=ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e
+LAME_URL="https://downloads.sourceforge.net/project/lame/lame/${LAME_VER}/lame-${LAME_VER}.tar.gz"
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BASE="$ROOT/build/ffmpeg"
+DL="$BASE/dl"
+OUT="$BASE/out"
+WORK="$BASE/work"
+
+if [[ "${1:-}" != "--force" && -x "$OUT/ffmpeg" && -f "$OUT/licenses/SOURCE.md" ]]; then
+  echo "ffmpeg 已构建：$OUT/ffmpeg"
+  exit 0
+fi
+
+fetch() { # url sha256 file
+  local f="$DL/$3"
+  if [[ ! -f "$f" ]] || ! echo "$2  $f" | shasum -a 256 -c --status; then
+    echo "下载 $1"
+    curl -fL --retry 3 -o "$f.part" "$1"
+    mv "$f.part" "$f"
+  fi
+  echo "$2  $f" | shasum -a 256 -c
+}
+
+mkdir -p "$DL"
+fetch "$FFMPEG_URL" "$FFMPEG_SHA256" "ffmpeg-${FFMPEG_VER}.tar.xz"
+fetch "$LAME_URL" "$LAME_SHA256" "lame-${LAME_VER}.tar.gz"
+
+rm -rf "$WORK" "$OUT"
+mkdir -p "$WORK/prefix" "$OUT/licenses"
+trap 'rm -rf "$WORK"' EXIT
+PREFIX="$WORK/prefix"
+JOBS="$(sysctl -n hw.ncpu)"
+
+export MACOSX_DEPLOYMENT_TARGET=11.0
+export CC=clang
+export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
+unset PKG_CONFIG_PATH LIBRARY_PATH CPATH C_INCLUDE_PATH
+ARCHFLAGS="-arch arm64 -mmacosx-version-min=11.0"
+
+tar -xzf "$DL/lame-${LAME_VER}.tar.gz" -C "$WORK"
+(
+  cd "$WORK/lame-${LAME_VER}"
+  CFLAGS="$ARCHFLAGS -O2" LDFLAGS="$ARCHFLAGS" ./configure \
+    --prefix="$PREFIX" --host=aarch64-apple-darwin --build=aarch64-apple-darwin \
+    --disable-shared --enable-static --disable-frontend --disable-decoder \
+    --disable-dependency-tracking >/dev/null
+  make -j"$JOBS" >/dev/null
+  make install >/dev/null
+)
+
+tar -xJf "$DL/ffmpeg-${FFMPEG_VER}.tar.xz" -C "$WORK"
+cd "$WORK/ffmpeg-${FFMPEG_VER}"
+# 路径用相对形式（../prefix），以免本机目录名写进 ffmpeg -version 的输出。
+CONF=(
+  --arch=arm64 --target-os=darwin --cc=clang
+  --extra-cflags="$ARCHFLAGS -I../prefix/include"
+  --extra-ldflags="$ARCHFLAGS -L../prefix/lib"
+  --disable-everything --disable-autodetect --disable-network
+  --disable-doc --disable-debug --disable-programs --enable-ffmpeg
+  --disable-avdevice --disable-swscale
+  --enable-zlib --enable-libmp3lame
+  --enable-protocol=file,pipe
+  --enable-demuxer=flac,ogg,mp3,mov,aac,wav
+  --enable-decoder=flac,vorbis,opus,mp3,mp3float,aac,alac,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_u8
+  --enable-parser=flac,vorbis,opus,mpegaudio,aac
+  --enable-encoder=libmp3lame
+  --enable-muxer=mp3
+  --enable-filter=abuffer,abuffersink,aformat,anull,aresample,atrim
+)
+./configure "${CONF[@]}" \
+  | tee "$WORK/configure.log" >/dev/null
+grep -q '^License: LGPL' "$WORK/configure.log" || { grep '^License' "$WORK/configure.log"; echo "许可证不是 LGPL，终止" >&2; exit 1; }
+make -j"$JOBS" ffmpeg >/dev/null
+strip -x ffmpeg -o "$OUT/ffmpeg"
+
+if otool -L "$OUT/ffmpeg" | tail -n +2 | grep -vE '^\s+/(usr/lib|System)/'; then
+  echo "ffmpeg 链接了系统之外的动态库，终止" >&2
+  exit 1
+fi
+
+cp COPYING.LGPLv2.1 "$OUT/licenses/ffmpeg-COPYING.LGPLv2.1"
+cp LICENSE.md "$OUT/licenses/ffmpeg-LICENSE.md"
+cp "$WORK/lame-${LAME_VER}/COPYING" "$OUT/licenses/LAME-COPYING"
+LICENSE_LINE="$(grep -o '^License:.*' "$WORK/configure.log")"
+cat >"$OUT/licenses/SOURCE.md" <<EOF
+# 随附 ffmpeg 的来源说明
+
+musicReveal.app 内的 \`Contents/MacOS/ffmpeg\` 是由 FFmpeg ${FFMPEG_VER} 与 LAME ${LAME_VER}
+（静态链接）编译而成的独立可执行文件，未启用任何 GPL 或 nonfree 组件（configure 输出：${LICENSE_LINE}）。
+它以独立进程方式被 musicReveal 调用，用于把音频转码为 MP3。
+
+- FFmpeg 源码：${FFMPEG_URL}
+  SHA-256：${FFMPEG_SHA256}
+- LAME 源码：${LAME_URL}
+  SHA-256：${LAME_SHA256}
+- 构建脚本：musicReveal 仓库中的 scripts/build-ffmpeg.sh，包含全部 configure 参数。
+
+FFmpeg 以 GNU LGPL 2.1 或更高版本授权，许可全文见 ffmpeg-COPYING.LGPLv2.1 与 ffmpeg-LICENSE.md；
+LAME 以 GNU LGPL 2 或更高版本授权，许可全文见 LAME-COPYING。
+你可以用上述源码和构建脚本自行编译，并替换 .app 中的 ffmpeg（替换后需重新签名）。
+如需本版本对应源码的副本，可在项目仓库的 Issue 中提出。
+
+完整 configure 参数：
+\`\`\`
+$(printf '%s\n' "${CONF[@]}")
+\`\`\`
+EOF
+echo "完成：$OUT/ffmpeg"
