@@ -486,3 +486,242 @@ fn truncated_musicex_is_incomplete() {
     let empty = t.write("b.mflac", b"");
     assert!(matches!(sniff(&empty), Err(Error::Incomplete)));
 }
+
+// ---------- 审查回归：下载中的前缀、非法长度、任意输入不 panic ----------
+
+fn is_incomplete<T: std::fmt::Debug>(r: Result<T, Error>) -> bool {
+    matches!(r, Err(Error::Incomplete))
+}
+
+fn musicex_trailer(size: u32) -> Vec<u8> {
+    [&size.to_le_bytes()[..], &1u32.to_le_bytes(), b"musicex\0"].concat()
+}
+
+fn qtag_trailer(n: u32) -> Vec<u8> {
+    [&n.to_be_bytes()[..], b"QTag"].concat()
+}
+
+#[test]
+fn short_musicex_tail_is_incomplete() {
+    let t = Tmp::new("r1");
+    for data in [&b"musicex\0"[..], b"1234musicex\0"] {
+        let p = t.write("a.mflac", data);
+        assert!(is_incomplete(sniff(&p)), "{data:?}");
+    }
+}
+
+#[test]
+fn arbitrary_tails_never_panic() {
+    let t = Tmp::new("r1b");
+    let rnd = audio(b"", 5000);
+    let mut suffixes: Vec<Vec<u8>> = vec![
+        vec![],
+        b"musicex\0".to_vec(),
+        b"QTag".to_vec(),
+        b"STag".to_vec(),
+    ];
+    for v in [0u32, 1, 4, 5, 0xBF, 0xC0, 0x1000, 0x20_0000, u32::MAX] {
+        suffixes.push(musicex_trailer(v));
+        suffixes.push(qtag_trailer(v));
+        suffixes.push(v.to_le_bytes().to_vec());
+    }
+    let kinds = [
+        SourceKind::Ncm,
+        SourceKind::QmcV1,
+        SourceKind::QmcV2 {
+            ekey: "AAAAAAAAAAAA".into(),
+        },
+        musicex_kind(),
+        SourceKind::Plain(Container::Mp3),
+    ];
+    for ext in ["mflac", "bkcflac", "ncm"] {
+        for suf in &suffixes {
+            for n in (0..24).chain([100, 0xC0, 1000, 4095, 5000]) {
+                let p = t.write(&format!("x.{ext}"), &[&rnd[..n], suf].concat());
+                let _ = sniff(&p);
+                for k in &kinds {
+                    let _ = decrypt(&p, k, Some("AAAAAAAAAAAA"), &mut std::io::sink());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn ncm_magic_prefix_is_incomplete() {
+    let t = Tmp::new("r2");
+    for data in [&b""[..], b"C", b"CTENFDA", b"CTENFDAM", b"CTENFDAM\0\0\x80"] {
+        let p = t.write("a.ncm", data);
+        assert!(is_incomplete(sniff(&p)), "{data:?}");
+    }
+    for data in [
+        &b"X"[..],
+        b"CTENFDAX",
+        b"ID3\x03\x00\x00\x00\x00\x00\x00 plain mp3",
+    ] {
+        let p = t.write("b.ncm", data);
+        assert!(matches!(sniff(&p), Err(Error::Corrupt(_))), "{data:?}");
+    }
+}
+
+#[test]
+fn tiny_audio_prefix_is_incomplete_on_every_path() {
+    let t = Tmp::new("r3");
+    let plain = audio(b"fLaC", 50_000);
+    let master: Vec<u8> = (0..256).map(|i| (i * 3 + 1) as u8).collect();
+    let ekey = make_ekey_v1(&master);
+    let v1 = enc(&crate::qmc::Cipher::static_v1(), &plain);
+    for n in [1, 5, 11] {
+        let p = t.write("a.bkcflac", &v1[..n]);
+        assert!(is_incomplete(sniff(&p)), "v1 sniff {n}");
+        assert!(
+            is_incomplete(decrypt(&p, &SourceKind::QmcV1, None, &mut Vec::new())),
+            "v1 {n}"
+        );
+        let p = t.write("a.mflac", &plain[..n]);
+        assert!(is_incomplete(sniff(&p)), "plain sniff {n}");
+        let r = decrypt(
+            &p,
+            &SourceKind::Plain(Container::Flac),
+            None,
+            &mut Vec::new(),
+        );
+        assert!(is_incomplete(r), "plain {n}");
+        let p = t.write("a.ncm", &build_ncm(&plain[..n], b"k3y", META_MULTI, None));
+        assert!(
+            is_incomplete(decrypt(&p, &SourceKind::Ncm, None, &mut Vec::new())),
+            "ncm {n}"
+        );
+        let p = t.write("b.mflac", &qtag(&qmc2(&master, &plain[..n]), &ekey));
+        let kind = sniff(&p).unwrap();
+        assert!(
+            is_incomplete(decrypt(&p, &kind, None, &mut Vec::new())),
+            "qtag {n}"
+        );
+        let p = t.write("c.mflac", &musicex(&qmc2(&master, &plain[..n])));
+        let r = decrypt(&p, &musicex_kind(), Some(&ekey), &mut Vec::new());
+        assert!(is_incomplete(r), "musicex {n}");
+    }
+}
+
+#[test]
+fn ncm_oversized_sections_are_corrupt() {
+    let t = Tmp::new("r4");
+    let u32le = |d: &[u8], p: usize| u32::from_le_bytes(d[p..p + 4].try_into().unwrap()) as usize;
+    let ok = build_ncm(&mp3(5000), b"0123456789abcdef", META_MULTI, Some(b"cover"));
+    let key_at = 10;
+    let meta_at = 14 + u32le(&ok, key_at);
+    let space_at = meta_at + 4 + u32le(&ok, meta_at) + 5;
+    let patch = |at: usize, vals: &[u32]| {
+        let mut d = ok.clone();
+        for (i, v) in vals.iter().enumerate() {
+            d[at + i * 4..at + i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        d
+    };
+    for (what, data) in [
+        ("key", patch(key_at, &[4097])),
+        ("key huge", patch(key_at, &[0xFFFF_FFF0])),
+        ("meta", patch(meta_at, &[(1 << 20) + 1])),
+        ("cover", patch(space_at, &[(32 << 20) + 1, (32 << 20) + 1])),
+    ] {
+        let p = t.write("a.ncm", &data);
+        assert!(
+            matches!(sniff(&p), Err(Error::Corrupt(_))),
+            "{what}: {:?}",
+            sniff(&p)
+        );
+    }
+}
+
+#[test]
+fn ncm_unrecognized_audio_is_corrupt_without_output() {
+    let t = Tmp::new("r5");
+    let p = t.write(
+        "a.ncm",
+        &build_ncm(&audio(b"", 5000), b"k3y", META_MULTI, None),
+    );
+    let mut out = Vec::new();
+    let r = decrypt(&p, &SourceKind::Ncm, None, &mut out);
+    assert!(matches!(r, Err(Error::Corrupt(_))), "{r:?}");
+    assert!(out.is_empty());
+}
+
+#[test]
+fn mp3_sniff_validates_frame_header() {
+    let t = Tmp::new("r7");
+    let p = t.write("a.mflac", &audio(&[0xFF, 0xFB, 0x90, 0x64], 5000));
+    assert_eq!(sniff(&p).unwrap(), SourceKind::Plain(Container::Mp3));
+    let master: Vec<u8> = (0..256).map(|i| (i * 3 + 1) as u8).collect();
+    for head in [
+        [0xFF, 0xE9, 0x90, 0x64],
+        [0xFF, 0xF9, 0x90, 0x64],
+        [0xFF, 0xFB, 0xF0, 0x64],
+        [0xFF, 0xFB, 0x9C, 0x64],
+    ] {
+        let p = t.write("b.mflac", &musicex(&qmc2(&master, &audio(&head, 5000))));
+        let r = decrypt(
+            &p,
+            &musicex_kind(),
+            Some(&make_ekey_v1(&master)),
+            &mut Vec::new(),
+        );
+        assert!(matches!(r, Err(Error::BadEkey)), "{head:02x?}: {r:?}");
+    }
+}
+
+#[test]
+fn qtag_longer_than_4k_is_read_fully() {
+    let t = Tmp::new("r8");
+    let master: Vec<u8> = (0..4096).map(|i| (i * 13 + 5) as u8).collect();
+    let ekey = make_ekey_v1(&master);
+    assert!(ekey.len() > 5000);
+    let plain = mp3(100_000);
+    let p = t.write("a.mgg", &qtag(&qmc2(&master, &plain), &ekey));
+    let (kind, _, out) = run(&p, None).unwrap();
+    assert_eq!(kind, SourceKind::QmcV2 { ekey });
+    assert!(out == plain);
+}
+
+#[test]
+fn footer_lengths_beyond_data_are_incomplete_and_illegal_are_corrupt() {
+    let t = Tmp::new("r9");
+    let body = mp3(3000);
+    let cases: [(&str, Vec<u8>, bool); 6] = [
+        (
+            "qtag > 数据",
+            [&body[..], &qtag_trailer(100_000)].concat(),
+            true,
+        ),
+        ("qtag < 最小", [&body[..], &qtag_trailer(3)].concat(), false),
+        (
+            "qtag > 上限",
+            [&body[..], &qtag_trailer(0x7FFF_FFFF)].concat(),
+            false,
+        ),
+        (
+            "musicex > 数据",
+            [&body[..], &musicex_trailer(100_000)].concat(),
+            true,
+        ),
+        (
+            "musicex < 最小",
+            [&body[..], &musicex_trailer(0x10)].concat(),
+            false,
+        ),
+        (
+            "musicex > 上限",
+            [&body[..], &musicex_trailer(0x7FFF_FFFF)].concat(),
+            false,
+        ),
+    ];
+    for (what, data, incomplete) in cases {
+        let p = t.write("a.mflac", &data);
+        let r = sniff(&p);
+        if incomplete {
+            assert!(is_incomplete(r), "{what}");
+        } else {
+            assert!(matches!(r, Err(Error::Corrupt(_))), "{what}: {r:?}");
+        }
+    }
+}

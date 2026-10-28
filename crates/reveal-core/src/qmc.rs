@@ -3,6 +3,8 @@
 //! MIT 许可全文见 crates/reveal-core/THIRD_PARTY_LICENSES.md。
 
 use crate::{Error, SourceKind};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 
 pub(crate) const V1_EXTS: &[&str] = &[
     "tkm", "bkcmp3", "bkcm4a", "bkcflac", "bkcwav", "bkcape", "bkcogg", "bkcwma", "666c6163",
@@ -230,7 +232,8 @@ pub(crate) fn derive_key(ekey: &str) -> Option<Vec<u8>> {
 // ---------- 文件尾 ----------
 // QTag / STag / PcV1Legacy 判别参考 music-geshizhuanhuan qmc.py `parse_footer`（MIT）。
 
-pub(crate) const TAIL: u64 = 4096;
+const TAIL: u64 = 4096;
+const MAX_FOOTER: u64 = 1 << 20;
 const MAX_EKEY_LEN: usize = 0x500;
 
 pub(crate) struct Footer {
@@ -240,19 +243,65 @@ pub(crate) struct Footer {
     pub kind: SourceKind,
 }
 
+enum Parsed {
+    Found(Footer),
+    Nothing,
+    /// 声明的文件尾比已读的尾部长，需要再读这么多字节。
+    Need(u64),
+}
+
+/// 从文件末尾读出 footer；`Ok(None)` 表示没有可识别的文件尾。
+pub(crate) fn read_footer(f: &mut File) -> Result<Option<Footer>, Error> {
+    let file_len = f.metadata()?.len();
+    let mut want = TAIL;
+    loop {
+        f.seek(SeekFrom::Start(file_len.saturating_sub(want)))?;
+        let mut tail = Vec::new();
+        (&mut *f).take(want).read_to_end(&mut tail)?;
+        match parse_footer(&tail, file_len)? {
+            Parsed::Found(ft) => return Ok(Some(ft)),
+            Parsed::Nothing => return Ok(None),
+            Parsed::Need(n) if n > want => want = n,
+            Parsed::Need(_) => return Err(Error::Corrupt("文件尾长度不一致".into())),
+        }
+    }
+}
+
+/// 校验文件尾声明的总长 `n`：低于格式最小值或超上限是真非法；超出文件是数据还没到。
+fn check_len(n: u64, min: u64, tail: &[u8], file_len: u64, what: &str) -> Result<bool, Error> {
+    if n < min || n > MAX_FOOTER {
+        return Err(Error::Corrupt(format!("{what} 长度非法 {n}")));
+    }
+    if n > file_len {
+        return Err(Error::Incomplete);
+    }
+    Ok(n <= tail.len() as u64)
+}
+
+fn u32_at(b: &[u8], at: usize, be: bool) -> u64 {
+    let raw: [u8; 4] = b[at..at + 4].try_into().unwrap();
+    u64::from(if be {
+        u32::from_be_bytes(raw)
+    } else {
+        u32::from_le_bytes(raw)
+    })
+}
+
 /// musicex V1：[0x0C..0x48) song mid、[0x48..0xB0) 媒体文件名（UTF-16LE，NUL 结尾），
 /// 末 16 字节 = u32 尾长 + u32 版本 + "musicex\0"。布局参考 qmunlock core/footer.rs（MIT）。
-fn musicex(tail: &[u8]) -> Result<Footer, Error> {
-    let t = &tail[tail.len() - 16..];
-    let size = u32::from_le_bytes(t[..4].try_into().unwrap()) as usize;
-    let version = u32::from_le_bytes(t[4..8].try_into().unwrap());
+fn musicex(tail: &[u8], file_len: u64) -> Result<Parsed, Error> {
+    let Some(t) = tail.len().checked_sub(16).map(|i| &tail[i..]) else {
+        return Err(Error::Incomplete);
+    };
+    let size = u32_at(t, 0, false);
+    if !check_len(size, 0xC0, tail, file_len, "musicex")? {
+        return Ok(Parsed::Need(size));
+    }
+    let version = u32_at(t, 4, false);
     if version != 1 {
         return Err(Error::Unsupported(format!("musicex 版本 {version}")));
     }
-    if size < 0xC0 || size > tail.len() {
-        return Err(Error::Corrupt(format!("musicex 尾长非法 0x{size:X}")));
-    }
-    let f = &tail[tail.len() - size..];
+    let f = &tail[tail.len() - size as usize..];
     let utf16 = |r: std::ops::Range<usize>| {
         let w: Vec<u16> = f[r]
             .chunks_exact(2)
@@ -264,13 +313,13 @@ fn musicex(tail: &[u8]) -> Result<Footer, Error> {
     let (Some(song_mid), Some(media_filename)) = (utf16(0x0C..0x48), utf16(0x48..0xB0)) else {
         return Err(Error::Corrupt("musicex 缺少歌曲 mid 或媒体文件名".into()));
     };
-    Ok(Footer {
-        size: size as u64,
+    Ok(Parsed::Found(Footer {
+        size,
         kind: SourceKind::MusicEx {
             song_mid,
             media_filename,
         },
-    })
+    }))
 }
 
 fn is_b64(s: &[u8]) -> bool {
@@ -279,60 +328,55 @@ fn is_b64(s: &[u8]) -> bool {
             .all(|&c| c.is_ascii_alphanumeric() || c == b'+' || c == b'/' || c == b'=')
 }
 
-fn len_prefixed(tail: &[u8], be: bool) -> Option<(&[u8], usize)> {
-    let body = &tail[..tail.len() - 4];
-    let raw: [u8; 4] = tail[tail.len() - 4..].try_into().unwrap();
-    let n = if be {
-        u32::from_be_bytes(raw)
-    } else {
-        u32::from_le_bytes(raw)
-    } as usize;
-    Some((body.get(body.len().checked_sub(n)?..)?, n))
+/// QTag：[ekey,资源 id,2][u32 大端长度]"QTag"。
+fn qtag(tail: &[u8], file_len: u64) -> Result<Parsed, Error> {
+    let size = u32_at(tail, tail.len() - 8, true) + 8;
+    if !check_len(size, "A,1,2".len() as u64 + 8, tail, file_len, "QTag")? {
+        return Ok(Parsed::Need(size));
+    }
+    let csv = &tail[tail.len() - size as usize..tail.len() - 8];
+    let parts: Vec<&[u8]> = csv.split(|&b| b == b',').collect();
+    if parts.len() != 3
+        || parts[2] != b"2"
+        || !parts[1].iter().all(u8::is_ascii_digit)
+        || !is_b64(parts[0])
+    {
+        return Err(Error::Corrupt("QTag 内容非法".into()));
+    }
+    Ok(Parsed::Found(Footer {
+        size,
+        kind: SourceKind::QmcV2 {
+            ekey: String::from_utf8_lossy(parts[0]).into_owned(),
+        },
+    }))
 }
 
-/// 解析文件末尾片段；`Ok(None)` 表示没有可识别的文件尾。
-pub(crate) fn parse_footer(tail: &[u8]) -> Result<Option<Footer>, Error> {
-    if tail.len() < 8 {
-        return Ok(None);
-    }
+fn parse_footer(tail: &[u8], file_len: u64) -> Result<Parsed, Error> {
     if tail.ends_with(b"musicex\0") {
-        return musicex(tail).map(Some);
+        return musicex(tail, file_len);
+    }
+    if tail.len() < 8 {
+        return Ok(Parsed::Nothing);
     }
     if tail.ends_with(b"STag") {
         return Err(Error::Unsupported(
             "STag 格式（安卓端，文件内无 ekey）暂不支持".into(),
         ));
     }
-    if let Some(t) = tail.strip_suffix(b"QTag") {
-        let (csv, n) =
-            len_prefixed(t, true).ok_or_else(|| Error::Corrupt("QTag 长度不一致".into()))?;
-        let parts: Vec<&[u8]> = csv.split(|&b| b == b',').collect();
-        if parts.len() != 3
-            || parts[2] != b"2"
-            || !parts[1].iter().all(u8::is_ascii_digit)
-            || !is_b64(parts[0])
-        {
-            return Err(Error::Corrupt("QTag 内容非法".into()));
-        }
-        return Ok(Some(Footer {
-            size: n as u64 + 8,
-            kind: SourceKind::QmcV2 {
-                ekey: String::from_utf8_lossy(parts[0]).into_owned(),
-            },
-        }));
+    if tail.ends_with(b"QTag") {
+        return qtag(tail, file_len);
     }
-    // PcV1Legacy：[ekey][u32 小端长度]
-    let Some((ekey, n)) = len_prefixed(tail, false) else {
-        return Ok(None);
-    };
-    if n == 0 || n > MAX_EKEY_LEN {
-        return Ok(None);
+    // PcV1Legacy：[ekey][u32 小端长度]，无魔数，只能按形状猜；对不上就当没有文件尾。
+    let n = u32_at(tail, tail.len() - 4, false) as usize;
+    if n == 0 || n > MAX_EKEY_LEN || n + 4 > tail.len() {
+        return Ok(Parsed::Nothing);
     }
+    let ekey = &tail[tail.len() - 4 - n..tail.len() - 4];
     let ekey = &ekey[..ekey.iter().position(|&b| b == 0).unwrap_or(ekey.len())];
     if !is_b64(ekey) {
-        return Ok(None);
+        return Ok(Parsed::Nothing);
     }
-    Ok(Some(Footer {
+    Ok(Parsed::Found(Footer {
         size: n as u64 + 4,
         kind: SourceKind::QmcV2 {
             ekey: String::from_utf8_lossy(ekey).into_owned(),

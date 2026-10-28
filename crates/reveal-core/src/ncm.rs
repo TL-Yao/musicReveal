@@ -2,7 +2,7 @@
 //! music-geshizhuanhuan contributors）music_unlock/formats/ncm.py 与 ciphers.py。
 //! MIT 许可全文见 crates/reveal-core/THIRD_PARTY_LICENSES.md。
 
-use crate::{eof, pump, Container, Decrypted, EmbeddedMeta, Error, Platform, SongId};
+use crate::{eof, pump, Decrypted, EmbeddedMeta, Error, Platform, SongId};
 use aes::cipher::{BlockDecrypt, KeyInit};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -24,7 +24,11 @@ fn u32le(f: &mut File) -> Result<u32, Error> {
     Ok(u32::from_le_bytes(b))
 }
 
-fn block(f: &mut File, len: u32, file_len: u64) -> Result<Vec<u8>, Error> {
+/// 长度字段不可信：先按区块上限拒绝（防止按伪造长度分配），再看数据是否已到。
+fn block(f: &mut File, len: u32, max: u32, file_len: u64, what: &str) -> Result<Vec<u8>, Error> {
+    if len > max {
+        return Err(Error::Corrupt(format!("NCM {what}长度非法 {len}")));
+    }
     if f.stream_position()? + len as u64 > file_len {
         return Err(Error::Incomplete);
     }
@@ -66,19 +70,22 @@ pub(crate) fn read_header(f: &mut File) -> Result<Header, Error> {
     let file_len = f.metadata()?.len();
     f.seek(SeekFrom::Start(10))?; // magic(8) + 2 字节间隙
     let n = u32le(f)?;
-    let key_blob: Vec<u8> = block(f, n, file_len)?.iter().map(|b| b ^ 0x64).collect();
+    let key_blob: Vec<u8> = block(f, n, 4 << 10, file_len, "密钥区")?
+        .iter()
+        .map(|b| b ^ 0x64)
+        .collect();
     let key = aes_ecb_unpad(CORE_KEY, key_blob)
         .filter(|k| k.len() > 17)
         .ok_or_else(|| Error::Corrupt("NCM 密钥区解密失败".into()))?;
     let n = u32le(f)?;
-    let meta = parse_meta(&block(f, n, file_len)?);
+    let meta = parse_meta(&block(f, n, 1 << 20, file_len, "元数据")?);
     f.seek(SeekFrom::Current(5))?; // CRC(4) + 1 字节间隙
     let space = u32le(f)?;
     let size = u32le(f)?;
     if size > space {
         return Err(Error::Corrupt("NCM 封面长度非法".into()));
     }
-    let cover = block(f, size, file_len)?;
+    let cover = block(f, size, 32 << 20, file_len, "封面")?;
     f.seek(SeekFrom::Current((space - size) as i64))?;
     if f.stream_position()? >= file_len {
         return Err(Error::Incomplete);
@@ -130,11 +137,6 @@ fn meta_of(v: Option<&serde_json::Value>, cover: Option<Vec<u8>>) -> EmbeddedMet
 pub(crate) fn decrypt(mut f: File, out: &mut dyn Write) -> Result<Decrypted, Error> {
     let h = read_header(&mut f)?;
     let bx = key_box(&h.rc4_key);
-    let fallback = h.meta.as_ref().and_then(|m| match m["format"].as_str()? {
-        "flac" => Some(Container::Flac),
-        "mp3" => Some(Container::Mp3),
-        _ => None,
-    });
     let container = pump(
         f,
         out,
@@ -143,7 +145,7 @@ pub(crate) fn decrypt(mut f: File, out: &mut dyn Write) -> Result<Decrypted, Err
                 *b ^= bx[((off as usize) + i + 1) & 0xff];
             }
         },
-        || fallback.ok_or_else(|| Error::Corrupt("NCM 解密后不是可识别的音频".into())),
+        || Err(Error::Corrupt("NCM 解密后不是可识别的音频".into())),
     )?;
     Ok(Decrypted {
         container,

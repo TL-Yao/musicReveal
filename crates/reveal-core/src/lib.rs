@@ -102,6 +102,8 @@ mod ncm;
 mod qmc;
 
 const BUF: usize = 1 << 20;
+/// 少于这么多字节无法可靠嗅探容器（WAV 需要 12 字节），视为数据还没到。
+const MIN_HEAD: usize = 12;
 
 fn eof(e: std::io::Error) -> Error {
     if e.kind() == std::io::ErrorKind::UnexpectedEof {
@@ -116,7 +118,16 @@ fn sniff_container(h: &[u8]) -> Option<Container> {
         [b'f', b'L', b'a', b'C', ..] => Container::Flac,
         [b'O', b'g', b'g', b'S', ..] => Container::Ogg,
         [b'I', b'D', b'3', ..] => Container::Mp3,
-        [0xFF, b, ..] if b & 0xE0 == 0xE0 => Container::Mp3,
+        // MPEG 帧头：同步 11 位，版本非保留(01)、层非保留(00)、码率索引非 1111、采样率索引非 11
+        [0xFF, b1, b2, ..]
+            if b1 & 0xE0 == 0xE0
+                && (b1 >> 3) & 3 != 1
+                && (b1 >> 1) & 3 != 0
+                && b2 >> 4 != 0xF
+                && (b2 >> 2) & 3 != 3 =>
+        {
+            Container::Mp3
+        }
         [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'A', b'V', b'E', ..] => Container::Wav,
         [_, _, _, _, b'f', b't', b'y', b'p', ..] => Container::M4a,
         _ => return None,
@@ -132,7 +143,7 @@ fn pump(
 ) -> Result<Container, Error> {
     let mut buf = Vec::with_capacity(BUF);
     (&mut r).take(BUF as u64).read_to_end(&mut buf)?;
-    if buf.is_empty() {
+    if buf.len() < MIN_HEAD {
         return Err(Error::Incomplete);
     }
     xor(&mut buf, 0);
@@ -160,12 +171,6 @@ fn read_head(f: &mut File, n: usize) -> Result<Vec<u8>, Error> {
     Ok(v)
 }
 
-fn read_tail(f: &mut File) -> Result<Vec<u8>, Error> {
-    let len = f.metadata()?.len();
-    f.seek(SeekFrom::Start(len.saturating_sub(qmc::TAIL)))?;
-    read_head(f, qmc::TAIL as usize)
-}
-
 /// QMC2：按文件尾确定音频长度，用 ekey 派生的主密钥流式解密。
 fn decrypt_qmc2(
     mut f: File,
@@ -174,7 +179,7 @@ fn decrypt_qmc2(
     out: &mut dyn Write,
 ) -> Result<Container, Error> {
     let len = f.metadata()?.len();
-    let ft = qmc::parse_footer(&read_tail(&mut f)?)?.ok_or(Error::Incomplete)?;
+    let ft = qmc::read_footer(&mut f)?.ok_or(Error::Incomplete)?;
     let cipher = qmc::Cipher::new(&qmc::derive_key(ekey).ok_or_else(bad)?);
     f.seek(SeekFrom::Start(0))?;
     pump(
@@ -188,15 +193,22 @@ fn decrypt_qmc2(
 pub fn sniff(path: &Path) -> Result<SourceKind, Error> {
     let mut f = File::open(path)?;
     let head = read_head(&mut f, 16)?;
-    if head.starts_with(ncm::MAGIC) {
-        ncm::read_header(&mut f)?;
-        return Ok(SourceKind::Ncm);
-    }
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
+    if head.starts_with(ncm::MAGIC) {
+        ncm::read_header(&mut f)?;
+        return Ok(SourceKind::Ncm);
+    }
+    if ext == "ncm" {
+        return Err(if ncm::MAGIC.starts_with(&head) {
+            Error::Incomplete
+        } else {
+            Error::Corrupt("不是 NCM 文件（魔数不符）".into())
+        });
+    }
     let (v1, v2) = (
         qmc::V1_EXTS.contains(&ext.as_str()),
         qmc::V2_EXTS.contains(&ext.as_str()),
@@ -204,13 +216,13 @@ pub fn sniff(path: &Path) -> Result<SourceKind, Error> {
     if !v1 && !v2 {
         return Err(Error::Unsupported(format!("无法识别的扩展名 .{ext}")));
     }
-    if head.is_empty() {
-        return Err(Error::Incomplete);
-    }
     if v2 {
-        if let Some(ft) = qmc::parse_footer(&read_tail(&mut f)?)? {
+        if let Some(ft) = qmc::read_footer(&mut f)? {
             return Ok(ft.kind);
         }
+    }
+    if head.len() < MIN_HEAD {
+        return Err(Error::Incomplete);
     }
     if let Some(c) = sniff_container(&head) {
         return Ok(SourceKind::Plain(c));
