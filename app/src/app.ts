@@ -139,7 +139,8 @@ function renderSubtitle() {
     const n = s.folders.filter((f) => f.accessible).length, bad = s.folders.length - n;
     html = `<span class="live"></span>监听 ${n} 个文件夹`;
     if (bad) html += ` · ${bad} 个无法访问`;
-    if (s.busy) html += ` · ${s.busy} 首处理中`;
+    const busy = s.jobs.filter((j) => j.state === "decrypt" || j.state === "transcode" || j.state === "metadata").length;
+    if (busy) html += ` · ${busy} 首处理中`;
     if (s.waitingLogin) html += ` · ${s.waitingLogin} 首待登录`;
   }
   if (p.innerHTML !== html) p.innerHTML = html;
