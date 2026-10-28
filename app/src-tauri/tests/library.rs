@@ -274,3 +274,56 @@ fn polling_picks_up_new_files_within_three_seconds() {
     assert!(t0.elapsed() < Duration::from_secs(3), "{:?}", t0.elapsed());
     assert_eq!(ids(&v), [id(&a)]);
 }
+
+/// 把内容换成同样大小的空字节、mtime 拨回原样：再读标签就会失败，只有缓存还记得原来的。
+fn spoil_keeping_stat(p: &Path) {
+    let m = std::fs::metadata(p).unwrap();
+    std::fs::write(p, vec![0u8; m.len() as usize]).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(p)
+        .unwrap()
+        .set_modified(m.modified().unwrap())
+        .unwrap();
+}
+
+#[test]
+fn tags_are_cached_across_restarts_and_dropped_with_the_file() {
+    let r = Rig::new("cache");
+    let a = mp3(&r.out.join("a.mp3"), &[("title", "缓存")], None);
+    let b = mp3(&r.out.join("b.mp3"), &[("title", "乙")], None);
+    r.lib.set_dir(&r.out);
+    settled(&r.rx);
+    spoil_keeping_stat(&a);
+
+    let (lib, rx) = open(&r.data());
+    lib.set_dir(&r.out);
+    let (partial, v) = settled(&rx);
+    assert!(
+        partial.is_empty(),
+        "全部命中缓存，不必进入扫描中：{partial:?}"
+    );
+    assert_eq!(ids(&v), [id(&a), id(&b)]);
+    assert_eq!(lib.track(&id(&a)).unwrap().title, "缓存");
+
+    std::fs::remove_file(&a).unwrap();
+    lib.refresh();
+    let (_, v) = settled(&rx);
+    assert_eq!(ids(&v), [id(&b)]);
+    let json = std::fs::read_to_string(r.data().join("library.json")).unwrap();
+    assert!(!json.contains("a.mp3") && json.contains("b.mp3"), "{json}");
+}
+
+#[test]
+fn first_scan_reports_scanning_then_the_full_list() {
+    let r = Rig::new("partial");
+    let a = mp3(&r.out.join("000.mp3"), &[], None);
+    for i in 1..40 {
+        std::fs::copy(&a, r.out.join(format!("{i:03}.mp3"))).unwrap();
+    }
+    r.lib.set_dir(&r.out);
+    assert!(r.lib.view().scanning, "get_library 立即返回当前已知");
+    let (partial, v) = settled(&r.rx);
+    assert!(!partial.is_empty() && partial.iter().all(|p| p.scanning));
+    assert_eq!(v.tracks.len(), 40);
+}

@@ -2,6 +2,7 @@
 //! 内容变了才整份推送。
 
 use crate::engine::scan::{self, Stat};
+use crate::engine::store;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -174,15 +175,38 @@ fn track_of(r: &Rec) -> Track {
 }
 
 /// 后台扫描线程自己的状态。
-#[derive(Default)]
 struct Worker {
+    /// library.json：标签缓存。
+    file: PathBuf,
     cache: HashMap<PathBuf, Rec>,
+    /// 缓存有没写盘的变化。
+    dirty: bool,
     /// 读不了的文件：没变就不再试。
     bad: HashMap<PathBuf, Stat>,
     last: Option<LibraryView>,
 }
 
 impl Worker {
+    fn new(data_dir: &Path) -> Self {
+        let file = data_dir.join("library.json");
+        let recs: Vec<Rec> = store::load(&file);
+        Worker {
+            file,
+            cache: recs.into_iter().map(|r| (r.path.clone(), r)).collect(),
+            dirty: false,
+            bad: HashMap::new(),
+            last: None,
+        }
+    }
+
+    fn save(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            let mut recs: Vec<&Rec> = self.cache.values().collect();
+            recs.sort_by(|a, b| a.path.cmp(&b.path));
+            store::save(&self.file, &recs);
+        }
+    }
+
     fn emit(&mut self, lib: &Inner) {
         let v = view_of(&lock(&lib.st));
         if self.last.as_ref() != Some(&v) {
@@ -201,7 +225,9 @@ impl Worker {
         let audio: Vec<(PathBuf, Stat)> =
             found.into_iter().filter(|(p, _)| ext(p) != "lrc").collect();
         let now: HashMap<&PathBuf, Stat> = audio.iter().map(|(p, s)| (p, *s)).collect();
+        let before = self.cache.len();
         self.cache.retain(|p, _| now.contains_key(p));
+        self.dirty |= self.cache.len() != before;
         self.bad.retain(|p, s| now.get(p) == Some(s));
         let mut known = BTreeMap::new();
         let mut misses = vec![];
@@ -228,6 +254,8 @@ impl Worker {
             st.tracks = known;
             st.scanning = !misses.is_empty();
         }
+        // 推送前落盘：收到事件时缓存已是新的
+        self.save();
         self.emit(lib);
         let mut shown = Instant::now();
         for (p, s) in misses {
@@ -240,6 +268,7 @@ impl Worker {
                 Some(r) => {
                     st.tracks.insert(p.clone(), track_of(&r));
                     self.cache.insert(p, r);
+                    self.dirty = true;
                 }
                 None => {
                     st.tracks.remove(&p);
@@ -252,6 +281,7 @@ impl Worker {
                 shown = Instant::now();
             }
         }
+        self.save();
         lock(&lib.st).scanning = false;
         self.emit(lib);
     }
@@ -265,8 +295,8 @@ fn view_of(st: &State) -> LibraryView {
     }
 }
 
-fn run(lib: Weak<Inner>, sig: Arc<Signal>) {
-    let mut w = Worker::default();
+fn run(data_dir: PathBuf, lib: Weak<Inner>, sig: Arc<Signal>) {
+    let mut w = Worker::new(&data_dir);
     loop {
         {
             let mut s = lock(&sig.m);
@@ -296,7 +326,7 @@ fn run(lib: Weak<Inner>, sig: Arc<Signal>) {
 
 impl Library {
     /// 还没有文件夹：先 `set_dir`。`emit` 只在后台扫描线程上调用。
-    pub fn new(_data_dir: PathBuf, emit: Box<dyn Fn(LibraryView) + Send + Sync>) -> Self {
+    pub fn new(data_dir: PathBuf, emit: Box<dyn Fn(LibraryView) + Send + Sync>) -> Self {
         let sig = Arc::new(Signal::default());
         lock(&sig.m).poll = Some(POLL);
         let inner = Arc::new(Inner {
@@ -311,7 +341,7 @@ impl Library {
         let weak = Arc::downgrade(&inner);
         std::thread::Builder::new()
             .name("library".into())
-            .spawn(move || run(weak, sig))
+            .spawn(move || run(data_dir, weak, sig))
             .expect("无法启动资料库线程");
         Library(inner)
     }

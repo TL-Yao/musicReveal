@@ -3,7 +3,7 @@
 mod model;
 mod real;
 pub(crate) mod scan;
-mod store;
+pub(crate) mod store;
 
 pub use model::*;
 pub use real::RealConverter;
