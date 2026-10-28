@@ -881,7 +881,7 @@ impl Engine {
         for p in paths.into_iter().map(PathBuf::from) {
             if p.is_dir() {
                 files.extend(scan::shallow(&p, &skip));
-            } else if scan::candidate(&p) && !p.starts_with(&skip) {
+            } else if scan::candidate(&p) && !scan::inside(&p, &skip) {
                 files.extend(scan::stat(&p).map(|s| (p, s)));
             }
         }

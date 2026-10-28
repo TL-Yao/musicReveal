@@ -38,10 +38,35 @@ pub fn candidate(p: &Path) -> bool {
     !hidden(p) && reveal_core::is_candidate(p)
 }
 
+/// 目录身份（设备号 + inode），跟随符号链。
+fn dir_id(p: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(p).ok()?;
+    Some((m.dev(), m.ino()))
+}
+
+/// `p` 就是输出目录 `out`：按目录身份比，符号链与大小写不同的拼写都算；`out` 不存在时按字面比。
+fn same_dir(p: &Path, out: &Path) -> bool {
+    match dir_id(out) {
+        Some(o) => dir_id(p) == Some(o),
+        None => p == out,
+    }
+}
+
+/// `p` 是输出目录 `out` 本身或在其内（规则同 `same_dir`，逐级比祖先目录）。
+pub fn inside(p: &Path, out: &Path) -> bool {
+    if dir_id(out).is_none() {
+        return p.starts_with(out);
+    }
+    p.ancestors()
+        .filter(|a| !a.as_os_str().is_empty())
+        .any(|a| same_dir(a, out))
+}
+
 /// 监听扫描。`Err` 是给用户看的「不可访问」原因。输出目录本身或其内的文件夹扫出来是空的。
 pub fn scan(root: &Path, skip: &Path) -> Result<Vec<(PathBuf, Stat)>, String> {
     let mut out = vec![];
-    if root.starts_with(skip) {
+    if inside(root, skip) {
         return Ok(out);
     }
     walk(root, 0, MAX_DEPTH, Some(skip), &candidate, &mut 0, &mut out)?;
@@ -51,7 +76,7 @@ pub fn scan(root: &Path, skip: &Path) -> Result<Vec<(PathBuf, Stat)>, String> {
 /// 拖入的文件夹：只看一层，规则同监听扫描；超过条目上限时只取已看到的部分。
 pub fn shallow(dir: &Path, skip: &Path) -> Vec<(PathBuf, Stat)> {
     let mut out = vec![];
-    if !dir.starts_with(skip) {
+    if !inside(dir, skip) {
         let _ = walk(dir, 0, 0, Some(skip), &candidate, &mut 0, &mut out);
     }
     out
@@ -96,7 +121,8 @@ fn walk(
             continue;
         }
         if ft.is_dir() {
-            if depth < max_depth && !skip.is_some_and(|s| p.starts_with(s)) {
+            // 父目录已确认不在输出目录内，这里只需比它自己
+            if depth < max_depth && !skip.is_some_and(|s| same_dir(&p, s)) {
                 walk(&p, depth + 1, max_depth, skip, keep, n, out)?;
             }
         } else if ft.is_file() && keep(&p) {

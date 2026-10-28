@@ -688,6 +688,95 @@ async fn added_files_inside_output_dir_are_ignored() {
     assert!(r.fake.calls().is_empty());
 }
 
+/// 输出文件夹的别名：符号链、大小写不同（APFS 默认不分大小写）、末尾斜杠。
+fn out_aliases(r: &Rig) -> Vec<PathBuf> {
+    let link = r.t.0.join("alias");
+    std::os::unix::fs::symlink(&r.out, &link).unwrap();
+    let mut v = vec![link, PathBuf::from(format!("{}/", r.out.display()))];
+    let upper = r.t.0.join("OUT");
+    if upper.exists() {
+        v.push(upper);
+    } else {
+        eprintln!("文件系统区分大小写，跳过大小写别名");
+    }
+    v
+}
+
+#[tokio::test]
+async fn output_dir_aliases_are_never_input() {
+    let r = Rig::new("alias").await;
+    let sub = r.out.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    put(&r.out, "a.mp3", b"x");
+    put(&sub, "b.ncm", b"x");
+    for alias in out_aliases(&r) {
+        // 单文件添加、拖入文件夹、监听文件夹，都经别名指向输出文件夹
+        r.eng.add_files(vec![
+            alias.join("a.mp3").to_string_lossy().into(),
+            alias.join("sub/b.ncm").to_string_lossy().into(),
+            alias.join("sub").to_string_lossy().into(),
+        ]);
+        for f in [alias.clone(), alias.join("sub")] {
+            r.eng.add_watch_folder(&f.to_string_lossy()).unwrap();
+        }
+        settle(&r.eng);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let s = r.eng.snapshot();
+        assert!(
+            s.jobs.is_empty() && s.notices.is_empty(),
+            "{alias:?}: {:?}",
+            s.jobs
+        );
+        for f in &s.folders {
+            r.eng.remove_watch_folder(&f.path);
+        }
+    }
+    assert!(r.fake.calls().is_empty());
+}
+
+/// 输出文件夹设成监听文件夹里某个子文件夹的别名拼写：递归扫描照样跳过它。
+#[tokio::test]
+async fn output_dir_spelled_differently_inside_watch_folder_is_skipped() {
+    let r = Rig::new("aliasin").await;
+    let conv = r.watch.join("conv");
+    std::fs::create_dir_all(&conv).unwrap();
+    put(&conv, "a.mp3", b"x");
+    let link = r.t.0.join("conv-link");
+    std::os::unix::fs::symlink(&conv, &link).unwrap();
+    let mut spellings = vec![link];
+    if r.watch.join("CONV").exists() {
+        spellings.push(r.watch.join("CONV"));
+    }
+    for out in spellings {
+        r.eng.set_output_dir(&out.to_string_lossy()).unwrap();
+        settle(&r.eng);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(r.eng.snapshot().jobs.is_empty(), "{out:?}");
+    }
+    assert!(r.fake.calls().is_empty());
+}
+
+/// 输出文件夹还不存在：按字面判定，监听它（或它里面）的文件夹照样是空的、可访问。
+#[tokio::test]
+async fn missing_output_dir_falls_back_to_literal_paths() {
+    let r = Rig::new("aliasmissing").await;
+    let out = r.t.0.join("later");
+    r.eng.set_output_dir(&out.to_string_lossy()).unwrap();
+    for f in [out.clone(), out.join("sub")] {
+        assert_eq!(
+            r.eng
+                .add_watch_folder(&f.to_string_lossy())
+                .unwrap()
+                .existing,
+            0
+        );
+    }
+    settle(&r.eng);
+    let s = r.eng.snapshot();
+    assert!(s.jobs.is_empty());
+    assert!(s.folders.iter().all(|f| f.accessible), "{:?}", s.folders);
+}
+
 #[tokio::test]
 async fn corrupt_settings_and_history_do_not_crash() {
     let t = Tmp::new("corrupt");
