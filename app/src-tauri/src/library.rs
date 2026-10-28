@@ -106,6 +106,8 @@ struct State {
     scanning: bool,
     /// 上一份快照里已完成的任务 id。
     done: HashSet<String>,
+    /// 换目录、删歌时加一：之前开始的扫描结果过时，不再写进 `tracks`。
+    epoch: u64,
 }
 
 #[derive(Default)]
@@ -320,7 +322,10 @@ impl Worker {
     }
 
     fn scan(&mut self, lib: &Inner) {
-        let dir = lock(&lib.st).dir.clone();
+        let (dir, epoch) = {
+            let st = lock(&lib.st);
+            (st.dir.clone(), st.epoch)
+        };
         let found = if dir.as_os_str().is_empty() {
             vec![]
         } else {
@@ -364,7 +369,7 @@ impl Worker {
         }
         {
             let mut st = lock(&lib.st);
-            if st.dir != dir {
+            if st.epoch != epoch {
                 return;
             }
             // 正在重读的歌先保留旧样子
@@ -386,7 +391,7 @@ impl Worker {
         for (p, s) in misses {
             let rec = read(&p, s, &self.covers);
             let mut st = lock(&lib.st);
-            if st.dir != dir {
+            if st.epoch != epoch {
                 return;
             }
             match rec {
@@ -499,6 +504,7 @@ impl Library {
                 tracks: BTreeMap::new(),
                 scanning: true,
                 done: HashSet::new(),
+                epoch: 0,
             }),
             sig: sig.clone(),
         });
@@ -531,6 +537,7 @@ impl Library {
                 return;
             }
             st.dir = dir.to_path_buf();
+            st.epoch += 1;
             st.tracks.clear();
             st.scanning = true;
         }
@@ -572,7 +579,11 @@ impl Library {
         if let Some(l) = &t.lrc {
             let _ = trash(l);
         }
-        lock(&self.0.st).tracks.remove(Path::new(id));
+        {
+            let mut st = lock(&self.0.st);
+            st.tracks.remove(Path::new(id));
+            st.epoch += 1;
+        }
         self.refresh();
         Ok(())
     }
