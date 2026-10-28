@@ -11,6 +11,13 @@ fn home(rel: &str) -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap()).join(rel)
 }
 
+/// 本机 NCM 所在目录；文件被挪走时用 `REVEAL_NCM_DIR` 指定。
+fn ncm_dir() -> PathBuf {
+    std::env::var_os("REVEAL_NCM_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home("Music/网易云音乐"))
+}
+
 /// 独立于被测代码，直接解出 NCM 的元数据 JSON，作为断言基准。
 fn ncm_json(data: &[u8]) -> serde_json::Value {
     let u32le = |p: usize| u32::from_le_bytes(data[p..p + 4].try_into().unwrap()) as usize;
@@ -49,7 +56,7 @@ fn ffmpeg(bin: &str, before: &[&str], file: &PathBuf, after: &[&str]) -> String 
 #[test]
 #[ignore]
 fn real_ncm_files_decode_cleanly() {
-    let dir = home("Music/网易云音乐");
+    let dir = ncm_dir();
     let names = [
         "著小生zoki,徵羽摩柯,乐正龙牙 - 雪乡游梦记（伴奏）.ncm",
         "DMYoung,Hanser,泠鸢yousa - 「交织together」.ncm",
@@ -134,7 +141,7 @@ fn real_musicex_sniffs() {
 fn all_local_ncm_files_have_sniffable_container() {
     let mut stats = std::collections::BTreeMap::<String, usize>::new();
     let mut failed = Vec::new();
-    for e in std::fs::read_dir(home("Music/网易云音乐")).unwrap() {
+    for e in std::fs::read_dir(ncm_dir()).unwrap() {
         let p = e.unwrap().path();
         if p.extension().and_then(|x| x.to_str()) != Some("ncm") {
             continue;
