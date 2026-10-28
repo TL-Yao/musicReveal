@@ -567,3 +567,26 @@ fn view_stays_responsive_while_lyrics_are_parsed() {
     eprintln!("重扫期间 view() 最长 {worst:?}，总耗时 {:?}", t0.elapsed());
     assert!(worst < Duration::from_millis(50), "{worst:?}");
 }
+
+/// 扫描途中换目录：作废的那次扫描刚生成的缩略图不留在数据目录里。
+#[test]
+fn abandoned_scan_leaves_no_orphan_thumbnails() {
+    let r = Rig::new("orphan");
+    let a = mp3(&r.out.join("00.mp3"), &[], Some((700, 700)));
+    for i in 1..20 {
+        std::fs::copy(&a, r.out.join(format!("{i:02}.mp3"))).unwrap();
+    }
+    let empty = r.t.0.join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    r.lib.set_dir(&r.out);
+    // 第一份是读标签之前的空结果：此刻开始逐首读、逐首生成缩略图
+    let first = r.rx.recv_timeout(Duration::from_secs(20)).unwrap();
+    assert!(first.scanning && first.tracks.is_empty(), "{first:?}");
+    r.lib.set_dir(&empty);
+    let (_, v) = settled(&r.rx);
+    assert_eq!(v.dir, id(&empty));
+    let left: Vec<_> = std::fs::read_dir(covers_dir(&r.data()))
+        .map(|d| d.flatten().map(|e| e.file_name()).collect())
+        .unwrap_or_default();
+    assert!(left.is_empty(), "{left:?}");
+}

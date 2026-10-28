@@ -398,6 +398,10 @@ impl Worker {
             let rec = read(&p, s, &self.covers);
             let mut st = lock(&lib.st);
             if st.epoch != epoch {
+                // 作废的结果：刚生成的缩略图还没登记，删掉
+                if let Some(r) = &rec {
+                    drop_cover(&self.covers, r);
+                }
                 return;
             }
             match rec {
