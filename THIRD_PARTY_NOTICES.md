@@ -13,12 +13,12 @@ musicReveal 本身以 MIT 许可发布，见 [LICENSE](LICENSE)。它使用或�
 
 ## 2. FFmpeg 与 LAME（LGPL）
 
-打包后的 `musicReveal.app` 在 `Contents/MacOS/ffmpeg` 中附带一个独立的 ffmpeg 可执行文件，用于转码为 MP3。它由以下源码编译：
+打包后的 `musicReveal.app` 在 `Contents/MacOS/ffmpeg` 中附带一个独立的 ffmpeg 可执行文件，用于转码为 MP3 / FLAC。它由以下源码编译：
 
 - [FFmpeg](https://ffmpeg.org/) 9.0.2，GNU Lesser General Public License 2.1 或更高版本；
 - [LAME](https://lame.sourceforge.io/) 3.100，GNU Lesser General Public License 2 或更高版本，静态链接进上述 ffmpeg。
 
-编译时未启用任何 GPL 或 nonfree 组件，`configure` 报告的许可为 LGPL version 2.1 or later。源码下载地址、SHA-256 校验值与全部 configure 参数见 `scripts/build-ffmpeg.sh`；应用包内的 `Contents/Resources/licenses/` 目录附有 FFmpeg 与 LAME 的许可全文和来源说明（`SOURCE.md`）。musicReveal 以独立进程调用 ffmpeg，不与之链接；用户可以用同样的源码和脚本自行编译，替换包内的 ffmpeg。
+编译时未启用任何 GPL 或 nonfree 组件，`configure` 报告的许可为 LGPL version 2.1 or later。对应源码（FFmpeg、LAME 源码包原样与构建脚本）以 `musicReveal_<版本>_ffmpeg-lame-source.tar` 随 dmg 一同发布；源码下载地址、SHA-256 校验值与全部 configure 参数见 `scripts/build-ffmpeg.sh`；应用包内的 `Contents/Resources/licenses/` 目录附有 FFmpeg 与 LAME 的许可全文和来源说明（`SOURCE.md`）。musicReveal 以独立进程调用 ffmpeg，不与之链接；用户可以用同样的源码和脚本自行编译，替换包内的 ffmpeg。
 
 本仓库不包含 FFmpeg 或 LAME 的源码与二进制，它们只在运行 `scripts/package.sh` 时下载并编译。
 
