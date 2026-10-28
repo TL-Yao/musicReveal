@@ -80,7 +80,7 @@ fn qq_lyric_from_recorded_response() {
 fn qq_lyric_decodes_html_entities_and_keeps_translation() {
     let body = r#"{"retcode":0,"lyric":"[ti&#58;x]\n[00:01.00]It&apos;s &amp; &#x4E2D;&#25991;&nbsp;&lt;3&gt; &unknown;","trans":"[00:01.00]&quot;译&quot;"}"#;
     let l = crate::enrich::qq_lyric(body.as_bytes()).unwrap().unwrap();
-    assert_eq!(l.lrc, "[ti:x]\n[00:01.00]It's & 中文 <3> &unknown;");
+    assert_eq!(l.lrc, "[ti:x]\n[00:01.00]It's & 中文\u{a0}<3> &unknown;");
     assert_eq!(l.translated_lrc.as_deref(), Some("[00:01.00]\"译\""));
 }
 
@@ -262,4 +262,219 @@ fn qq_trailing_copyright_notice_is_dropped() {
         "{}",
         rec.lrc
     );
+}
+
+#[test]
+fn extreme_numeric_fields_keep_original_values() {
+    let max = u64::MAX;
+    let body = format!(
+        r#"{{"code":0,"data":[{{"index_cd":{max},"index_album":{max},"time_public":"0000-01-01",
+        "album":{{"time_public":"9999999"}}}}]}}"#
+    );
+    let mut m = qq();
+    crate::enrich::qq_song(body.as_bytes(), &mut m).unwrap();
+    assert_eq!(m, qq());
+    let body = br#"{"code":0,"data":[{"index_cd":4294967295,"index_album":4294967296,"time_public":"-123"}]}"#;
+    crate::enrich::qq_song(body, &mut m).unwrap();
+    assert_eq!(m, qq());
+
+    for body in [
+        format!(
+            r#"{{"songs":[{{"no":{max},"disc":"99999999999","album":{{"publishTime":{}}}}}]}}"#,
+            i64::MAX
+        ),
+        r#"{"songs":[{"no":-1,"disc":"-1","album":{"publishTime":-5}}]}"#.into(),
+        r#"{"songs":[{"no":1.5,"disc":"0","album":{"publishTime":1e300}}]}"#.into(),
+    ] {
+        let mut m = ne(1);
+        crate::enrich::netease_song(body.as_bytes(), &mut m).unwrap();
+        assert_eq!(m, ne(1), "{body}");
+    }
+}
+
+fn ne_lrc(lrc: &str) -> Option<String> {
+    let body = serde_json::json!({"lrc": {"lyric": lrc}, "code": 200}).to_string();
+    crate::enrich::netease_lyric(body.as_bytes())
+        .unwrap()
+        .map(|l| l.lrc)
+}
+
+#[test]
+fn only_known_placeholders_count_as_instrumental() {
+    for p in [
+        "纯音乐，请欣赏",
+        "纯音乐,请欣赏",
+        " 纯音乐 ， 请欣赏 。",
+        "此歌曲为没有填词的纯音乐，请您欣赏",
+        "此歌曲为没有填词的纯音乐,请您欣赏!",
+    ] {
+        assert_eq!(ne_lrc(&format!("[00:00.00]{p}")), None, "{p}");
+    }
+    let real = "[00:01.00]把爱谱成纯音乐唱给你";
+    assert_eq!(ne_lrc(real).as_deref(), Some(real));
+}
+
+#[test]
+fn credit_lines_need_a_colon_or_a_dedicated_role_word() {
+    for body in [
+        "鼓 响彻了夜空",
+        "曲 终人散",
+        "词 不达意",
+        "吉他 弹起来",
+        "Lyrics so sweet",
+    ] {
+        let l = format!("[00:01.00]{body}");
+        assert_eq!(ne_lrc(&l).as_deref(), Some(l.as_str()), "{body}");
+    }
+    for credit in [
+        "鼓：张三",
+        "曲 : 李四",
+        "Lyrics: x",
+        "作曲 Yunomi",
+        "制作人\u{a0}王五",
+        "绘  御坂的蓝白",
+        "和声 赵六",
+    ] {
+        assert_eq!(ne_lrc(&format!("[00:01.00]{credit}")), None, "{credit}");
+    }
+}
+
+#[test]
+fn recorded_credit_lines_are_still_credits() {
+    let v: serde_json::Value =
+        serde_json::from_slice(&fx("netease_lyric_1982798727.json")).unwrap();
+    let credits: Vec<&str> = v["lrc"]["lyric"]
+        .as_str()
+        .unwrap()
+        .lines()
+        .take_while(|l| !l.starts_with("[00:10.94]"))
+        .collect();
+    assert_eq!(credits.len(), 5);
+    assert_eq!(ne_lrc(&credits.join("\n")), None);
+}
+
+#[test]
+fn qq_lyric_decodes_html5_named_entities() {
+    let body = serde_json::json!({
+        "retcode": 0,
+        "lyric": "[00:01.00]Caf&eacute; &ndash; toi&hellip; &hearts; &#39;x&#39; &bogus; a&b",
+        "trans": ""
+    })
+    .to_string();
+    let l = crate::enrich::qq_lyric(body.as_bytes()).unwrap().unwrap();
+    assert_eq!(l.lrc, "[00:01.00]Café – toi… ♥ 'x' &bogus; a&b");
+}
+
+/// 只绑 127.0.0.1 随机端口的一次性 HTTP 服务；每个连接回报（路径, 正文是否完整写出）。
+fn serve() -> (String, std::sync::mpsc::Receiver<(String, bool)>) {
+    use std::io::{Read, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for s in l.incoming() {
+            let (mut s, tx) = (s.unwrap(), tx.clone());
+            std::thread::spawn(move || {
+                let mut req = vec![];
+                let mut b = [0u8; 1024];
+                while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let n = s.read(&mut b).unwrap();
+                    if n == 0 {
+                        return;
+                    }
+                    req.extend_from_slice(&b[..n]);
+                }
+                let req = String::from_utf8_lossy(&req);
+                let path = req.split(' ').nth(1).unwrap_or("").to_owned();
+                const BIG: usize = 16 << 20;
+                let (head, len) = match path.as_str() {
+                    "/big" => (
+                        "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_owned(),
+                        BIG,
+                    ),
+                    "/biglen" => (
+                        format!("HTTP/1.1 200 OK\r\nContent-Length: {BIG}\r\n\r\n"),
+                        BIG,
+                    ),
+                    "/302" => (
+                        "HTTP/1.1 302 Found\r\nContent-Length: 2000\r\n\r\n".to_owned(),
+                        2000,
+                    ),
+                    _ => (
+                        "HTTP/1.1 200 OK\r\nContent-Length: 2000\r\n\r\n".to_owned(),
+                        2000,
+                    ),
+                };
+                let mut ok = s.write_all(head.as_bytes()).is_ok();
+                let chunk = vec![b'x'; 64 << 10];
+                let mut sent = 0;
+                while ok && sent < len {
+                    let n = chunk.len().min(len - sent);
+                    ok = s.write_all(&chunk[..n]).is_ok();
+                    sent += n;
+                }
+                let _ = tx.send((path, ok));
+            });
+        }
+    });
+    (base, rx)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn oversized_bodies_are_abandoned_while_streaming() {
+    let (base, rx) = serve();
+    let e = crate::OnlineEnricher::new();
+    let r = e
+        .get(&format!("{base}/big"), "", crate::enrich::JSON_MAX)
+        .await;
+    assert!(r.is_err_and(|e| e.contains("过大")));
+    // 客户端读到上限就断开：服务端 16MiB 没能写完
+    let done = rx.recv_timeout(std::time::Duration::from_secs(20));
+    assert_eq!(done.unwrap(), ("/big".into(), false));
+
+    let r = e
+        .get(&format!("{base}/biglen"), "", crate::enrich::JSON_MAX)
+        .await;
+    assert!(r.is_err_and(|e| e.contains("过大")));
+
+    let r = e
+        .get(&format!("{base}/ok"), "", crate::enrich::JSON_MAX)
+        .await;
+    assert_eq!(r.unwrap().len(), 2000);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cover_skips_non_2xx_and_oversized_candidates() {
+    let (base, _rx) = serve();
+    let e = crate::OnlineEnricher::new();
+    assert!(e.get(&format!("{base}/302"), "", 1 << 20).await.is_err());
+    let urls = [
+        format!("{base}/302"),
+        format!("{base}/big"),
+        format!("{base}/ok"),
+    ];
+    assert_eq!(e.cover(&urls, "").await, Some(vec![b'x'; 2000]));
+    assert_eq!(e.cover(&urls[..2], "").await, None);
+}
+
+#[test]
+fn netease_recorded_tlyric_is_kept_and_merges_by_time() {
+    // 米津玄師《Lemon》，录制后删去了 transUser / lyricUser（贡献者账号信息）
+    let l = crate::enrich::netease_lyric(&fx("netease_lyric_536622304.json"))
+        .unwrap()
+        .unwrap();
+    assert!(
+        l.lrc.starts_with("[00:00.000] 作词 : 米津玄師\n"),
+        "{}",
+        l.lrc
+    );
+    let tr = l.translated_lrc.as_deref().unwrap();
+    assert!(
+        tr.starts_with("[00:00.851]如果这一切都是梦境该有多好\n"),
+        "{tr}"
+    );
+    let merged = crate::convert::merge_lrc(&l);
+    assert!(merged.contains(
+        "[00:00.851]夢ならばどれほどよかったでしょう\n[00:00.851]如果这一切都是梦境该有多好\n"
+    ));
 }

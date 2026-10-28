@@ -477,7 +477,12 @@ fn parse_time(s: &str) -> Option<u64> {
         return None;
     }
     let ms: u64 = format!("{frac:0<3}")[..3].parse().ok()?;
-    Some(m.parse::<u64>().ok()? * 60_000 + sec.parse::<u64>().ok()? * 1000 + ms)
+    // 溢出就不是时间标签
+    m.parse::<u64>()
+        .ok()?
+        .checked_mul(60_000)?
+        .checked_add(sec.parse::<u64>().ok()?.checked_mul(1000)?)?
+        .checked_add(ms)
 }
 
 /// 行首的时间标签（毫秒, 原文）与剩余正文。

@@ -56,6 +56,7 @@ pub(crate) fn qq_song(body: &[u8], meta: &mut TrackMeta) -> Result<Option<String
     if let Some(y) = str_at(s, "/time_public")
         .or(str_at(s, "/album/time_public"))
         .and_then(|t| t.get(..4)?.parse().ok())
+        .filter(|&y: &u16| y > 0)
     {
         meta.year = Some(y);
     }
@@ -65,59 +66,14 @@ pub(crate) fn qq_song(body: &[u8], meta: &mut TrackMeta) -> Result<Option<String
     if let Some(n) = s
         .get("index_cd")
         .and_then(Value::as_u64)
-        .and_then(|n| u32::try_from(n + 1).ok())
+        .and_then(|n| u32::try_from(n.checked_add(1)?).ok())
     {
         meta.disc = Some(n);
     }
     Ok(str_at(s, "/album/mid").map(str::to_owned))
 }
 
-/// `&#58;` / `&#x3A;` / 常见命名实体；认不出的原样保留。
-fn unescape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(i) = rest.find('&') {
-        out += &rest[..i];
-        rest = &rest[i..];
-        let decoded = rest
-            .bytes()
-            .skip(1)
-            .take(11)
-            .position(|b| b == b';')
-            .and_then(|end| {
-                let name = &rest[1..end + 1];
-                let c = match name {
-                    "amp" => '&',
-                    "lt" => '<',
-                    "gt" => '>',
-                    "quot" => '"',
-                    "apos" => '\'',
-                    "nbsp" => ' ',
-                    _ => {
-                        let n = name.strip_prefix('#')?;
-                        let code = match n.strip_prefix(['x', 'X']) {
-                            Some(h) => u32::from_str_radix(h, 16).ok()?,
-                            None => n.parse().ok()?,
-                        };
-                        char::from_u32(code)?
-                    }
-                };
-                Some((c, end + 2))
-            });
-        match decoded {
-            Some((c, len)) => {
-                out.push(c);
-                rest = &rest[len..];
-            }
-            None => {
-                out.push('&');
-                rest = &rest[1..];
-            }
-        }
-    }
-    out + rest
-}
-
+/// 署名角色：后接冒号（半角 / 全角，前后可有空白）即为署名行。
 const CREDITS: &[&str] = &[
     "作词",
     "作曲",
@@ -158,25 +114,48 @@ const CREDITS: &[&str] = &[
     "Producer",
 ];
 
-/// `作曲 Yunomi`、`作词 : 无` 这类署名行。
+/// 不像正文开头的专用角色词：后接空白也算署名（网易云常见 `作曲 Yunomi`）。
+const CREDITS_SPACED: &[&str] = &[
+    "作词",
+    "作曲",
+    "编曲",
+    "混音",
+    "缩混",
+    "母带",
+    "制作人",
+    "监制",
+    "和声",
+    "作詞",
+    "編曲",
+    "绘",
+];
+
+/// `作曲 Yunomi`、`作词 : 无`、`鼓：张三` 这类署名行。
 fn is_credit(text: &str) -> bool {
-    CREDITS.iter().any(|k| {
-        text.strip_prefix(k)
-            .is_some_and(|r| r.starts_with(|c: char| c.is_whitespace() || c == ':' || c == '：'))
-    })
+    let after = |keys: &'static [&'static str]| keys.iter().filter_map(|k| text.strip_prefix(k));
+    after(CREDITS).any(|r| r.trim_start().starts_with([':', '：']))
+        || after(CREDITS_SPACED).any(|r| r.starts_with(char::is_whitespace))
+}
+
+/// 去掉标点与空白后与已知纯音乐占位文案相同。
+fn is_placeholder(text: &str) -> bool {
+    let t: String = text.chars().filter(|c| c.is_alphanumeric()).collect();
+    [
+        "纯音乐请欣赏",
+        "纯音乐请您欣赏",
+        "此歌曲为没有填词的纯音乐请您欣赏",
+    ]
+    .contains(&t.as_str())
 }
 
 /// 有带时间轴的歌词正文才算有歌词：纯音乐占位、只有署名、无时间轴的文本都视为没有。
 fn lyrics(lrc: &str, trans: Option<&str>) -> Option<crate::Lyrics> {
-    let body: Vec<&str> = lrc
-        .lines()
-        .filter_map(|l| {
-            let (tags, text) = crate::convert::split_line(l);
-            let text = text.trim();
-            (!tags.is_empty() && !text.is_empty() && !is_credit(text)).then_some(text)
-        })
-        .collect();
-    if body.is_empty() || (body.len() == 1 && body[0].contains("纯音乐")) {
+    let has_body = lrc.lines().any(|l| {
+        let (tags, text) = crate::convert::split_line(l);
+        let text = text.trim();
+        !tags.is_empty() && !text.is_empty() && !is_credit(text) && !is_placeholder(text)
+    });
+    if !has_body {
         return None;
     }
     Some(crate::Lyrics {
@@ -207,10 +186,13 @@ fn drop_notice(lrc: &str) -> String {
 /// QQ `fcg_query_lyric_new`（nobase64）响应 → 歌词；没有歌词返回 None。
 pub(crate) fn qq_lyric(body: &[u8]) -> Result<Option<crate::Lyrics>, String> {
     let v = json(body)?;
-    let lrc = drop_notice(&unescape(
+    let lrc = drop_notice(&html_escape::decode_html_entities(
         v.get("lyric").and_then(Value::as_str).unwrap_or(""),
     ));
-    let trans = v.get("trans").and_then(Value::as_str).map(unescape);
+    let trans = v
+        .get("trans")
+        .and_then(Value::as_str)
+        .map(html_escape::decode_html_entities);
     Ok(lyrics(&lrc, trans.as_deref()))
 }
 
@@ -309,6 +291,9 @@ fn api(id: &crate::SongId) -> Api {
     }
 }
 
+pub(crate) const JSON_MAX: usize = 2 << 20;
+const COVER_MAX: usize = 8 << 20;
+
 /// 按 `TrackMeta.song_id` 精确查 QQ / 网易云公开接口；不带登录凭据。
 pub struct OnlineEnricher {
     http: reqwest::Client,
@@ -330,23 +315,42 @@ impl OnlineEnricher {
         Self { http }
     }
 
-    async fn get(&self, url: &str, referer: &str) -> Result<Vec<u8>, String> {
-        let r = self
+    /// 只收 2xx；边读边计数，超过 `limit` 立即放弃。
+    pub(crate) async fn get(
+        &self,
+        url: &str,
+        referer: &str,
+        limit: usize,
+    ) -> Result<Vec<u8>, String> {
+        let mut r = self
             .http
             .get(url)
             .header(reqwest::header::REFERER, referer)
             .send()
             .await
-            .and_then(|r| r.error_for_status())
             .map_err(|e| e.to_string())?;
-        Ok(r.bytes().await.map_err(|e| e.to_string())?.to_vec())
+        if !r.status().is_success() {
+            return Err(format!("HTTP {}", r.status()));
+        }
+        let too_big = || format!("响应过大（超过 {} 字节）", limit);
+        if r.content_length().is_some_and(|n| n > limit as u64) {
+            return Err(too_big());
+        }
+        let mut body = Vec::new();
+        while let Some(c) = r.chunk().await.map_err(|e| e.to_string())? {
+            if body.len() + c.len() > limit {
+                return Err(too_big());
+            }
+            body.extend_from_slice(&c);
+        }
+        Ok(body)
     }
 
-    /// 依次试，取第一个 2xx、像张图（> 1KB）且不超过 8MB 的。
-    async fn cover(&self, urls: &[String], referer: &str) -> Option<Vec<u8>> {
+    /// 依次试，取第一个成功且像张图（> 1KB）的；失败、超限都换下一个。
+    pub(crate) async fn cover(&self, urls: &[String], referer: &str) -> Option<Vec<u8>> {
         for u in urls {
-            if let Ok(b) = self.get(u, referer).await {
-                if (1025..=8 << 20).contains(&b.len()) {
+            if let Ok(b) = self.get(u, referer, COVER_MAX).await {
+                if b.len() > 1024 {
                     return Some(b);
                 }
             }
@@ -362,8 +366,8 @@ impl crate::Enricher for OnlineEnricher {
             return Ok(());
         };
         let (song, lyric) = tokio::join!(
-            self.get(&api.song_url, api.referer),
-            self.get(&api.lyric_url, api.referer)
+            self.get(&api.song_url, api.referer, JSON_MAX),
+            self.get(&api.lyric_url, api.referer, JSON_MAX)
         );
         let mut errs = vec![];
         match song.and_then(|b| (api.song)(&b, meta)) {

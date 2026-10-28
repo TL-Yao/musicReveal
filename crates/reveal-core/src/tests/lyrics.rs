@@ -56,3 +56,40 @@ fn arbitrary_input_never_panics() {
         let _ = merge(&s, Some(&s));
     }
 }
+
+#[test]
+fn extreme_time_tags_are_not_timestamps_and_never_panic() {
+    let max = u64::MAX;
+    for l in [
+        format!("[{max}:00]词"),
+        format!("[{max}:{max}.999]词"),
+        "[307445734561825:59.999]词".to_string(),
+        format!("[00:{max}]词"),
+        "[99999999999999999999999:00]词".to_string(),
+    ] {
+        assert_eq!(strip_timestamps(&l), l, "{l}");
+        assert_eq!(merge(&l, Some(&l)), format!("{l}\n"));
+    }
+    // 不溢出的大值仍是时间标签
+    assert_eq!(strip_timestamps("[1000000:00.00]词"), "词");
+
+    // 长数字串模糊：任意位数的分/秒/小数都不 panic
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = |n: u64| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x % n
+    };
+    for _ in 0..3000 {
+        let mut s = String::from("[");
+        for part in [":", ".", "]词"] {
+            for _ in 0..next(30) {
+                s.push(char::from(b'0' + next(10) as u8));
+            }
+            s += part;
+        }
+        let _ = strip_timestamps(&s);
+        let _ = merge(&s, Some(&s));
+    }
+}
