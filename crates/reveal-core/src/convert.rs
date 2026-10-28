@@ -455,10 +455,15 @@ pub async fn convert(
         let (input, part, c) = (input.to_path_buf(), cur.clone(), cancel.clone());
         blocking(move || {
             let mut w = CancelWriter(std::fs::File::create_new(&part).map_err(io_err)?, c.clone());
-            match decrypt(&input, &kind, ekey.as_deref(), &mut w) {
-                Err(_) if c.is_cancelled() => Err(ConvertError::Cancelled),
-                r => Ok(r?),
+            let d = match decrypt(&input, &kind, ekey.as_deref(), &mut w) {
+                Err(_) if c.is_cancelled() => return Err(ConvertError::Cancelled),
+                r => r?,
+            };
+            drop(w);
+            if d.container == Container::Flac {
+                crate::flac::trim_tail(&part).map_err(io_err)?;
             }
+            Ok(d)
         })
         .await?
     };

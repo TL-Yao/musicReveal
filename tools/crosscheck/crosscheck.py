@@ -79,10 +79,10 @@ CASES = [
 
 def main() -> int:
     subprocess.run(
-        ["cargo", "build", "--release", "-q", "-p", "reveal-core", "--example", "reveal"],
+        ["cargo", "build", "--release", "-q", "-p", "reveal-core", "--example", "decrypt_only"],
         cwd=ROOT, check=True,
     )
-    exe = ROOT / "target" / "release" / "examples" / "reveal"
+    exe = ROOT / "target" / "release" / "examples" / "decrypt_only"
     failed = 0
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)

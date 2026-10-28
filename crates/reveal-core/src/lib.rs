@@ -100,6 +100,7 @@ impl From<std::io::Error> for Error {
 
 mod convert;
 mod creds;
+mod flac;
 
 pub use convert::{
     convert, find_ffmpeg, CancelToken, ConvertError, ConvertOptions, ConvertOutcome, Enricher,

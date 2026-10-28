@@ -1,4 +1,4 @@
-//! 用法：cargo run --release -p reveal-core --example reveal -- <输入> <输出> [ekey]
+//! 用法：cargo run --release -p reveal-core --example decrypt_only -- <输入> <输出> [ekey]
 //! 供交叉核对与计时用；打印识别结果、容器与解密耗时。
 
 use std::io::BufWriter;
@@ -24,7 +24,7 @@ fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let [_, input, output, rest @ ..] = &args[..] else {
-        return Err("用法：reveal <输入> <输出> [ekey]".into());
+        return Err("用法：decrypt_only <输入> <输出> [ekey]".into());
     };
     let input = std::path::Path::new(input);
     if same_file(input, output.as_ref()) {

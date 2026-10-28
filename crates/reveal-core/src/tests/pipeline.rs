@@ -113,7 +113,8 @@ fn out_dir(t: &Tmp) -> PathBuf {
 async fn ncm_flac_original_keeps_flac_with_tags_and_cover() {
     let Some(ff) = ffmpeg() else { return };
     let t = Tmp::new("pl-ncm");
-    let plain = flac24(&ff, &t, &[]);
+    // 末帧后带垃圾（真实 QQ mflac 即如此），输出应被修剪干净
+    let plain = [flac24(&ff, &t, &[]), vec![0x47; 30]].concat();
     let cover = png(&ff, &t);
     let input = t.write("src.ncm", &build_ncm(&plain, b"k123", META, Some(&cover)));
     let out = out_dir(&t);
@@ -121,6 +122,17 @@ async fn ncm_flac_original_keeps_flac_with_tags_and_cover() {
     let o = r.res.unwrap();
     assert_eq!(r.stages, vec![Stage::Decrypt, Stage::Metadata]);
     assert_eq!(name(&o.output), "歌手甲, 歌手乙 - 测试歌.flac");
+    let dec = Command::new(&ff)
+        .args(["-v", "error", "-i"])
+        .arg(&o.output)
+        .args(["-f", "null", "-"])
+        .output()
+        .unwrap();
+    assert!(
+        dec.status.success() && dec.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&dec.stderr)
+    );
     assert_eq!(o.quality, "FLAC 24bit/48kHz");
     assert!(o.has_cover && !o.has_lyrics && o.lrc.is_none() && o.renamed.is_none());
     assert_eq!(o.meta.platform, Platform::Netease);
