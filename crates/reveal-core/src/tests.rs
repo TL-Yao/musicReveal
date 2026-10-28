@@ -5,9 +5,11 @@ use super::*;
 use aes::cipher::{BlockEncrypt, KeyInit};
 use std::path::PathBuf;
 
+mod naming;
+
 // ---------- 通用工具 ----------
 
-struct Tmp(PathBuf);
+struct Tmp(pub(super) PathBuf);
 impl Tmp {
     fn new(tag: &str) -> Self {
         use std::sync::atomic::{AtomicU32, Ordering};

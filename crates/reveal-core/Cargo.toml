@@ -7,5 +7,10 @@ description = "musicReveal: NCM / QMC 加密音频识别与解密核心"
 
 [dependencies]
 aes = "0.8"
+async-trait = "0.1.92"
 base64 = "0.22"
+lofty = "0.25.5"
+plist = "1.10.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde_json = "1"
+tokio = { version = "1.54.1", features = ["rt", "macros", "process", "time"] }

@@ -98,6 +98,7 @@ impl From<std::io::Error> for Error {
     }
 }
 
+mod convert;
 mod ncm;
 mod qmc;
 
