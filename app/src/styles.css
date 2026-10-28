@@ -119,9 +119,9 @@ html.native .sidebar { background: transparent; backdrop-filter: none; box-shado
 .search input { flex: 1; min-width: 0; border: 0; background: transparent; font: 400 var(--fs-body)/1 var(--font); color: var(--text-1); outline: none; }
 .search input::placeholder { color: var(--text-3); }
 .search:focus-within { box-shadow: inset 0 0 0 0.5px var(--sep), 0 0 0 3px color-mix(in srgb, var(--accent) 28%, transparent); }
-.search .clear { opacity: 0; width: 16px; height: 16px; border: 0; border-radius: 50%; background: var(--text-3); color: var(--surface-1); display: grid; place-items: center; cursor: pointer; padding: 0; transition: opacity var(--dur-fast); }
+.search .clear { visibility: hidden; opacity: 0; width: 16px; height: 16px; border: 0; border-radius: 50%; background: var(--text-3); color: var(--surface-1); display: grid; place-items: center; cursor: pointer; padding: 0; transition: opacity var(--dur-fast), visibility var(--dur-fast); }
 .search .clear svg { width: 9px; height: 9px; }
-.search.has .clear { opacity: 1; }
+.search.has .clear { visibility: visible; opacity: 1; }
 
 .group { display: flex; flex-direction: column; gap: var(--s1); }
 .group > header { display: flex; align-items: center; justify-content: space-between; padding: 0 var(--s2); height: 20px; }
@@ -215,7 +215,7 @@ input[type=range].slider::-webkit-slider-thumb { -webkit-appearance: none; width
 .page-head p b.bump { animation: bump var(--dur-slow) var(--spring) both; }
 .page-head .acts { display: flex; gap: var(--s2); align-items: center; }
 .page-head .acts .btn svg { margin-left: 1px; }
-.scroll { overflow-y: auto; overflow-x: hidden; min-height: 0; flex: 1; scrollbar-width: thin; position: relative; }
+.scroll { overflow-y: auto; overflow-x: hidden; min-height: 0; flex: 1; scrollbar-width: thin; position: relative; scroll-padding: 34px 0 var(--s2); }
 .scroll.notrans * { transition: none !important; }
 
 /* —— 表头与资料库行：照「音乐」App —— */
@@ -231,6 +231,12 @@ input[type=range].slider::-webkit-slider-thumb { -webkit-appearance: none; width
 .song { display: grid; grid-template-columns: var(--cols); column-gap: var(--s3); align-items: center; height: var(--row-h); padding: 0 var(--s2); border-radius: var(--r-btn); cursor: default; position: relative; transition: background var(--dur-fast), height var(--dur-slow) var(--spring-soft), opacity var(--dur-base); overflow: hidden; }
 .song:hover { background: var(--row-hover); }
 .song.sel { background: var(--accent); color: var(--accent-ink); }
+/* 键盘焦点：整表一个焦点，环画在选中行上；没有选中行时画在表上。鼠标点击不出环 */
+.songs:focus { outline: none; }
+.songs:focus-visible .song.sel { outline: 2px solid color-mix(in srgb, var(--accent) 50%, transparent); outline-offset: 1px; }
+.songs:focus-visible:not(:has(.sel)) { outline: 2px solid color-mix(in srgb, var(--accent) 50%, transparent); outline-offset: -2px; border-radius: 8px; }
+.menu button:focus { outline: none; }
+.menu button:focus-visible { background: var(--accent); color: var(--accent-ink); }
 .song.sel .t2, .song.sel .c-album, .song.sel .c-dur, .song.sel .c-fmt { color: var(--sel-ink); }
 .song.landing { height: 0; opacity: 0; }
 .song.nocover .cover { opacity: 0; }
@@ -422,10 +428,12 @@ input[type=range].slider::-webkit-slider-thumb { -webkit-appearance: none; width
 .frow .pathbox { flex: 1; display: grid; grid-template-columns: 20px minmax(0,1fr); column-gap: var(--s2); align-items: center; padding: 5px var(--s2); border-radius: var(--r-btn); background: var(--surface-2); box-shadow: inset 0 0 0 0.5px var(--sep); min-width: 0; }
 .frow .pathbox .ico { color: var(--accent); width: 18px; height: 18px; display: grid; place-items: center; } .frow .pathbox .ico svg { width: 17px; height: 17px; }
 .frow .pathbox .name { font-size: var(--fs-body); line-height: var(--lh-tight); } .frow .pathbox .path { font-size: var(--fs-caption); color: var(--text-3); line-height: var(--lh-tight); margin-top: 2px; }
-.radio { display: grid; grid-template-columns: 16px minmax(0,1fr); column-gap: var(--s2); align-items: start; padding: 4px 0; cursor: pointer; }
-.radio i { width: 16px; height: 16px; border-radius: 50%; margin-top: 1px; background: var(--surface-1); box-shadow: inset 0 0 0 0.5px var(--bezel), 0 1px 1px rgba(0,0,0,.06); display: grid; place-items: center; transition: background var(--dur-fast); }
+.radio { position: relative; display: grid; grid-template-columns: 16px minmax(0,1fr); column-gap: var(--s2); align-items: start; padding: 4px 0; cursor: pointer; }
+.radio input { position: absolute; opacity: 0; width: 16px; height: 16px; margin: 1px 0 0; pointer-events: none; }
+.radio i { width: 16px; height: 16px; border-radius: 50%; margin-top: 1px; background: var(--surface-1); box-shadow: inset 0 0 0 0.5px var(--bezel), 0 1px 1px rgba(0,0,0,.06); display: grid; place-items: center; transition: background var(--dur-fast), box-shadow var(--dur-fast); }
 .radio i::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #fff; opacity: 0; transition: opacity var(--dur-fast); }
-.radio.on i { background: var(--accent); box-shadow: 0 1px 2px color-mix(in srgb, var(--accent) 40%, transparent); } .radio.on i::after { opacity: 1; }
+.radio input:checked + i { background: var(--accent); box-shadow: 0 1px 2px color-mix(in srgb, var(--accent) 40%, transparent); } .radio input:checked + i::after { opacity: 1; }
+.radio input:focus-visible + i { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 45%, transparent); }
 .radio .lab { font-size: var(--fs-body); line-height: var(--lh-tight); } .radio .desc { font-size: var(--fs-caption); color: var(--text-2); margin-top: 2px; }
 .frow .help { font-size: var(--fs-caption); color: var(--text-3); margin: 6px 0 0; line-height: 1.45; }
 .qqline { display: grid; grid-template-columns: 16px minmax(0,1fr); column-gap: var(--s2); align-items: start; padding-top: 4px; }

@@ -154,10 +154,24 @@ const pushLib = () => {
   subs.library.forEach((cb) => cb(l));
 };
 const track = (id?: string) => lib.tracks.find((t) => t.id === id);
+/** 播放器直接读文件，不看资料库（同真后台）：资料库没有这首也照样播 */
+const files = new Map<string, number>();
+const durOf = (id?: string) => (id ? track(id)?.durationMs ?? files.get(id) ?? 0 : 0);
+/** 打不开的文件：play / next 时跳过并写 error，全部失败则清空 trackId */
+const broken = new Set<string>();
 const position = () => (P.playing ? P.base + Date.now() - P.at : P.base);
 function playerState(): PlayerState {
-  const id = P.queue[P.i], t = track(id);
-  return { trackId: t?.id, playing: P.playing && !!t, positionMs: Math.min(position(), t?.durationMs ?? 0), durationMs: t?.durationMs ?? 0, volume: P.volume, shuffle: P.shuffle, repeat: P.repeat, error: P.error };
+  const id = P.queue[P.i], d = durOf(id);
+  return { ...(id ? { trackId: id } : {}), playing: P.playing && !!id, positionMs: Math.min(position(), d), durationMs: d, volume: P.volume, shuffle: P.shuffle, repeat: P.repeat, ...(P.error ? { error: P.error } : {}) };
+}
+function load() {
+  while (P.queue[P.i] && broken.has(P.queue[P.i])) {
+    const id = P.queue[P.i];
+    P.error = `${id.split("/").pop()}：文件不存在，已跳过`;
+    P.queue = P.queue.filter((x) => x !== id);
+    if (P.i >= P.queue.length) P.i = P.queue.length ? 0 : -1;
+  }
+  if (P.i < 0) P.playing = false;
 }
 const pushPlayer = () => {
   const p = playerState();
@@ -176,13 +190,12 @@ function advance(auto: boolean, dir = 1) {
   P.i = i;
   P.error = undefined;
   setPos(0);
+  load();
 }
 // 播放中每秒推一次（同真后台），播完按循环 / 随机走下一首
 setInterval(() => {
   if (!P.playing) return;
-  const t = track(P.queue[P.i]);
-  if (!t) return (P.playing = false), pushPlayer();
-  if (position() >= t.durationMs) advance(true);
+  if (position() >= durOf(P.queue[P.i])) advance(true);
   pushPlayer();
 }, 1000);
 
@@ -252,7 +265,7 @@ export const mockBackend: Backend = {
         case "get_snapshot": snapChanged = false; return clone(snap);
         case "get_library": snapChanged = false; return clone(lib);
         case "get_player": snapChanged = false; return playerState();
-        case "get_lyrics": snapChanged = false; return clone(LYRICS.get(a.id) ?? null);
+        case "get_lyrics": snapChanged = false; return track(a.id) ? clone(LYRICS.get(a.id) ?? null) : null; // 同真后台：资料库不认识的歌没有歌词
         case "complete_onboarding":
           Object.assign(snap, { onboarded: true, outputDir: a.outputDir, format: a.format, folders: a.folders.map((p: string) => ({ path: p, name: p.split("/").pop(), accessible: true })) });
           break;
@@ -269,7 +282,13 @@ export const mockBackend: Backend = {
         }
         case "ignore_existing": snap.notices = snap.notices.filter((n) => n.folder !== a.path); break;
         case "dismiss_notice": snap.notices = snap.notices.filter((n) => n.id !== a.id); break;
-        case "set_output_dir": snap.outputDir = a.path; break;
+        case "set_output_dir":
+          snap.outputDir = a.path;
+          // 同真后台：换文件夹即清空并重扫
+          lib = { dir: a.path, tracks: [], scanning: true };
+          setTimeout(pushLib, 50);
+          setTimeout(() => ((lib.scanning = false), pushLib()), 900);
+          break;
         case "set_format": snap.format = a.format; break;
         case "add_files":
           for (const p of a.paths as string[]) {
@@ -288,10 +307,7 @@ export const mockBackend: Backend = {
         case "trash_track":
           snapChanged = false;
           lib.tracks = lib.tracks.filter((t) => t.id !== a.id);
-          setTimeout(() => {
-            pushLib();
-            if (P.queue[P.i] === a.id) (P.queue = []), (P.i = -1), (P.playing = false), pushPlayer();
-          }, 120);
+          setTimeout(pushLib, 120); // 真后台不停播：已打开的文件照常放完
           break;
         default: {
           snapChanged = false;
@@ -314,14 +330,15 @@ export const mockBackend: Backend = {
 
 function player(cmd: string, a: Record<string, any>) {
   switch (cmd) {
-    case "play": P.queue = a.ids; P.i = a.index; P.playing = true; P.error = undefined; setPos(0); break;
+    case "play": P.queue = a.ids; P.i = a.index; P.playing = true; P.error = undefined; setPos(0); load(); break;
     case "toggle":
+      P.error = undefined;
       if (P.i < 0) return;
       setPos(position());
       P.playing = !P.playing;
       break;
-    case "next": advance(false); break;
-    case "prev": if (position() > 3000) setPos(0); else advance(false, -1); break;
+    case "next": P.error = undefined; advance(false); break;
+    case "prev": P.error = undefined; if (position() > 3000) setPos(0); else advance(false, -1); break;
     case "seek": setPos(a.ms); break;
     case "set_volume": P.volume = a.volume; break;
     case "set_shuffle": P.shuffle = a.on; break;
@@ -379,6 +396,8 @@ const MR = {
     drag({ type: "leave" });
     snap = base(true);
     lib = { dir: OUT, tracks: fullLibrary(), scanning: false };
+    lib.tracks.forEach((t) => files.set(t.id, t.durationMs));
+    broken.clear();
     tray("few");
     pushSnap();
     pushLib();
@@ -400,7 +419,11 @@ const MR = {
       case "lyrics": tray("empty"); playTitle("二次元凶", 41); break;
       case "lyrics-trans": tray("empty"); playTitle("千本樱（Live）", 20); break;
       case "lyrics-none": tray("empty"); playTitle("雪乡游梦记（伴奏）", 30); break;
-      case "play-error": tray("empty"); P.error = "文件已损坏，无法解码"; P.playing = false; break;
+      case "play-error": tray("empty"); P.error = "无法打开音频设备"; P.playing = false; break;
+      // 队列里的歌全部打不开：trackId 清空、只剩 error
+      case "play-failed": tray("empty"); broken.add(lib.tracks[3].id); player("play", { ids: [lib.tracks[3].id], index: 0 }); break;
+      // 资料库还在读（启动 / 刚换输出文件夹），播放器已经在放：用 MR.finishScan() 读完
+      case "scanning": tray("empty"); lib = { dir: OUT, tracks: [], scanning: true }; break;
       case "drag": break;
       case "ask": MR.ask(); break;
       case "caught-up": snap.notices.unshift({ id: `n${uid++}`, kind: "caughtUp", count: 3 }); break;
@@ -450,6 +473,10 @@ const MR = {
   search,
   lyrics,
   stop,
+  finishScan() {
+    lib = { dir: OUT, tracks: fullLibrary(), scanning: false };
+    pushLib();
+  },
   /** 模拟一首转换完成：处理中的那首跑完三步 → 完成 → 资料库收到新歌（noTrack：资料库始终收不到） */
   async simulateDone(opts: { noTrack?: boolean } = {}) {
     let j = snap.jobs.find((x) => PROCESSING.includes(x.state));

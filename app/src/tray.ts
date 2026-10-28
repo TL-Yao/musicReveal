@@ -248,7 +248,8 @@ async function startRitual(r: Row, j: Job) {
     row.classList.remove("nocover");
     dest?.classList.add("pop");
     row.classList.add("just-done");
-  } else bumpCount();
+  }
+  bumpCount();
   collapse(r);
 }
 

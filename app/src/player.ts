@@ -1,11 +1,17 @@
 // 播放条（走带 / LCD / 歌词开关 / 音量）与歌词视图。状态来自 `player` 事件，两次事件之间按时间插值进度。
-import type { LyricLine, PlayerState, Repeat } from "./types";
-import { $, $$, artStyle, esc, fmtTime, GREY, hashArt, icon, reduced } from "./dom";
+import type { LyricLine, PlayerState, Repeat, Track } from "./types";
+import { $, $$, artStyle, esc, fmtTime, GREY, hashArt, icon, reduced, titleFromFile } from "./dom";
 import { S, call } from "./store";
 import { coverArt, syncRows, trackById, visibleIds } from "./library";
 
 const now = () => performance.now();
-const cur = () => trackById(S.player.trackId);
+/** 正在播放的曲目。播放器直接读文件，资料库可能还没读到它（扫描中 / 已移走）：先按文件名显示 */
+const cur = (): Track | undefined => {
+  const id = S.player.trackId;
+  if (!id) return;
+  const name = id.split("/").pop()!;
+  return trackById(id) ?? { id, title: titleFromFile(name), artists: [], durationMs: S.player.durationMs, quality: "", hasLyrics: false, addedAt: 0 };
+};
 const dur = () => S.player.durationMs || cur()?.durationMs || 0;
 /** 当前播放位置（ms）：上次事件的位置 + 之后流逝的时间 */
 export const pos = () => {
@@ -22,8 +28,10 @@ export function setPlayer(p: PlayerState) {
   refreshNowPlaying();
   syncRows();
   if (p.trackId !== prev) {
-    if (!p.trackId) setLyricsOpen(false);
+    if (p.trackId && p.trackId === wantLyr) setLyricsOpen(true);
+    else if (!p.trackId) setLyricsOpen(false);
     else if (lyrOpen) loadLyrics();
+    wantLyr = undefined; // 换到的不是要看的那首（它打不开被跳过了）：意图作废
   }
   kick();
 }
@@ -31,6 +39,7 @@ export function setPlayer(p: PlayerState) {
 export function refreshNowPlaying() {
   renderTransport();
   renderLCD();
+  if (lyrOpen && !lyrReal && trackById(S.player.trackId)) loadLyrics();
 }
 export function togglePlay() {
   if (S.player.trackId) return void call("player_toggle");
@@ -74,7 +83,7 @@ function renderLCD() {
   updateProgress();
 }
 function updateProgress() {
-  if (!cur()) return;
+  if (!S.player.trackId) return;
   const d = dur(), at = scrubbing ?? pos(), p = d ? Math.min(1, at / d) : 0;
   $(".lcd .scrub i").style.setProperty("--p", (p * 100).toFixed(2) + "%");
   if (scrubbing === null) $<HTMLInputElement>("#scrub").value = String(Math.round(p * 1000));
@@ -102,19 +111,27 @@ const seek = (ms: number) => {
 /* ===================================================================
    歌词视图：模糊放大的封面做底、左封面右歌词；当前行显影，其余行留在潜影里
    =================================================================== */
-let lyrOpen = false, lyrId: string | undefined, lines: LyricLine[] = [], lineEls: HTMLElement[] = [], curLine = -1;
+let lyrOpen = false, lyrId: string | undefined, lyrReal = false, wantLyr: string | undefined, lines: LyricLine[] = [], lineEls: HTMLElement[] = [], curLine = -1;
 
 export function setLyricsOpen(on: boolean) {
+  wantLyr = undefined;
   lyrOpen = on && !!S.player.trackId;
   $("#lyrics").classList.toggle("on", lyrOpen);
   $("#btnLyrics").classList.toggle("on", lyrOpen);
   if (lyrOpen) loadLyrics();
 }
 export const lyricsOpen = () => lyrOpen;
+/** 打开某首的歌词：已在放就直接开；否则 start() 去播，等播放器真换到这首再开（免得先闪出上一首的歌词） */
+export function openLyricsFor(id: string, start: () => void) {
+  if (S.player.trackId === id) return setLyricsOpen(true);
+  start();
+  wantLyr = id;
+}
 
 async function loadLyrics() {
   const id = S.player.trackId!;
   lyrId = id;
+  lyrReal = !!trackById(id); // 还没有 Track 时先按文件名占位，Track 到了再重载
   const L = await S.B.invoke<LyricLine[] | null>("get_lyrics", { id }).catch((e) => (console.error("get_lyrics", e), null));
   if (lyrId === id) renderLyrics(L ?? []);
 }
@@ -129,7 +146,7 @@ function renderLyrics(L: LyricLine[]) {
   const cover = `<div class="cover" style="${art}">${coverArt(t)}</div>`;
   const head = `<div class="lyr-bg" style="${art}">${t.coverUrl ? `<img src="${esc(t.coverUrl)}" alt="">` : ""}</div><div class="lyr-veil"></div>`;
   if (!L.length) {
-    box.innerHTML = head + `<div class="lyr-none"><div>${cover}<h3>${esc(t.title)}</h3><p>${esc(t.artists.join("、"))}</p><p class="sub">这首歌没有歌词</p></div></div>`;
+    box.innerHTML = head + `<div class="lyr-none"><div>${cover}<h3>${esc(t.title)}</h3><p>${esc(t.artists.join("、"))}</p><p class="sub">${lyrReal || !S.lib.scanning ? "这首歌没有歌词" : "正在读取资料库…"}</p></div></div>`;
     return;
   }
   const meta = [t.album, t.year].filter(Boolean).join(" · ");

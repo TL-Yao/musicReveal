@@ -2,7 +2,7 @@
 import type { Library, Track } from "./types";
 import { $, $$, artStyle, esc, fmtTime, glyphHTML, GREY, hashArt, icon } from "./dom";
 import { S, call } from "./store";
-import { setLyricsOpen, togglePlay } from "./player";
+import { openLyricsFor, togglePlay } from "./player";
 
 type Key = "added" | "title" | "artist" | "album" | "dur";
 const SORT_LABEL: Record<Key, string> = { added: "最近添加", title: "歌名", artist: "歌手", album: "专辑", dur: "时长" };
@@ -88,9 +88,9 @@ function renderHead() {
     .join("");
 }
 
-const rowHTML = (t: Track) => {
+const rowHTML = (t: Track, i: number) => {
   const land = landing.has(t.id) ? " landing nocover" : "";
-  return `<li class="song${land}" data-id="${esc(t.id)}"><div class="c-title">${coverHTML(t)}<div class="tt"><div class="t1">${esc(t.title)}</div><div class="t2">${esc(t.artists.join("、"))}</div></div></div><div class="c-album">${esc(t.album ?? "")}</div><div class="c-dur">${fmtTime(t.durationMs)}</div><div class="c-fmt">${esc(t.quality)}</div></li>`;
+  return `<li class="song${land}" id="song-${i}" role="option" aria-selected="false" data-id="${esc(t.id)}"><div class="c-title">${coverHTML(t)}<div class="tt"><div class="t1">${esc(t.title)}</div><div class="t2">${esc(t.artists.join("、"))}</div></div></div><div class="c-album">${esc(t.album ?? "")}</div><div class="c-dur">${fmtTime(t.durationMs)}</div><div class="c-fmt">${esc(t.quality)}</div></li>`;
 };
 function renderSongs() {
   const ul = $("#songs");
@@ -113,10 +113,14 @@ export function syncRows() {
     if (!el) continue;
     const sel = id === selected, on = id === pid;
     el.classList.toggle("sel", sel);
+    el.setAttribute("aria-selected", String(sel));
     el.classList.toggle("playing", on);
     el.classList.toggle("paused", on && !S.player.playing);
     if (sel || on) painted.add(id);
   }
+  const ul = $("#songs"), sEl = selected ? rows.get(selected) : undefined;
+  if (sEl) ul.setAttribute("aria-activedescendant", sEl.id);
+  else ul.removeAttribute("aria-activedescendant");
 }
 const select = (id: string | null) => ((selected = id), syncRows());
 
@@ -170,18 +174,28 @@ function trash(id: string) {
 
 /* —— 菜单（右键 / 排序） —— */
 type Item = { label: string; on?: boolean; run: () => void } | null;
-export function openMenu(x: number, y: number, items: Item[]) {
+let menuReturn: HTMLElement | null = null;
+/** kbd：由键盘打开，焦点进菜单（↑↓ 选、↩ 执行、Esc 关闭并把焦点还回去） */
+export function openMenu(x: number, y: number, items: Item[], kbd = false) {
   const m = $("#menu");
-  m.innerHTML = items.map((it, i) => (it ? `<button data-i="${i}" class="${it.on ? "on" : ""}"><svg class="ck"><use href="#i-check"/></svg>${esc(it.label)}</button>` : "<hr>")).join("");
+  m.innerHTML = items.map((it, i) => (it ? `<button role="menuitem" tabindex="-1" data-i="${i}" class="${it.on ? "on" : ""}"><svg class="ck"><use href="#i-check"/></svg>${esc(it.label)}</button>` : "<hr>")).join("");
   $$("button", m).forEach((b) => (b.onclick = () => (closeMenu(), items[+b.dataset.i!]!.run())));
   m.style.left = Math.min(x, innerWidth - 220) + "px";
   m.style.top = Math.max(4, Math.min(y, innerHeight - m.offsetHeight - 8)) + "px";
   m.classList.add("on");
+  menuReturn = kbd ? (document.activeElement as HTMLElement) : null;
+  if (kbd) $("button", m).focus();
 }
-export const closeMenu = () => $("#menu").classList.remove("on");
+export function closeMenu() {
+  const m = $("#menu");
+  if (!m.classList.contains("on")) return;
+  m.classList.remove("on");
+  if (m.contains(document.activeElement)) menuReturn?.focus();
+  menuReturn = null;
+}
 const songMenu = (id: string): Item[] => [
   { label: "播放", run: () => play(id) },
-  { label: "显示歌词", run: () => (S.player.trackId !== id && play(id), setLyricsOpen(true)) },
+  { label: "显示歌词", run: () => openLyricsFor(id, () => play(id)) },
   null,
   { label: "在 Finder 中显示", run: () => call("reveal_track", { id }) },
   { label: "移到废纸篓", run: () => trash(id) },
@@ -209,6 +223,30 @@ export function initLibrary() {
     const t = e.target as Element, li = t.closest<HTMLElement>(".song");
     if (li && !t.closest(".cover")) play(li.dataset.id!);
   });
+  // 键盘：整张表一个 tab stop（aria-activedescendant 指向选中行），↑↓/Home/End 选、↩ 播放、⇧F10 菜单
+  ul.addEventListener("keydown", (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey || !view.length) return;
+    const i = view.findIndex((t) => t.id === selected), last = view.length - 1;
+    const to = ({ ArrowDown: i < 0 ? 0 : Math.min(last, i + 1), ArrowUp: i < 0 ? last : Math.max(0, i - 1), Home: 0, End: last } as Record<string, number>)[e.key];
+    if (to !== undefined) {
+      e.preventDefault();
+      select(view[to].id);
+      rows.get(view[to].id)?.scrollIntoView({ block: "nearest" });
+    } else if (e.key === "Enter" && selected) {
+      e.preventDefault();
+      play(selected);
+    } else if (((e.key === "F10" && e.shiftKey) || e.key === "ContextMenu") && selected) {
+      e.preventDefault();
+      const r = rows.get(selected)!.getBoundingClientRect();
+      openMenu(r.left + 48, r.bottom, songMenu(selected), true);
+    }
+  });
+  $("#menu").addEventListener("keydown", (e) => {
+    const bs = $$<HTMLButtonElement>("button", $("#menu")), k = bs.indexOf(document.activeElement as HTMLButtonElement);
+    const d = e.key === "ArrowDown" ? 1 : e.key === "ArrowUp" ? -1 : 0;
+    if (d) e.preventDefault(), bs[(k + d + bs.length) % bs.length].focus();
+    if (e.key === "Tab") e.preventDefault();
+  });
   ul.addEventListener("contextmenu", (e) => {
     const li = (e.target as Element).closest<HTMLElement>(".song");
     if (!li) return;
@@ -222,7 +260,7 @@ export function initLibrary() {
   });
   $("#sortBtn").onclick = (e) => {
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    openMenu(r.left, r.bottom + 4, sortMenu());
+    openMenu(r.left, r.bottom + 4, sortMenu(), (e as MouseEvent).detail === 0);
   };
   $("#addFiles").onclick = addFiles;
   $("#void").addEventListener("click", (e) => (e.target as Element).closest("#voidAdd") && addFiles());

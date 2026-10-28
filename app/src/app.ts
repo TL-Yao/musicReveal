@@ -56,7 +56,9 @@ function render() {
   if (!S.snap) return;
   const onb = onboarding();
   $("#win").classList.toggle("onboarding", onb);
-  for (const g of $$("[data-group]")) g.classList.toggle("dormant", onb && (g.dataset.group === "lib" || ob.revealed < 1));
+  // 引导中压暗的部分只是看起来不能点：inert 让键盘也进不去
+  for (const g of $$<HTMLElement>("[data-group]")) g.inert = g.classList.toggle("dormant", onb && (g.dataset.group === "lib" || ob.revealed < 1));
+  for (const el of $$<HTMLElement>(".toolbar, .page-head, #scroll")) el.inert = onb;
   renderFolders();
   renderStatus();
   renderQQ();
@@ -156,7 +158,7 @@ function renderOutput() {
     seg.dataset.on = on;
     $$("button", seg).forEach((b, i) => b.classList.toggle("on", String(i) === on));
   }
-  $$(".radio").forEach((r) => r.classList.toggle("on", r.dataset.f === format()));
+  $$<HTMLInputElement>(".radio input").forEach((r) => (r.checked = r.value === format()));
 }
 
 /* —— 通知卡：新文件夹里的旧歌 / 补转完成 —— */
@@ -222,6 +224,7 @@ let boxSig = "";
 function renderStage() {
   const st = $("#stage"), onb = onboarding();
   st.classList.toggle("off", !onb);
+  st.inert = !onb; // 退场动画期间旧卡片还在，不能再被 Tab / Enter 触发
   if (!onb) return;
   const k = `ob${ob.step}`;
   if (st.querySelector<HTMLElement>(".stage-card")?.dataset.k !== k) {
@@ -266,6 +269,7 @@ function setFormat(v: Format) {
   else call("set_format", { format: v });
 }
 async function finishOnboarding() {
+  if (!onboarding()) return; // complete_onboarding 会重设监听文件夹，引导之外绝不能再发
   ob.revealed = 3;
   render();
   await call("complete_onboarding", {
@@ -297,7 +301,7 @@ function wire() {
     if (seg) return setFormat(seg.dataset.v as Format);
     const cmd = t.closest<HTMLElement>("#qqAlert [data-cmd], .qq [data-cmd]")?.dataset.cmd;
     if (cmd) return void call(cmd);
-    if (!t.closest("#stage")) return;
+    if (!t.closest("#stage") || !onboarding()) return;
     if (t.closest("#obNext")) return ob.step < 3 ? setObStep(ob.step + 1) : void finishOnboarding();
     if (t.closest("#obBack")) return setObStep(ob.step - 1);
     if (t.closest("#obAdd")) return void addFolder();
@@ -311,13 +315,14 @@ function wire() {
   });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
-      closeMenu();
+      if ($("#menu").classList.contains("on")) return closeMenu();
       if (lyricsOpen()) setLyricsOpen(false);
     }
     if (e.metaKey && e.key === ",") return e.preventDefault(), void call("open_settings");
     if (S.snap && onboarding()) return;
     if ((e.target as Element).matches("input:not([type=range]), textarea")) return;
-    if (e.key === " " && !e.metaKey) {
+    // 焦点在按钮 / 单选上时空格归控件自己（原生激活）
+    if (e.key === " " && !e.metaKey && !(e.target as Element).closest("button, a[href], input[type=radio], #menu")) {
       e.preventDefault();
       togglePlay();
     }
@@ -350,8 +355,8 @@ export function startSettings(backend: Backend) {
   root.innerHTML = `<div class="form">
     <div class="frow"><label>输出文件夹</label><div><div class="field"><div class="pathbox"><span class="ico">${icon("folder")}</span><span><div class="name"></div><div class="path"></div></span></div><button class="btn" id="stPick">选择…</button></div><p class="help">转换好的歌曲按「歌手 - 歌名」命名写到这里；这个文件夹里的歌就是资料库。</p></div></div>
     <div class="frow"><label>输出格式</label><div>
-      <div class="radio" data-f="original"><i></i><span><div class="lab">原格式</div><div class="desc">保留无损音质，文件较大。</div></span></div>
-      <div class="radio" data-f="mp3"><i></i><span><div class="lab">MP3</div><div class="desc">320 kbps，兼容性更好。只影响之后转换的歌曲。</div></span></div></div></div>
+      <label class="radio"><input type="radio" name="format" value="original"><i></i><span><div class="lab">原格式</div><div class="desc">保留无损音质，文件较大。</div></span></label>
+      <label class="radio"><input type="radio" name="format" value="mp3"><i></i><span><div class="lab">MP3</div><div class="desc">320 kbps，兼容性更好。只影响之后转换的歌曲。</div></span></label></div></div>
     <div class="frow"><label>QQ 音乐</label><div class="qqline"></div></div>
   </div>`;
   root.addEventListener("click", async (e) => {
@@ -360,10 +365,12 @@ export function startSettings(backend: Backend) {
       const p = await pickFolder();
       if (p) call("set_output_dir", { path: p });
     }
-    const f = t.closest<HTMLElement>(".radio")?.dataset.f;
-    if (f) call("set_format", { format: f });
     const cmd = t.closest<HTMLElement>("[data-cmd]")?.dataset.cmd;
     if (cmd) call(cmd);
+  });
+  root.addEventListener("change", (e) => {
+    const r = e.target as HTMLInputElement;
+    if (r.name === "format") call("set_format", { format: r.value });
   });
   load<Snapshot>(S.B.onSnapshot, "get_snapshot", (s) => {
     S.snap = { ...s, onboarded: true };
