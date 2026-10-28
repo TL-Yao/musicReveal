@@ -4,14 +4,73 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>musicReveal</title>
-    <style>
-      body { font: 13px -apple-system, sans-serif; margin: 0; padding: 40px 16px 16px; }
-      pre { white-space: pre-wrap; word-break: break-all; font: 12px ui-monospace, monospace; }
-    </style>
   </head>
   <body>
-    <button id="add">添加监听文件夹…</button>
-    <pre id="out">加载中…</pre>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-folder" viewBox="0 0 20 20"><path fill="currentColor" d="M2.5 5.5A2 2 0 0 1 4.5 3.5h3.3c.5 0 1 .2 1.4.6l1.2 1.2h5.1a2 2 0 0 1 2 2v7.2a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2V5.5Zm1.5 2v7a.5.5 0 0 0 .5.5h11a.5.5 0 0 0 .5-.5V7.5H4Z"/></symbol>
+  <symbol id="i-folder-warn" viewBox="0 0 20 20"><path fill="currentColor" d="M2.5 5.5A2 2 0 0 1 4.5 3.5h3.3c.5 0 1 .2 1.4.6l1.2 1.2h5.1a2 2 0 0 1 2 2v7.2a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2V5.5Z" opacity=".35"/><path fill="currentColor" d="M10 8.2c.4 0 .7.3.7.7v2.6a.7.7 0 0 1-1.4 0V8.9c0-.4.3-.7.7-.7Zm0 5.2a.9.9 0 1 1 0 1.8.9.9 0 0 1 0-1.8Z"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 20 20"><path fill="currentColor" d="M10 4.2c.5 0 .8.3.8.8v4.2H15c.5 0 .8.3.8.8s-.3.8-.8.8h-4.2V15c0 .5-.3.8-.8.8s-.8-.3-.8-.8v-4.2H5c-.5 0-.8-.3-.8-.8s.3-.8.8-.8h4.2V5c0-.5.3-.8.8-.8Z"/></symbol>
+  <symbol id="i-minus" viewBox="0 0 20 20"><path fill="currentColor" d="M5 9.2h10c.5 0 .8.3.8.8s-.3.8-.8.8H5c-.5 0-.8-.3-.8-.8s.3-.8.8-.8Z"/></symbol>
+  <symbol id="i-check" viewBox="0 0 20 20"><path fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" d="M4 10.5l4 4 8-9"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 20 20"><path fill="currentColor" d="M6 8V6.5a4 4 0 0 1 8 0V8h.5A1.5 1.5 0 0 1 16 9.5v6A1.5 1.5 0 0 1 14.5 17h-9A1.5 1.5 0 0 1 4 15.5v-6A1.5 1.5 0 0 1 5.5 8H6Zm1.6 0h4.8V6.5a2.4 2.4 0 0 0-4.8 0V8Z"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 20 20"><path fill="currentColor" d="M8.7 3.6a1.5 1.5 0 0 1 2.6 0l6.2 10.8a1.5 1.5 0 0 1-1.3 2.3H3.8a1.5 1.5 0 0 1-1.3-2.3L8.7 3.6ZM10 7.2c-.5 0-.8.3-.8.8v3.2a.8.8 0 0 0 1.6 0V8c0-.5-.3-.8-.8-.8Zm0 6a1 1 0 1 0 0 2 1 1 0 0 0 0-2Z"/></symbol>
+  <symbol id="i-play" viewBox="0 0 20 20"><path fill="currentColor" d="M6.5 4.6c0-.9 1-1.5 1.8-1l8 4.9c.8.5.8 1.6 0 2.1l-8 4.9c-.8.5-1.8-.1-1.8-1V4.6Z"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 20 20"><rect fill="currentColor" x="5" y="5" width="10" height="10" rx="2"/></symbol>
+  <symbol id="i-finder" viewBox="0 0 20 20"><path fill="currentColor" d="M3 5.5A2.5 2.5 0 0 1 5.5 3h9A2.5 2.5 0 0 1 17 5.5v9a2.5 2.5 0 0 1-2.5 2.5h-9A2.5 2.5 0 0 1 3 14.5v-9Zm1.6 0v9c0 .5.4.9.9.9h9c.5 0 .9-.4.9-.9v-9c0-.5-.4-.9-.9-.9h-9c-.5 0-.9.4-.9.9Zm3.1 1.6c.4 0 .7.3.7.7v1.4a.7.7 0 0 1-1.4 0V7.8c0-.4.3-.7.7-.7Zm4.6 0c.4 0 .7.3.7.7v1.4a.7.7 0 0 1-1.4 0V7.8c0-.4.3-.7.7-.7ZM7 11.6a.7.7 0 0 1 1-.2c.6.4 1.3.6 2 .6s1.4-.2 2-.6a.7.7 0 1 1 .8 1.2c-.8.5-1.8.8-2.8.8s-2-.3-2.8-.8a.7.7 0 0 1-.2-1Z"/></symbol>
+  <symbol id="i-retry" viewBox="0 0 20 20"><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" d="M15.5 10a5.5 5.5 0 1 1-1.6-3.9M15.5 3.5v3.3h-3.3"/></symbol>
+  <symbol id="i-x" viewBox="0 0 20 20"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M6 6l8 8M14 6l-8 8"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M10 6.5V10l2.4 1.6"/></symbol>
+  <symbol id="i-doc" viewBox="0 0 20 20"><path fill="currentColor" d="M5 4.5A1.5 1.5 0 0 1 6.5 3h5l3.5 3.5v9A1.5 1.5 0 0 1 13.5 17h-7A1.5 1.5 0 0 1 5 15.5v-11Zm1.6.1v10.8h6.8V7.2h-2.5V4.6H6.6Z"/></symbol>
+</svg>
+
+<div class="app" id="win">
+  <aside class="sidebar">
+    <div class="lights" data-tauri-drag-region></div>
+
+    <section class="group" data-group="folders">
+      <header><h3>监听文件夹</h3><button class="icon-btn" id="addFolder" title="添加文件夹…"><svg><use href="#i-plus"/></svg></button></header>
+      <div id="folderList"></div>
+    </section>
+
+    <section class="group" data-group="qq">
+      <header><h3>QQ 音乐</h3></header>
+      <div class="qq" id="qqRow"></div>
+    </section>
+
+    <section class="group" data-group="output">
+      <header><h3>输出</h3></header>
+      <div class="srow" id="outDir" role="button" title="选择输出文件夹…">
+        <span class="ico"><svg><use href="#i-folder"/></svg></span>
+        <span><div class="name" id="outName"></div><div class="path" id="outPath"></div></span>
+        <span></span>
+      </div>
+      <div class="seg" id="fmtSeg" data-on="0"><div class="thumb"></div><button data-v="original">原格式</button><button data-v="mp3">MP3</button></div>
+    </section>
+  </aside>
+
+  <main class="content">
+    <header class="toolbar" data-tauri-drag-region>
+      <div class="titles" data-tauri-drag-region><h1 data-tauri-drag-region>musicReveal</h1><p id="subtitle" data-tauri-drag-region></p></div>
+      <button class="glass-btn" id="addFiles"><svg><use href="#i-plus"/></svg>添加文件…</button>
+    </header>
+    <div class="body">
+      <div class="scroll" id="scroll">
+        <div id="notices"></div>
+        <ul class="tasks" id="tasks"></ul>
+      </div>
+      <div class="stage off" id="stage"></div>
+      <div class="drop" id="drop">
+        <div class="pane"></div>
+        <div class="inner">
+          <div class="tile"><div class="art"></div><div class="dash"></div></div>
+          <h3 id="dropTitle"></h3>
+          <p>将与监听文件夹中的歌曲一样处理。</p>
+          <div class="files" id="dropFiles"></div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
