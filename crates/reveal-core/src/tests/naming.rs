@@ -79,3 +79,19 @@ fn existing_target_gets_numbered() {
 }
 
 use super::Tmp;
+
+#[test]
+fn ffmpeg_candidates_must_be_executable() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new("ffexec");
+    let (a, b) = (t.0.join("a"), t.0.join("b"));
+    std::fs::write(&a, b"").unwrap();
+    std::fs::write(&b, b"").unwrap();
+    std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::set_permissions(&b, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let dir = t.0.clone();
+    assert_eq!(
+        crate::convert::first_executable([t.0.join("missing"), dir, a, b.clone()]),
+        Some(b)
+    );
+}

@@ -565,5 +565,12 @@ pub fn find_ffmpeg() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("PATH") {
         c.extend(std::env::split_paths(&path).map(|d| d.join("ffmpeg")));
     }
-    c.into_iter().find(|p| p.is_file())
+    first_executable(c)
+}
+
+pub(crate) fn first_executable(c: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    c.into_iter().find(|p| {
+        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    })
 }
