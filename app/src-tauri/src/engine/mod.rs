@@ -7,13 +7,13 @@ mod store;
 
 pub use model::*;
 pub use real::RealConverter;
-pub use store::home;
 use reveal_core::{CancelToken, ConvertError, ConvertOptions, ConvertOutcome, QqStatus, Stage};
 use scan::Stat;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
+pub use store::home;
 use store::{History, Key, Settings};
 use tokio::sync::Notify;
 
@@ -444,9 +444,7 @@ impl Engine {
             let ready: Vec<u64> = st
                 .tasks
                 .iter()
-                .filter(|t| {
-                    t.view.state == JobState::Downloading && !t.incomplete && t.same >= 1
-                })
+                .filter(|t| t.view.state == JobState::Downloading && !t.incomplete && t.same >= 1)
                 .map(|t| id_of(&t.view.id))
                 .collect();
             for id in ready {
@@ -470,8 +468,7 @@ impl Engine {
                     }
                     st.seen.insert(p.clone(), s);
                     let live = st.tasks.iter_mut().find(|t| {
-                        t.src == p
-                            && !matches!(t.view.state, JobState::Done | JobState::Skipped)
+                        t.src == p && !matches!(t.view.state, JobState::Done | JobState::Skipped)
                     });
                     if let Some(t) = live {
                         if t.view.state == JobState::Failed {
@@ -761,7 +758,9 @@ impl Engine {
     /// 用 afplay 试听；再次调用会先停掉上一个。
     pub fn play_preview(&self, id: &str) -> Result<(), String> {
         let out = self.output_of(id)?;
-        let ext = out.extension().map(|e| e.to_string_lossy().to_ascii_lowercase());
+        let ext = out
+            .extension()
+            .map(|e| e.to_string_lossy().to_ascii_lowercase());
         if ext.as_deref() == Some("ogg") {
             return Err("该格式暂不支持试听".into());
         }
@@ -841,7 +840,8 @@ impl Engine {
                 j.queue_pos = Some(i as u32 + 1);
             }
         }
-        let count = |f: &dyn Fn(JobState) -> bool| jobs.iter().filter(|j| f(j.state)).count() as u32;
+        let count =
+            |f: &dyn Fn(JobState) -> bool| jobs.iter().filter(|j| f(j.state)).count() as u32;
         let busy = count(&|s| {
             !matches!(
                 s,

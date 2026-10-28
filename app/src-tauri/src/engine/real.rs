@@ -40,7 +40,15 @@ impl Converter for RealConverter {
         let creds = reveal_core::load_credentials(&self.home).ok();
         let mut opts = opts.clone();
         opts.ffmpeg = opts.ffmpeg.or_else(|| self.ffmpeg.clone());
-        reveal_core::convert(input, &opts, &self.enricher, creds.as_ref(), cancel, progress).await
+        reveal_core::convert(
+            input,
+            &opts,
+            &self.enricher,
+            creds.as_ref(),
+            cancel,
+            progress,
+        )
+        .await
     }
 
     fn qq_status(&self) -> QqStatus {

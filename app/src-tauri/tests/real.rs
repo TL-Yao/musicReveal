@@ -51,7 +51,12 @@ async fn real_files_dropped_into_watch_folder_get_converted() {
         let finished = s
             .jobs
             .iter()
-            .filter(|j| matches!(j.state, JobState::Done | JobState::Failed | JobState::WaitLogin))
+            .filter(|j| {
+                matches!(
+                    j.state,
+                    JobState::Done | JobState::Failed | JobState::WaitLogin
+                )
+            })
             .count();
         if finished == files.len() || t0.elapsed() > Duration::from_secs(600) {
             break s.jobs;

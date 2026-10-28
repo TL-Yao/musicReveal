@@ -95,7 +95,9 @@ impl Converter for Fake {
         progress(Stage::Metadata);
         // mgg 的真实产物是 ogg；其余与源同名
         let output = match input.extension().and_then(|e| e.to_str()) {
-            Some("mgg") => opts.output_dir.join(input.with_extension("ogg").file_name().unwrap()),
+            Some("mgg") => opts
+                .output_dir
+                .join(input.with_extension("ogg").file_name().unwrap()),
             _ => opts.output_dir.join(input.file_name().unwrap()),
         };
         std::fs::write(&output, b"audio").unwrap();
@@ -273,7 +275,8 @@ async fn incomplete_goes_back_to_downloading_and_fails_after_60s_unchanged() {
 async fn failures_carry_short_chinese_reasons_and_retry_requeues() {
     let r = Rig::new("fail").await;
     r.fake.fail("u.qmc0", ConvertError::Unsupported("x".into()));
-    r.fake.fail("n.ncm", ConvertError::Failed("网络错误：timeout".into()));
+    r.fake
+        .fail("n.ncm", ConvertError::Failed("网络错误：timeout".into()));
     put(&r.watch, "u.qmc0", b"1");
     put(&r.watch, "n.ncm", b"1");
     settle(&r.eng);
@@ -325,7 +328,12 @@ async fn same_file_again_is_skipped_until_output_is_gone() {
     let first = r.wait("s.ncm", JobState::Done).await;
     add();
     for _ in 0..500 {
-        if r.eng.snapshot().jobs.iter().any(|j| j.state == JobState::Skipped) {
+        if r.eng
+            .snapshot()
+            .jobs
+            .iter()
+            .any(|j| j.state == JobState::Skipped)
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -417,7 +425,10 @@ async fn ignored_existing_songs_are_never_asked_or_caught_up_again() {
     let lib = r.t.dir("lib");
     put(&lib, "old.ncm", b"x");
     assert_eq!(
-        r.eng.add_watch_folder(&lib.to_string_lossy()).unwrap().existing,
+        r.eng
+            .add_watch_folder(&lib.to_string_lossy())
+            .unwrap()
+            .existing,
         1
     );
     r.eng.ignore_existing(&lib.to_string_lossy());
@@ -427,7 +438,10 @@ async fn ignored_existing_songs_are_never_asked_or_caught_up_again() {
     // 移除再加回：不再提示
     r.eng.remove_watch_folder(&lib.to_string_lossy());
     assert_eq!(
-        r.eng.add_watch_folder(&lib.to_string_lossy()).unwrap().existing,
+        r.eng
+            .add_watch_folder(&lib.to_string_lossy())
+            .unwrap()
+            .existing,
         0
     );
     // 重启：不补转
@@ -569,7 +583,13 @@ async fn deleted_watch_folder_is_inaccessible_and_recovers() {
     std::fs::remove_dir_all(&r.watch).unwrap();
     r.eng.tick();
     let s = r.eng.snapshot();
-    let f = |p: &Path| s.folders.iter().find(|f| f.path == p.to_string_lossy()).unwrap().clone();
+    let f = |p: &Path| {
+        s.folders
+            .iter()
+            .find(|f| f.path == p.to_string_lossy())
+            .unwrap()
+            .clone()
+    };
     assert!(!f(&r.watch).accessible);
     assert!(f(&r.watch).reason.is_some());
     assert!(f(&other).accessible);
@@ -640,7 +660,15 @@ async fn cover_becomes_small_thumbnail_url() {
     let r = Rig::new("cover").await;
     let png = r.t.0.join("big.png");
     let ok = std::process::Command::new("/opt/homebrew/bin/ffmpeg")
-        .args(["-v", "error", "-y", "-f", "lavfi", "-i", "color=red:s=800x600"])
+        .args([
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=red:s=800x600",
+        ])
         .args(["-frames:v", "1"])
         .arg(&png)
         .status()
