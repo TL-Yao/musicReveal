@@ -291,3 +291,64 @@ fn extreme_numeric_fields_keep_original_values() {
         assert_eq!(m, ne(1), "{body}");
     }
 }
+
+fn ne_lrc(lrc: &str) -> Option<String> {
+    let body = serde_json::json!({"lrc": {"lyric": lrc}, "code": 200}).to_string();
+    crate::enrich::netease_lyric(body.as_bytes())
+        .unwrap()
+        .map(|l| l.lrc)
+}
+
+#[test]
+fn only_known_placeholders_count_as_instrumental() {
+    for p in [
+        "纯音乐，请欣赏",
+        "纯音乐,请欣赏",
+        " 纯音乐 ， 请欣赏 。",
+        "此歌曲为没有填词的纯音乐，请您欣赏",
+        "此歌曲为没有填词的纯音乐,请您欣赏!",
+    ] {
+        assert_eq!(ne_lrc(&format!("[00:00.00]{p}")), None, "{p}");
+    }
+    let real = "[00:01.00]把爱谱成纯音乐唱给你";
+    assert_eq!(ne_lrc(real).as_deref(), Some(real));
+}
+
+#[test]
+fn credit_lines_need_a_colon_or_a_dedicated_role_word() {
+    for body in [
+        "鼓 响彻了夜空",
+        "曲 终人散",
+        "词 不达意",
+        "吉他 弹起来",
+        "Lyrics so sweet",
+    ] {
+        let l = format!("[00:01.00]{body}");
+        assert_eq!(ne_lrc(&l).as_deref(), Some(l.as_str()), "{body}");
+    }
+    for credit in [
+        "鼓：张三",
+        "曲 : 李四",
+        "Lyrics: x",
+        "作曲 Yunomi",
+        "制作人\u{a0}王五",
+        "绘  御坂的蓝白",
+        "和声 赵六",
+    ] {
+        assert_eq!(ne_lrc(&format!("[00:01.00]{credit}")), None, "{credit}");
+    }
+}
+
+#[test]
+fn recorded_credit_lines_are_still_credits() {
+    let v: serde_json::Value =
+        serde_json::from_slice(&fx("netease_lyric_1982798727.json")).unwrap();
+    let credits: Vec<&str> = v["lrc"]["lyric"]
+        .as_str()
+        .unwrap()
+        .lines()
+        .take_while(|l| !l.starts_with("[00:10.94]"))
+        .collect();
+    assert_eq!(credits.len(), 5);
+    assert_eq!(ne_lrc(&credits.join("\n")), None);
+}

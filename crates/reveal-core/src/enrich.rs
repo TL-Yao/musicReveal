@@ -119,6 +119,7 @@ fn unescape(s: &str) -> String {
     out + rest
 }
 
+/// 署名角色：后接冒号（半角 / 全角，前后可有空白）即为署名行。
 const CREDITS: &[&str] = &[
     "作词",
     "作曲",
@@ -159,25 +160,48 @@ const CREDITS: &[&str] = &[
     "Producer",
 ];
 
-/// `作曲 Yunomi`、`作词 : 无` 这类署名行。
+/// 不像正文开头的专用角色词：后接空白也算署名（网易云常见 `作曲 Yunomi`）。
+const CREDITS_SPACED: &[&str] = &[
+    "作词",
+    "作曲",
+    "编曲",
+    "混音",
+    "缩混",
+    "母带",
+    "制作人",
+    "监制",
+    "和声",
+    "作詞",
+    "編曲",
+    "绘",
+];
+
+/// `作曲 Yunomi`、`作词 : 无`、`鼓：张三` 这类署名行。
 fn is_credit(text: &str) -> bool {
-    CREDITS.iter().any(|k| {
-        text.strip_prefix(k)
-            .is_some_and(|r| r.starts_with(|c: char| c.is_whitespace() || c == ':' || c == '：'))
-    })
+    let after = |keys: &'static [&'static str]| keys.iter().filter_map(|k| text.strip_prefix(k));
+    after(CREDITS).any(|r| r.trim_start().starts_with([':', '：']))
+        || after(CREDITS_SPACED).any(|r| r.starts_with(char::is_whitespace))
+}
+
+/// 去掉标点与空白后与已知纯音乐占位文案相同。
+fn is_placeholder(text: &str) -> bool {
+    let t: String = text.chars().filter(|c| c.is_alphanumeric()).collect();
+    [
+        "纯音乐请欣赏",
+        "纯音乐请您欣赏",
+        "此歌曲为没有填词的纯音乐请您欣赏",
+    ]
+    .contains(&t.as_str())
 }
 
 /// 有带时间轴的歌词正文才算有歌词：纯音乐占位、只有署名、无时间轴的文本都视为没有。
 fn lyrics(lrc: &str, trans: Option<&str>) -> Option<crate::Lyrics> {
-    let body: Vec<&str> = lrc
-        .lines()
-        .filter_map(|l| {
-            let (tags, text) = crate::convert::split_line(l);
-            let text = text.trim();
-            (!tags.is_empty() && !text.is_empty() && !is_credit(text)).then_some(text)
-        })
-        .collect();
-    if body.is_empty() || (body.len() == 1 && body[0].contains("纯音乐")) {
+    let has_body = lrc.lines().any(|l| {
+        let (tags, text) = crate::convert::split_line(l);
+        let text = text.trim();
+        !tags.is_empty() && !text.is_empty() && !is_credit(text) && !is_placeholder(text)
+    });
+    if !has_body {
         return None;
     }
     Some(crate::Lyrics {
