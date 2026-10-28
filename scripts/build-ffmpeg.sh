@@ -51,7 +51,8 @@ ARCHFLAGS="-arch arm64 -mmacosx-version-min=11.0"
 tar -xzf "$DL/lame-${LAME_VER}.tar.gz" -C "$WORK"
 (
   cd "$WORK/lame-${LAME_VER}"
-  CFLAGS="$ARCHFLAGS -O2" LDFLAGS="$ARCHFLAGS" ./configure \
+  # -w：LAME 3.100 在新版 clang 下有大量无害告警。
+  CFLAGS="$ARCHFLAGS -O2 -w" LDFLAGS="$ARCHFLAGS" ./configure \
     --prefix="$PREFIX" --host=aarch64-apple-darwin --build=aarch64-apple-darwin \
     --disable-shared --enable-static --disable-frontend --disable-decoder \
     --disable-dependency-tracking >/dev/null

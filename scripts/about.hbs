@@ -1,0 +1,14 @@
+# musicReveal 的 Rust 依赖许可
+
+以下由 cargo about 根据 Cargo.lock 生成，列出 musicReveal.app 中编译进去的 Rust crate 及其许可全文。
+
+{{#each licenses}}
+## {{{name}}}
+
+使用此许可的 crate：{{#each used_by}}{{crate.name}} {{crate.version}}{{#unless @last}}，{{/unless}}{{/each}}
+
+```
+{{{text}}}
+```
+
+{{/each}}
