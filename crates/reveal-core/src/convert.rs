@@ -267,23 +267,31 @@ fn tag_of(f: &TaggedFile) -> Option<&Tag> {
     f.primary_tag().or_else(|| f.first_tag())
 }
 
-/// `EmbeddedMeta` 非空字段优先，其余取音频自带标签。
+fn non_blank(s: Option<String>) -> Option<String> {
+    s.filter(|s| !s.trim().is_empty())
+}
+
+/// `EmbeddedMeta` 非空字段优先，其余取音频自带标签；空白字符串视同缺失。
 fn merge(e: EmbeddedMeta, tag: Option<&Tag>) -> TrackMeta {
-    let s = |k: ItemKey| tag.and_then(|t| t.get_string(k)).map(str::to_owned);
-    let artists = if e.artists.is_empty() {
-        tag.map(|t| {
-            t.get_strings(ItemKey::TrackArtist)
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
-    } else {
-        e.artists
+    let s = |k: ItemKey| non_blank(tag.and_then(|t| t.get_string(k)).map(str::to_owned));
+    let clean = |v: Vec<String>| -> Vec<String> {
+        v.into_iter().filter(|a| !a.trim().is_empty()).collect()
     };
+    let mut artists = clean(e.artists);
+    if artists.is_empty() {
+        artists = clean(
+            tag.map(|t| {
+                t.get_strings(ItemKey::TrackArtist)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        );
+    }
     TrackMeta {
-        title: e.title.or_else(|| s(ItemKey::TrackTitle)),
+        title: non_blank(e.title).or_else(|| s(ItemKey::TrackTitle)),
         artists,
-        album: e.album.or_else(|| s(ItemKey::AlbumTitle)),
+        album: non_blank(e.album).or_else(|| s(ItemKey::AlbumTitle)),
         album_artist: s(ItemKey::AlbumArtist),
         year: tag.and_then(|t| t.date()).map(|d| d.year),
         track: tag.and_then(|t| t.track()),

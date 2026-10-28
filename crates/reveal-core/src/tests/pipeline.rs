@@ -350,3 +350,33 @@ async fn lyrics_are_embedded_in_every_format() {
         assert_eq!(lyr, Some("第一句\nsecond"), "{ext}");
     }
 }
+
+#[tokio::test]
+async fn blank_embedded_meta_does_not_hide_inner_tags() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("pl-blank");
+    let plain = flac24(
+        &ff,
+        &t,
+        &[
+            "-metadata",
+            "title=内层歌名",
+            "-metadata",
+            "artist=内层歌手",
+            "-metadata",
+            "album=内层专辑",
+        ],
+    );
+    let meta =
+        r#"{"musicId":"1","musicName":"  ","artist":[["",0],[" ",0]],"album":"","format":"flac"}"#;
+    let input = t.write("src.ncm", &build_ncm(&plain, b"k", meta, None));
+    let out = out_dir(&t);
+    let o = run(&input, &out, OutputFormat::Original, &NoopEnricher, None)
+        .await
+        .res
+        .unwrap();
+    assert_eq!(o.meta.title.as_deref(), Some("内层歌名"));
+    assert_eq!(o.meta.artists, ["内层歌手"]);
+    assert_eq!(o.meta.album.as_deref(), Some("内层专辑"));
+    assert_eq!(name(&o.output), "内层歌手 - 内层歌名.flac");
+}
