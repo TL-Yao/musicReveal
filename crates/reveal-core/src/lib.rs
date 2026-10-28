@@ -152,7 +152,8 @@ fn sniff_container(h: &[u8]) -> Option<Container> {
         {
             Container::Mp3
         }
-        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'A', b'V', b'E', ..] => Container::Wav,
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'A', b'V', b'E', ..]
+        | [b'R', b'F', b'6', b'4', _, _, _, _, b'W', b'A', b'V', b'E', ..] => Container::Wav,
         [_, _, _, _, b'f', b't', b'y', b'p', ..] => Container::M4a,
         [0x30, 0x26, 0xB2, 0x75, 0x8E, 0x66, 0xCF, 0x11, ..] => Container::Wma,
         [b'M', b'A', b'C', b' ', ..] => Container::Ape,
@@ -235,6 +236,45 @@ fn plain_container(ext: &str) -> Option<Container> {
     })
 }
 
+/// 普通音频的容器：跳过开头的 ID3v2 标签，认不出再跳过 0 填充；数据还没到时 Incomplete。
+fn plain_container_of(f: &mut File) -> Result<Option<Container>, Error> {
+    const SCAN: usize = 64 << 10;
+    let len = f.metadata()?.len();
+    let mut pos = 0u64;
+    loop {
+        f.seek(SeekFrom::Start(pos))?;
+        let h = read_head(f, 10)?;
+        if h.len() < 10 && b"ID3".starts_with(&h[..h.len().min(3)]) {
+            return Err(Error::Incomplete);
+        }
+        if !h.starts_with(b"ID3") {
+            break;
+        }
+        let size = h[6..10]
+            .iter()
+            .fold(0u64, |a, &b| a << 7 | u64::from(b & 0x7F));
+        let footer = if h[5] & 0x10 != 0 { 10 } else { 0 };
+        pos += 10 + size + footer;
+        if pos >= len {
+            return Err(Error::Incomplete);
+        }
+    }
+    f.seek(SeekFrom::Start(pos))?;
+    let buf = read_head(f, SCAN)?;
+    if buf.len() < MIN_HEAD {
+        return Err(Error::Incomplete);
+    }
+    if let Some(c) = sniff_container(&buf) {
+        return Ok(Some(c));
+    }
+    let start = buf.iter().position(|&b| b != 0).unwrap_or(buf.len());
+    match &buf[start..] {
+        h if h.len() >= MIN_HEAD => Ok(sniff_container(h)),
+        _ if buf.len() < SCAN => Err(Error::Incomplete),
+        _ => Ok(None),
+    }
+}
+
 /// 扩展名属于本库能处理的格式（NCM / QMC 各变体 / 普通音频）。
 pub fn is_candidate(path: &Path) -> bool {
     let ext = ext_of(path);
@@ -249,10 +289,7 @@ pub fn sniff(path: &Path) -> Result<SourceKind, Error> {
     let head = read_head(&mut f, 16)?;
     let ext = ext_of(path);
     if let Some(want) = plain_container(&ext) {
-        if head.len() < MIN_HEAD {
-            return Err(Error::Incomplete);
-        }
-        return match sniff_container(&head) {
+        return match plain_container_of(&mut f)? {
             Some(c) if c == want => Ok(SourceKind::Plain(c)),
             _ => Err(Error::Corrupt(format!("内容不是 .{ext} 音频"))),
         };
@@ -320,8 +357,10 @@ pub fn decrypt(
             let c = qmc::Cipher::static_v1();
             pump(f, out, |b, o| c.xor(b, o), corrupt)?
         }
-        SourceKind::Plain(_) if plain_container(&ext_of(path)).is_some() => {
-            let container = pump(f, out, |_, _| {}, corrupt)?;
+        SourceKind::Plain(c) if plain_container(&ext_of(path)).is_some() => {
+            // 头部可能是 ID3v2 / 0 填充，容器以 sniff 结果为准
+            pump(f, out, |_, _| {}, || Ok(c.clone()))?;
+            let container = c.clone();
             let tags = lofty::read_from_path(path)
                 .map(|t| lofty::file::TaggedFileExt::tags(&t).to_vec())
                 .unwrap_or_default();

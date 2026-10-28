@@ -363,8 +363,23 @@ pub(crate) fn read_audio(p: &Path) -> Result<TaggedFile, ConvertError> {
         .map_err(|e| ConvertError::Failed(format!("无法读取解密后的音频：{e}")))
 }
 
-pub(crate) fn tag_of(f: &TaggedFile) -> Option<&Tag> {
-    f.primary_tag().or_else(|| f.first_tag())
+/// 全部标签，主标签在前；按字段逐个回退（如 WAV 的 ID3v2 与 RIFF INFO 各存一部分）。
+pub(crate) fn tags_of(f: &TaggedFile) -> Vec<&Tag> {
+    let mut v: Vec<&Tag> = f.tags().iter().collect();
+    v.sort_by_key(|t| t.tag_type() != f.primary_tag_type());
+    v
+}
+
+/// 第一个有该字段的标签里的值。
+fn first<'a, T>(tags: &[&'a Tag], get: impl Fn(&'a Tag) -> Option<T>) -> Option<T> {
+    tags.iter().find_map(|t| get(t))
+}
+
+fn lyrics_of(tags: &[&Tag]) -> Option<String> {
+    let s = |t: &Tag, k| non_blank(t.get_string(k).map(str::to_owned));
+    first(tags, |t| {
+        s(t, ItemKey::UnsyncLyrics).or_else(|| s(t, ItemKey::Lyrics))
+    })
 }
 
 fn non_blank(s: Option<String>) -> Option<String> {
@@ -372,31 +387,32 @@ fn non_blank(s: Option<String>) -> Option<String> {
 }
 
 /// `EmbeddedMeta` 非空字段优先，其余取音频自带标签；空白字符串视同缺失。
-fn merge(e: EmbeddedMeta, tag: Option<&Tag>) -> TrackMeta {
-    let s = |k: ItemKey| non_blank(tag.and_then(|t| t.get_string(k)).map(str::to_owned));
+pub(crate) fn merge(e: EmbeddedMeta, tags: &[&Tag]) -> TrackMeta {
+    let s = |k: ItemKey| first(tags, |t| non_blank(t.get_string(k).map(str::to_owned)));
     let clean = |v: Vec<String>| -> Vec<String> {
         v.into_iter().filter(|a| !a.trim().is_empty()).collect()
     };
     let mut artists = clean(e.artists);
     if artists.is_empty() {
-        artists = clean(
-            tag.map(|t| {
+        artists = first(tags, |t| {
+            let v = clean(
                 t.get_strings(ItemKey::TrackArtist)
                     .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default(),
-        );
+                    .collect(),
+            );
+            (!v.is_empty()).then_some(v)
+        })
+        .unwrap_or_default();
     }
     TrackMeta {
         title: non_blank(e.title).or_else(|| s(ItemKey::TrackTitle)),
         artists,
         album: non_blank(e.album).or_else(|| s(ItemKey::AlbumTitle)),
         album_artist: s(ItemKey::AlbumArtist),
-        year: tag.and_then(|t| t.date()).map(|d| d.year),
-        track: tag.and_then(|t| t.track()),
-        disc: tag.and_then(|t| t.disk()),
-        cover: e.cover.or_else(|| front_cover(tag?)),
+        year: first(tags, |t| t.date()).map(|d| d.year),
+        track: first(tags, |t| t.track()),
+        disc: first(tags, |t| t.disk()),
+        cover: e.cover.or_else(|| first(tags, front_cover)),
         lyrics: None,
         song_id: e.song_id,
         platform: e.platform,
@@ -412,8 +428,13 @@ pub(crate) fn front_cover(tag: &Tag) -> Option<Vec<u8>> {
         .map(|p| p.data().to_vec())
 }
 
-/// 写入标签并返回音质描述。
-fn write_tags(p: &Path, m: &TrackMeta, c: &Container) -> Result<String, ConvertError> {
+/// 写入标签并返回音质描述。`src_lyrics`：源文件内嵌歌词，转码会丢，补全没给歌词时写回。
+fn write_tags(
+    p: &Path,
+    m: &TrackMeta,
+    c: &Container,
+    src_lyrics: Option<&str>,
+) -> Result<String, ConvertError> {
     let mut f = read_audio(p)?;
     if f.primary_tag().is_none() {
         f.insert_tag(Tag::new(f.primary_tag_type()));
@@ -432,7 +453,8 @@ fn write_tags(p: &Path, m: &TrackMeta, c: &Container) -> Result<String, ConvertE
     if let Some(v) = &m.album_artist {
         t.insert_text(ItemKey::AlbumArtist, v.clone());
     }
-    if let Some(year) = m.year {
+    // 年份没变就保留源里的完整日期
+    if let Some(year) = m.year.filter(|&y| t.date().map(|d| d.year) != Some(y)) {
         t.set_date(Timestamp {
             year,
             ..Default::default()
@@ -444,22 +466,40 @@ fn write_tags(p: &Path, m: &TrackMeta, c: &Container) -> Result<String, ConvertE
     if let Some(v) = m.disc {
         t.set_disk(v);
     }
-    if let Some(l) = &m.lyrics {
-        // ID3v2 只认 USLT（UnsyncLyrics），其余格式用 Lyrics
-        let key = if t.tag_type() == lofty::tag::TagType::Id3v2 {
-            ItemKey::UnsyncLyrics
-        } else {
-            ItemKey::Lyrics
-        };
-        t.insert_text(key, strip_timestamps(&l.lrc));
+    // ID3v2 只认 USLT（UnsyncLyrics），其余格式用 Lyrics
+    let key = if t.tag_type() == lofty::tag::TagType::Id3v2 {
+        ItemKey::UnsyncLyrics
+    } else {
+        ItemKey::Lyrics
+    };
+    match (&m.lyrics, src_lyrics) {
+        (Some(l), _) => {
+            t.insert_text(key, strip_timestamps(&l.lrc));
+        }
+        (None, Some(s)) if lyrics_of(&[t]).is_none() => {
+            t.insert_text(key, s.to_owned());
+        }
+        _ => {}
     }
-    if let Some(cover) = &m.cover {
+    // 只替换充当封面的那一张（正面；MP4 不分类型，第一张），其余图片保留
+    let pics = t.pictures();
+    if let Some(cover) = m
+        .cover
+        .as_ref()
+        .filter(|c| !pics.iter().any(|p| p.data() == &c[..]))
+    {
         if let Ok(mut pic) = Picture::from_reader(&mut &cover[..]) {
-            while !t.pictures().is_empty() {
-                t.remove_picture(0);
-            }
             pic.set_pic_type(PictureType::CoverFront);
-            t.push_picture(pic);
+            let at = pics
+                .iter()
+                .position(|p| p.pic_type() == PictureType::CoverFront)
+                .or(
+                    (t.tag_type() == lofty::tag::TagType::Mp4Ilst && !pics.is_empty()).then_some(0),
+                );
+            match at {
+                Some(i) => t.set_picture(i, pic),
+                None => t.push_picture(pic),
+            }
         }
     }
     f.save_to_path(p, lofty::config::WriteOptions::default())
@@ -481,12 +521,20 @@ pub(crate) fn quality(f: &TaggedFile, c: &Container) -> String {
             format!("{name} {}bit/{khz}kHz", pr.bit_depth().unwrap_or(16))
         }
         _ => {
-            let k = pr.audio_bitrate().unwrap_or(0);
+            let name = ext(c).to_ascii_uppercase();
+            // Vorbis 等可能不写标称码率，退回按文件大小 / 时长算的整体码率
+            let Some(k) = [pr.audio_bitrate(), pr.overall_bitrate()]
+                .into_iter()
+                .flatten()
+                .find(|&k| k > 0)
+            else {
+                return name;
+            };
             let k = [96, 128, 192, 256, 320]
                 .into_iter()
                 .find(|&t| k.abs_diff(t) * 100 <= t * 3)
                 .unwrap_or(k);
-            format!("{} {k}k", ext(c).to_ascii_uppercase())
+            format!("{name} {k}k")
         }
     }
 }
@@ -578,6 +626,7 @@ pub struct LyricLine {
 
 /// 带时间的歌词行按时间升序；同一时刻紧挨的第二行是第一行的译文（`merge_lrc` 的输出形状）。
 pub fn parse_lrc(text: &str) -> Vec<LyricLine> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut v: Vec<(u64, &str)> = text
         .lines()
         .flat_map(|l| {
@@ -679,18 +728,23 @@ pub async fn convert(
         })
         .await?
     };
-    // lofty 读不了 ASF：WMA 的自带标签等转码后从 MP3 里读
+    // lofty 读不了 ASF（WMA）与 RF64 等：自带标签等转码后从产物里读
     let src_tags = match d.container {
         Container::Wma => None,
-        _ => Some(read_audio(&cur)?),
+        _ => read_audio(&cur).ok(),
     };
 
     let mut container = d.container;
     let mut own_cover = None;
-    // 已是 MP3 不重编码；WMA / APE 的标签 lofty 写不全，总要转成 MP3 / FLAC
+    // 已是 MP3 不重编码；WMA / APE 的标签 lofty 写不全，总要转成 MP3 / FLAC；
+    // lofty 读不了的也要转码（无损转 FLAC，有损转 MP3）
+    let lossless = matches!(container, Container::Flac | Container::Wav | Container::Ape);
     let target = match (&container, opts.format) {
+        (Container::Wma, _) => Some(Container::Mp3),
+        (_, OutputFormat::Original) if src_tags.is_none() && lossless => Some(Container::Flac),
+        _ if src_tags.is_none() => Some(Container::Mp3),
         (Container::Mp3, _) => None,
-        (Container::Wma, _) | (_, OutputFormat::Mp3) => Some(Container::Mp3),
+        (_, OutputFormat::Mp3) => Some(Container::Mp3),
         (Container::Ape, OutputFormat::Original) => Some(Container::Flac),
         (_, OutputFormat::Original) => None,
     };
@@ -701,7 +755,7 @@ pub async fn convert(
             .ok_or_else(|| ConvertError::Failed("缺少 ffmpeg".into()))?;
         progress(Stage::Transcode);
         // 转码用 -vn：WMA / APE 自带的封面（附带图片流）先原样抽出来
-        if matches!(container, Container::Wma | Container::Ape) {
+        if src_tags.is_none() || container == Container::Ape {
             own_cover = attached_picture(&ff, &cur, cancel).await?;
         }
         let next = parts.add(dir);
@@ -746,7 +800,10 @@ pub async fn convert(
         Some(t) => t,
         None => read_audio(&cur)?,
     };
-    let mut meta = merge(d.meta, tag_of(&src_tags));
+    let tags = tags_of(&src_tags);
+    let src_lyrics = lyrics_of(&tags);
+    let mut meta = merge(d.meta, &tags);
+    drop(tags);
     drop(src_tags);
     if meta.cover.is_none() {
         meta.cover = own_cover;
@@ -762,7 +819,7 @@ pub async fn convert(
     }
     let quality = {
         let (p, m, c) = (cur.clone(), meta.clone(), container.clone());
-        blocking(move || write_tags(&p, &m, &c)).await?
+        blocking(move || write_tags(&p, &m, &c, src_lyrics.as_deref())).await?
     };
     if cancel.is_cancelled() {
         return Err(ConvertError::Cancelled);
