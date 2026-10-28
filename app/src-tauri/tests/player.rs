@@ -238,3 +238,264 @@ fn state_serializes_to_the_ipc_contract() {
         })
     );
 }
+
+// ---------- 真实解码（需要音频设备；音量 0，音频本身也是静音） ----------
+
+/// 同一时刻只开一个播放器，计时断言不受彼此拖累。
+static AUDIO: Mutex<()> = Mutex::new(());
+
+fn audio() -> std::sync::MutexGuard<'static, ()> {
+    AUDIO.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 2 秒静音 44.1kHz 双声道 16 位 wav。
+fn wav(path: &Path) {
+    let data_len: u32 = 44_100 * 2 * 2 * 2;
+    let mut b = Vec::new();
+    b.extend_from_slice(b"RIFF");
+    b.extend_from_slice(&(36 + data_len).to_le_bytes());
+    b.extend_from_slice(b"WAVEfmt ");
+    b.extend_from_slice(&16u32.to_le_bytes());
+    b.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    b.extend_from_slice(&2u16.to_le_bytes()); // 声道
+    b.extend_from_slice(&44_100u32.to_le_bytes());
+    b.extend_from_slice(&(44_100u32 * 4).to_le_bytes());
+    b.extend_from_slice(&4u16.to_le_bytes());
+    b.extend_from_slice(&16u16.to_le_bytes());
+    b.extend_from_slice(b"data");
+    b.extend_from_slice(&data_len.to_le_bytes());
+    b.resize(b.len() + data_len as usize, 0);
+    std::fs::write(path, b).unwrap();
+}
+
+/// 生成 2 秒静音文件；非 wav 用 ffmpeg，没有 ffmpeg 返回 None。
+fn make(dir: &Path, name: &str) -> Option<String> {
+    let p = dir.join(name);
+    let ext = p.extension().unwrap().to_str().unwrap();
+    if ext == "wav" {
+        wav(&p);
+    } else {
+        let codec: &[&str] = match ext {
+            "ogg" => &["-c:a", "vorbis", "-strict", "-2"],
+            "m4a" => &["-c:a", "aac"],
+            _ => &[],
+        };
+        let ok = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("anullsrc=r=44100:cl=stereo")
+            .args(["-t", "2"])
+            .args(codec)
+            .arg(&p)
+            .status()
+            .ok()?
+            .success();
+        assert!(ok, "ffmpeg 生成 {name} 失败");
+    }
+    Some(p.to_string_lossy().into_owned())
+}
+
+fn quiet(t: &Tmp, on_change: Box<dyn Fn(PlayerState) + Send + Sync>) -> Player {
+    let p = Player::new(t.0.join("data"), on_change);
+    p.set_volume(0.0);
+    assert_eq!(p.state().volume, 0.0);
+    p
+}
+
+fn wait(p: &Player, secs: u64, f: impl Fn(&PlayerState) -> bool) -> PlayerState {
+    let end = Instant::now() + Duration::from_secs(secs);
+    loop {
+        let s = p.state();
+        if f(&s) {
+            return s;
+        }
+        assert!(Instant::now() < end, "等待超时：{s:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn plays_seeks_and_advances(ext: &str) {
+    let _g = audio();
+    let t = Tmp::new(ext);
+    let (Some(a), Some(b)) = (make(&t.0, &format!("a.{ext}")), make(&t.0, &format!("b.{ext}")))
+    else {
+        eprintln!("没有 ffmpeg，跳过 {ext}");
+        return;
+    };
+    let pushes = Arc::new(AtomicUsize::new(0));
+    let n = pushes.clone();
+    let p = quiet(
+        &t,
+        Box::new(move |_| {
+            n.fetch_add(1, Ordering::Relaxed);
+        }),
+    );
+    p.play(vec![a.clone(), b.clone()], 0).unwrap();
+    let before = pushes.load(Ordering::Relaxed);
+    std::thread::sleep(Duration::from_millis(1200));
+    let s = p.state();
+    assert!(s.playing && s.track_id.as_deref() == Some(a.as_str()), "{s:?}");
+    assert!(s.position_ms >= 1000, "{s:?}");
+    assert!((1900..=2200).contains(&s.duration_ms), "{s:?}");
+    assert!(pushes.load(Ordering::Relaxed) > before, "播放中每秒推送一次");
+
+    p.seek(1500);
+    let s = p.state();
+    assert!(s.position_ms >= 1500, "{s:?}");
+
+    let s = wait(&p, 3, |s| s.track_id.as_deref() == Some(b.as_str()));
+    assert!(s.playing, "{s:?}");
+    let s = wait(&p, 4, |s| !s.playing);
+    assert_eq!(s.track_id.as_deref(), Some(b.as_str()), "循环关：停在最后一首");
+    assert_eq!((s.position_ms, s.error), (0, None));
+}
+
+#[test]
+#[ignore = "需要音频设备"]
+fn wav_plays_seeks_and_advances() {
+    plays_seeks_and_advances("wav");
+}
+
+#[test]
+#[ignore = "需要音频设备"]
+fn flac_plays_seeks_and_advances() {
+    plays_seeks_and_advances("flac");
+}
+
+#[test]
+#[ignore = "需要音频设备"]
+fn mp3_plays_seeks_and_advances() {
+    plays_seeks_and_advances("mp3");
+}
+
+#[test]
+#[ignore = "需要音频设备"]
+fn ogg_plays_seeks_and_advances() {
+    plays_seeks_and_advances("ogg");
+}
+
+#[test]
+#[ignore = "需要音频设备"]
+fn m4a_plays_seeks_and_advances() {
+    plays_seeks_and_advances("m4a");
+}
+
+#[test]
+#[ignore = "需要音频设备"]
+fn repeat_one_replays_the_track_when_it_ends() {
+    let _g = audio();
+    let t = Tmp::new("one");
+    let a = make(&t.0, "a.wav").unwrap();
+    let b = make(&t.0, "b.wav").unwrap();
+    let p = quiet(&t, noop());
+    p.set_repeat(Repeat::One);
+    p.play(vec![a.clone(), b], 0).unwrap();
+    p.seek(1800);
+    let s = wait(&p, 3, |s| s.position_ms < 1000);
+    assert!(s.playing && s.track_id.as_deref() == Some(a.as_str()), "{s:?}");
+}
+
+#[test]
+#[ignore = "需要音频设备"]
+fn repeat_all_wraps_to_first_track_when_queue_ends() {
+    let _g = audio();
+    let t = Tmp::new("all");
+    let a = make(&t.0, "a.wav").unwrap();
+    let b = make(&t.0, "b.wav").unwrap();
+    let p = quiet(&t, noop());
+    p.set_repeat(Repeat::All);
+    p.play(vec![a.clone(), b], 1).unwrap();
+    p.seek(1800);
+    let s = wait(&p, 3, |s| s.track_id.as_deref() == Some(a.as_str()));
+    assert!(s.playing, "{s:?}");
+}
+
+#[test]
+#[ignore = "需要音频设备"]
+fn toggle_next_and_prev_drive_playback() {
+    let _g = audio();
+    let t = Tmp::new("ctl");
+    let a = make(&t.0, "a.wav").unwrap();
+    let b = make(&t.0, "b.wav").unwrap();
+    let p = quiet(&t, noop());
+    p.play(vec![a.clone(), b.clone()], 0).unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+    p.toggle();
+    assert!(!p.state().playing);
+    // 暂停在音频线程上 5ms 内生效
+    std::thread::sleep(Duration::from_millis(50));
+    let paused = p.state();
+    assert!(!paused.playing && paused.position_ms > 0, "{paused:?}");
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(p.state().position_ms, paused.position_ms, "暂停时位置不动");
+    p.toggle();
+    wait(&p, 2, |s| s.playing && s.position_ms > paused.position_ms);
+
+    p.prev();
+    let s = p.state();
+    assert!(s.track_id.as_deref() == Some(a.as_str()) && s.position_ms < 300, "第一首上一首 = 从头：{s:?}");
+    p.next();
+    assert_eq!(p.state().track_id.as_deref(), Some(b.as_str()));
+    p.prev();
+    assert_eq!(p.state().track_id.as_deref(), Some(a.as_str()));
+    p.next();
+    p.next();
+    let s = p.state();
+    assert!(!s.playing && s.position_ms == 0 && s.track_id.as_deref() == Some(b.as_str()), "{s:?}");
+    p.toggle();
+    let s = p.state();
+    assert!(s.playing && s.track_id.as_deref() == Some(b.as_str()), "停止后再按播放从当前曲开始：{s:?}");
+}
+
+fn bad(dir: &Path) -> String {
+    let p = dir.join("bad.mp3");
+    std::fs::write(&p, "not audio\n".repeat(500)).unwrap();
+    p.to_string_lossy().into_owned()
+}
+
+#[test]
+#[ignore = "需要音频设备"]
+fn missing_or_corrupt_tracks_are_skipped_with_a_reason() {
+    let _g = audio();
+    let t = Tmp::new("skip");
+    let good = make(&t.0, "good.wav").unwrap();
+    let gone = t.0.join("gone.wav").to_string_lossy().into_owned();
+    let bad = bad(&t.0);
+    let p = quiet(&t, noop());
+
+    p.play(vec![gone.clone(), good.clone()], 0).unwrap();
+    let s = p.state();
+    assert!(s.playing && s.track_id.as_deref() == Some(good.as_str()), "{s:?}");
+    assert!(s.error.as_deref().unwrap().contains("不存在"), "{s:?}");
+
+    p.play(vec![bad.clone(), good.clone()], 0).unwrap();
+    let s = p.state();
+    assert!(s.playing && s.track_id.as_deref() == Some(good.as_str()), "{s:?}");
+    assert!(s.error.as_deref().unwrap().contains("损坏"), "{s:?}");
+
+    // 曲终自动前进到失效的曲目
+    p.play(vec![good.clone(), gone], 0).unwrap();
+    assert_eq!(p.state().error, None, "新的播放清掉旧错误");
+    p.seek(1800);
+    let s = wait(&p, 3, |s| !s.playing);
+    assert!(s.error.as_deref().unwrap().contains("不存在"), "{s:?}");
+}
+
+#[test]
+#[ignore = "需要音频设备"]
+fn all_tracks_failing_stops_playback() {
+    let _g = audio();
+    let t = Tmp::new("allfail");
+    let gone = t.0.join("gone.flac").to_string_lossy().into_owned();
+    let p = quiet(&t, noop());
+    p.play(vec![gone, bad(&t.0)], 0).unwrap();
+    let s = p.state();
+    assert!(!s.playing && s.track_id.is_none() && s.error.is_some(), "{s:?}");
+}
+
+#[test]
+fn play_rejects_empty_queue_or_bad_index() {
+    let t = Tmp::new("badplay");
+    let p = Player::new(t.0.clone(), noop());
+    assert!(p.play(vec![], 0).is_err());
+    assert!(p.play(vec!["x".into()], 1).is_err());
+}
