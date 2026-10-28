@@ -78,7 +78,7 @@ CONF=(
   --enable-decoder=flac,vorbis,opus,mp3,mp3float,aac,alac,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_u8,wmav1,wmav2,ape
   --enable-parser=flac,vorbis,opus,mpegaudio,aac
   --enable-encoder=libmp3lame,flac
-  --enable-muxer=mp3,flac
+  --enable-muxer=mp3,flac,image2pipe
   --enable-filter=abuffer,abuffersink,aformat,anull,aresample,atrim
 )
 ./configure "${CONF[@]}" \
@@ -102,17 +102,25 @@ cat >"$OUT/licenses/SOURCE.md" <<EOF
 
 musicReveal.app 内的 \`Contents/MacOS/ffmpeg\` 是由 FFmpeg ${FFMPEG_VER} 与 LAME ${LAME_VER}
 （静态链接）编译而成的独立可执行文件，未启用任何 GPL 或 nonfree 组件（configure 输出：${LICENSE_LINE}）。
-它以独立进程方式被 musicReveal 调用，用于把音频转码为 MP3 / FLAC。
+它以独立进程方式被 musicReveal 调用，用于把音频转码为 MP3 / FLAC，以及从 WMA / APE 中原样取出封面。
 
 对应源码随发布一同提供：与 dmg 放在一起的 \`musicReveal_<版本>_ffmpeg-lame-source.tar\`，
-内含下列两个源码包原样（未打补丁）与构建脚本 build-ffmpeg.sh。
-另可从上游下载，并按 SHA-256 校验与本版本一致：
+内含下列两个源码包原样（未打补丁，位于 build/ffmpeg/dl/）与构建脚本 scripts/build-ffmpeg.sh。
+解包后无需联网即可重建（需要 Xcode 命令行工具，Apple Silicon Mac）：
+
+\`\`\`
+tar -xf musicReveal_<版本>_ffmpeg-lame-source.tar
+cd musicReveal_<版本>_ffmpeg-lame-source
+scripts/build-ffmpeg.sh        # 产物：build/ffmpeg/out/ffmpeg
+\`\`\`
+
+源码包也可从上游下载，并按 SHA-256 校验与本版本一致：
 
 - FFmpeg 源码 ffmpeg-${FFMPEG_VER}.tar.xz：${FFMPEG_URL}
   SHA-256：${FFMPEG_SHA256}
 - LAME 源码 lame-${LAME_VER}.tar.gz：${LAME_URL}
   SHA-256：${LAME_SHA256}
-- 构建脚本：本目录下的 build-ffmpeg.sh（即仓库中的 scripts/build-ffmpeg.sh），包含全部 configure 参数。
+- 构建脚本：build-ffmpeg.sh（应用包 licenses/ 下与源码 tar 的 scripts/ 下各有一份，即仓库中的 scripts/build-ffmpeg.sh），包含全部 configure 参数。
 
 FFmpeg 以 GNU LGPL 2.1 或更高版本授权，许可全文见 ffmpeg-COPYING.LGPLv2.1 与 ffmpeg-LICENSE.md；
 LAME 以 GNU LGPL 2 或更高版本授权，许可全文见 LAME-COPYING。

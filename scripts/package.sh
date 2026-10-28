@@ -54,10 +54,13 @@ hdiutil create -quiet -volname musicReveal -srcfolder "$STAGE" -fs HFS+ -format 
 # LGPL：与二进制同处提供对应源码（已校验的上游源码包原样 + 构建脚本）。
 SRC_TAR="$DIST/musicReveal_${VERSION}_ffmpeg-lame-source.tar"
 SRC_STAGE="$STAGE/src/musicReveal_${VERSION}_ffmpeg-lame-source"
-mkdir -p "$SRC_STAGE"
+# 布局与 build-ffmpeg.sh 的约定一致：解包后直接 scripts/build-ffmpeg.sh，源码包已在缓存位置，不必联网。
+mkdir -p "$SRC_STAGE/scripts" "$SRC_STAGE/build/ffmpeg/dl"
 ver() { sed -n "s/^$1=//p" "$ROOT/scripts/build-ffmpeg.sh"; }
 cp "$ROOT/build/ffmpeg/dl/ffmpeg-$(ver FFMPEG_VER).tar.xz" "$ROOT/build/ffmpeg/dl/lame-$(ver LAME_VER).tar.gz" \
-  "$ROOT/scripts/build-ffmpeg.sh" "$ROOT/build/ffmpeg/out/licenses/SOURCE.md" "$SRC_STAGE/"
+  "$SRC_STAGE/build/ffmpeg/dl/"
+cp "$ROOT/scripts/build-ffmpeg.sh" "$SRC_STAGE/scripts/"
+cp "$ROOT/build/ffmpeg/out/licenses/SOURCE.md" "$SRC_STAGE/"
 tar -cf "$SRC_TAR" -C "$STAGE/src" "$(basename "$SRC_STAGE")"
 
 echo "产物："
