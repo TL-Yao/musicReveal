@@ -2,6 +2,7 @@
 // 按同一份 IPC 契约实现快照 / 资料库 / 播放器 / 歌词；window.MR 供截图脚本把界面切到任意状态。
 import type { Backend, DragDrop } from "./backend";
 import type { Job, Library, LyricLine, PlayerState, Repeat, Snapshot, Track } from "./types";
+import { titleFromFile } from "./dom";
 
 const HOME = "/Users/me";
 const OUT = `${HOME}/Music/musicReveal`;
@@ -167,7 +168,7 @@ function playerState(): PlayerState {
 function load() {
   while (P.queue[P.i] && broken.has(P.queue[P.i])) {
     const id = P.queue[P.i];
-    P.error = `${id.split("/").pop()}：文件不存在，已跳过`;
+    P.error = `「${titleFromFile(id.split("/").pop() ?? id)}」文件不存在，已跳过`;
     P.queue = P.queue.filter((x) => x !== id);
     if (P.i >= P.queue.length) P.i = P.queue.length ? 0 : -1;
   }

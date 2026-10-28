@@ -548,10 +548,11 @@ impl St {
         }
         loop {
             let Err(e) = self.open(&id) else { return };
-            let name = Path::new(&id)
-                .file_name()
-                .map_or(id.clone(), |n| n.to_string_lossy().into_owned());
-            self.error = Some(format!("{name}：{e}，已跳过"));
+            // 界面不显示文件名：用歌名
+            let name = Path::new(&id).file_name().map_or(id.clone(), |n| {
+                reveal_core::title_from_file_name(&n.to_string_lossy())
+            });
+            self.error = Some(format!("「{name}」{e}，已跳过"));
             let q = self.queue.as_mut().expect("load 只在有队列时调用");
             q.remove(&id);
             match q.current() {
