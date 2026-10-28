@@ -403,3 +403,86 @@ fn stag_is_unsupported() {
         other => panic!("{other:?}"),
     }
 }
+
+// ---------- musicex（PC 新版，ekey 需外部提供）----------
+
+const MID: &str = "003TestSongMid";
+const MEDIA: &str = "F0M0003TestMedia1.mflac";
+
+fn musicex(enc: &[u8]) -> Vec<u8> {
+    let utf16 = |s: &str| {
+        s.encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<u8>>()
+    };
+    let mut f = vec![0u8; 0xC0];
+    f[0..12].copy_from_slice(&[0xAA; 12]);
+    let m = utf16(MID);
+    f[0x0C..0x0C + m.len()].copy_from_slice(&m);
+    let n = utf16(MEDIA);
+    f[0x48..0x48 + n.len()].copy_from_slice(&n);
+    f[0xB0..0xB4].copy_from_slice(&0xC0u32.to_le_bytes());
+    f[0xB4..0xB8].copy_from_slice(&1u32.to_le_bytes());
+    f[0xB8..].copy_from_slice(b"musicex\0");
+    [enc, &f[..]].concat()
+}
+
+fn musicex_kind() -> SourceKind {
+    SourceKind::MusicEx {
+        song_mid: MID.into(),
+        media_filename: MEDIA.into(),
+    }
+}
+
+#[test]
+fn musicex_with_ekey_decrypts() {
+    let t = Tmp::new("mx");
+    let master: Vec<u8> = (0..704).map(|i| (i * 31 + 7) as u8).collect();
+    let ekey = make_ekey_v2(&master);
+    let plain = audio(b"fLaC", 200_000);
+    let p = t.write("a.mflac", &musicex(&qmc2(&master, &plain)));
+    let (kind, d, out) = run(&p, Some(&ekey)).unwrap();
+    assert_eq!(kind, musicex_kind());
+    assert!(out == plain);
+    assert_eq!(d.container, Container::Flac);
+    assert_eq!(
+        d.meta,
+        EmbeddedMeta {
+            song_id: Some(SongId::QqMid(MID.into())),
+            ..qq_empty()
+        }
+    );
+}
+
+#[test]
+fn musicex_without_or_with_wrong_ekey() {
+    let t = Tmp::new("mx2");
+    let master: Vec<u8> = (0..256).map(|i| (i * 3 + 1) as u8).collect();
+    let other: Vec<u8> = (0..256).map(|i| (i * 5 + 2) as u8).collect();
+    let p = t.write("a.mgg", &musicex(&qmc2(&master, &audio(b"OggS", 50_000))));
+    let kind = sniff(&p).unwrap();
+    let mut out = Vec::new();
+    assert!(matches!(
+        decrypt(&p, &kind, None, &mut out),
+        Err(Error::NeedsEkey)
+    ));
+    for bad in [make_ekey_v1(&other), "!!not base64!!".into(), b64(b"short")] {
+        let r = decrypt(&p, &kind, Some(&bad), &mut out);
+        assert!(matches!(r, Err(Error::BadEkey)), "{bad}: {r:?}");
+    }
+    assert!(out.is_empty(), "失败时不应写出任何字节");
+}
+
+#[test]
+fn truncated_musicex_is_incomplete() {
+    let t = Tmp::new("mx3");
+    let master: Vec<u8> = (0..256).map(|i| (i * 3 + 1) as u8).collect();
+    let full = musicex(&qmc2(&master, &audio(b"fLaC", 50_000)));
+    let p = t.write("a.mflac", &full[..30_000]);
+    assert!(matches!(sniff(&p), Err(Error::Incomplete)));
+    let ekey = make_ekey_v1(&master);
+    let r = decrypt(&p, &musicex_kind(), Some(&ekey), &mut Vec::new());
+    assert!(matches!(r, Err(Error::Incomplete)), "{r:?}");
+    let empty = t.write("b.mflac", b"");
+    assert!(matches!(sniff(&empty), Err(Error::Incomplete)));
+}

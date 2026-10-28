@@ -209,7 +209,7 @@ pub fn sniff(path: &Path) -> Result<SourceKind, Error> {
     }
     if v2 {
         if let Some(ft) = qmc::parse_footer(&read_tail(&mut f)?)? {
-            return Ok(SourceKind::QmcV2 { ekey: ft.ekey });
+            return Ok(ft.kind);
         }
     }
     if let Some(c) = sniff_container(&head) {
@@ -241,7 +241,6 @@ pub fn decrypt(
     ekey: Option<&str>,
     out: &mut dyn Write,
 ) -> Result<Decrypted, Error> {
-    let _ = ekey;
     let f = File::open(path)?;
     let corrupt = || Err(Error::Corrupt("解密后不是可识别的音频".into()));
     let container = match kind {
@@ -257,7 +256,17 @@ pub fn decrypt(
             || Error::Corrupt("内嵌 ekey 无法解密该文件".into()),
             out,
         )?,
-        _ => return Err(Error::Unsupported("未实现".into())),
+        SourceKind::MusicEx { song_mid, .. } => {
+            let ekey = ekey.ok_or(Error::NeedsEkey)?;
+            let container = decrypt_qmc2(f, ekey, || Error::BadEkey, out)?;
+            return Ok(Decrypted {
+                container,
+                meta: EmbeddedMeta {
+                    song_id: Some(SongId::QqMid(song_mid.clone())),
+                    ..qq_meta()
+                },
+            });
+        }
     };
     Ok(Decrypted {
         container,

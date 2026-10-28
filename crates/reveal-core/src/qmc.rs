@@ -1,7 +1,7 @@
 //! QQ 音乐 QMC。v1 静态密钥表、扩展名清单移植自 music-geshizhuanhuan（MIT，
 //! Copyright (c) 2026 music-geshizhuanhuan contributors）music_unlock/formats/qmc.py。
 
-use crate::Error;
+use crate::{Error, SourceKind};
 
 pub(crate) const V1_EXTS: &[&str] = &[
     "tkm", "bkcmp3", "bkcm4a", "bkcflac", "bkcwav", "bkcape", "bkcogg", "bkcwma", "666c6163",
@@ -235,7 +235,41 @@ const MAX_EKEY_LEN: usize = 0x500;
 pub(crate) struct Footer {
     /// 文件尾占用字节数，音频长度 = 文件长度 - size。
     pub size: u64,
-    pub ekey: String,
+    /// `QmcV2` 或 `MusicEx`。
+    pub kind: SourceKind,
+}
+
+/// musicex V1：[0x0C..0x48) song mid、[0x48..0xB0) 媒体文件名（UTF-16LE，NUL 结尾），
+/// 末 16 字节 = u32 尾长 + u32 版本 + "musicex\0"。布局参考 qmunlock core/footer.rs（MIT）。
+fn musicex(tail: &[u8]) -> Result<Footer, Error> {
+    let t = &tail[tail.len() - 16..];
+    let size = u32::from_le_bytes(t[..4].try_into().unwrap()) as usize;
+    let version = u32::from_le_bytes(t[4..8].try_into().unwrap());
+    if version != 1 {
+        return Err(Error::Unsupported(format!("musicex 版本 {version}")));
+    }
+    if size < 0xC0 || size > tail.len() {
+        return Err(Error::Corrupt(format!("musicex 尾长非法 0x{size:X}")));
+    }
+    let f = &tail[tail.len() - size..];
+    let utf16 = |r: std::ops::Range<usize>| {
+        let w: Vec<u16> = f[r]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .take_while(|&c| c != 0)
+            .collect();
+        String::from_utf16(&w).ok().filter(|s| !s.is_empty())
+    };
+    let (Some(song_mid), Some(media_filename)) = (utf16(0x0C..0x48), utf16(0x48..0xB0)) else {
+        return Err(Error::Corrupt("musicex 缺少歌曲 mid 或媒体文件名".into()));
+    };
+    Ok(Footer {
+        size: size as u64,
+        kind: SourceKind::MusicEx {
+            song_mid,
+            media_filename,
+        },
+    })
 }
 
 fn is_b64(s: &[u8]) -> bool {
@@ -260,6 +294,9 @@ pub(crate) fn parse_footer(tail: &[u8]) -> Result<Option<Footer>, Error> {
     if tail.len() < 8 {
         return Ok(None);
     }
+    if tail.ends_with(b"musicex\0") {
+        return musicex(tail).map(Some);
+    }
     if tail.ends_with(b"STag") {
         return Err(Error::Unsupported(
             "STag 格式（安卓端，文件内无 ekey）暂不支持".into(),
@@ -278,7 +315,9 @@ pub(crate) fn parse_footer(tail: &[u8]) -> Result<Option<Footer>, Error> {
         }
         return Ok(Some(Footer {
             size: n as u64 + 8,
-            ekey: String::from_utf8_lossy(parts[0]).into_owned(),
+            kind: SourceKind::QmcV2 {
+                ekey: String::from_utf8_lossy(parts[0]).into_owned(),
+            },
         }));
     }
     // PcV1Legacy：[ekey][u32 小端长度]
@@ -294,6 +333,8 @@ pub(crate) fn parse_footer(tail: &[u8]) -> Result<Option<Footer>, Error> {
     }
     Ok(Some(Footer {
         size: n as u64 + 4,
-        ekey: String::from_utf8_lossy(ekey).into_owned(),
+        kind: SourceKind::QmcV2 {
+            ekey: String::from_utf8_lossy(ekey).into_owned(),
+        },
     }))
 }
