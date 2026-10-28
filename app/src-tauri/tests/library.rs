@@ -532,3 +532,38 @@ fn real_output_dir_read_only_scan() {
     );
     assert_eq!(v2, v);
 }
+
+/// 扫描不长时间占着资料库：1000 首各配千行歌词，重扫期间 `view()` 每次都很快返回。
+#[test]
+fn view_stays_responsive_while_lyrics_are_parsed() {
+    let r = Rig::new("lrclock");
+    let a = mp3(&r.out.join("0000.mp3"), &[], None);
+    for i in 1..1000 {
+        std::fs::copy(&a, r.out.join(format!("{i:04}.mp3"))).unwrap();
+    }
+    r.lib.set_dir(&r.out);
+    settled(&r.rx);
+    let text: String = (0..1000)
+        .map(|i| format!("[{:02}:{:02}.00]第 {i} 句歌词\n", i / 60, i % 60))
+        .collect();
+    for i in 0..1000 {
+        std::fs::write(r.out.join(format!("{i:04}.lrc")), &text).unwrap();
+    }
+
+    r.lib.refresh();
+    let t0 = std::time::Instant::now();
+    let mut worst = Duration::ZERO;
+    let v = loop {
+        let t = std::time::Instant::now();
+        let v = r.lib.view();
+        worst = worst.max(t.elapsed());
+        if v.tracks.iter().all(|t| t.has_lyrics) {
+            break v;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(60), "60s 内没解析完");
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert_eq!(v.tracks.len(), 1000);
+    eprintln!("重扫期间 view() 最长 {worst:?}，总耗时 {:?}", t0.elapsed());
+    assert!(worst < Duration::from_millis(50), "{worst:?}");
+}

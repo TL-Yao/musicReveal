@@ -345,6 +345,12 @@ impl Worker {
             lrcs.get(&p.with_extension(""))
                 .is_some_and(|l| &l.0 == p && l.1 == *s)
         });
+        // 锁外解析：之后持锁时 `lyrics` 只查表
+        for (p, s) in lrcs.values() {
+            self.lrc
+                .entry(p.clone())
+                .or_insert_with(|| (*s, parse_lrc(p).is_some()));
+        }
         let now: HashMap<&PathBuf, Stat> = audio.iter().map(|(p, s)| (p, *s)).collect();
         let covers = &self.covers;
         let before = self.cache.len();
