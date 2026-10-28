@@ -215,3 +215,66 @@ async fn growing_file_stays_downloading_until_two_polls_unchanged() {
     assert_eq!(r.eng.snapshot().jobs.len(), 1, "普通音频与隐藏文件不处理");
     assert_eq!(r.fake.calls(), vec!["a.ncm"]);
 }
+
+/// 稳定两次轮询：首次看见 + 一次不变。
+fn settle(e: &Engine) {
+    e.tick();
+    e.tick();
+}
+
+#[tokio::test]
+async fn incomplete_goes_back_to_downloading_and_fails_after_60s_unchanged() {
+    let r = Rig::new("incomplete").await;
+    r.fake.fail("b.mflac", ConvertError::Incomplete);
+    r.fake.fail("b.mflac", ConvertError::Incomplete);
+    let p = put(&r.watch, "b.mflac", b"1");
+    settle(&r.eng);
+    r.wait("b.mflac", JobState::Downloading).await;
+    assert_eq!(r.fake.calls().len(), 1);
+    // 不变时不重试
+    for _ in 0..5 {
+        r.eng.tick();
+    }
+    assert_eq!(r.fake.calls().len(), 1);
+    // 文件再变化 → 稳定后重试，又不完整
+    append(&p, b"2");
+    r.eng.tick();
+    r.eng.tick();
+    r.wait("b.mflac", JobState::Downloading).await;
+    assert_eq!(r.fake.calls().len(), 2);
+    // 60s（30 次轮询）不变 → 失败
+    for _ in 0..29 {
+        r.eng.tick();
+    }
+    assert_eq!(r.state("b.mflac"), Some(JobState::Downloading));
+    r.eng.tick();
+    let j = r.job("b.mflac").unwrap();
+    assert_eq!(j.state, JobState::Failed);
+    assert_eq!(j.error.as_deref(), Some("文件不完整"));
+    // 之后文件又变了：回到下载中，稳定后转换成功，仍是同一条任务
+    append(&p, b"3");
+    r.eng.tick();
+    assert_eq!(r.state("b.mflac"), Some(JobState::Downloading));
+    r.eng.tick();
+    r.wait("b.mflac", JobState::Done).await;
+    assert_eq!(r.eng.snapshot().jobs.len(), 1);
+}
+
+#[tokio::test]
+async fn failures_carry_short_chinese_reasons_and_retry_requeues() {
+    let r = Rig::new("fail").await;
+    r.fake.fail("u.qmc0", ConvertError::Unsupported("x".into()));
+    r.fake.fail("n.ncm", ConvertError::Failed("网络错误：timeout".into()));
+    put(&r.watch, "u.qmc0", b"1");
+    put(&r.watch, "n.ncm", b"1");
+    settle(&r.eng);
+    let u = r.wait("u.qmc0", JobState::Failed).await;
+    assert_eq!(u.error.as_deref(), Some("不支持的格式"));
+    let n = r.wait("n.ncm", JobState::Failed).await;
+    assert_eq!(n.error.as_deref(), Some("网络错误"));
+    r.eng.retry_job(&n.id);
+    let n = r.wait("n.ncm", JobState::Done).await;
+    assert_eq!(n.error, None);
+    r.eng.remove_job(&u.id);
+    assert!(r.job("u.qmc0").is_none());
+}

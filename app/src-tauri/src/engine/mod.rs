@@ -32,6 +32,18 @@ pub trait Converter: Send + Sync {
 
 /// 一次轮询的间隔；以下以轮询次数计时。
 pub const POLL: Duration = Duration::from_secs(2);
+/// 不完整的文件 60s 不变就判失败。
+const INCOMPLETE_POLLS: u32 = 30;
+
+/// 给用户看的简短中文原因。
+fn reason(e: &ConvertError) -> String {
+    match e {
+        ConvertError::Unsupported(_) => "不支持的格式".into(),
+        ConvertError::Incomplete => "文件不完整".into(),
+        ConvertError::Failed(s) => s.split(['：', '（']).next().unwrap_or(s).trim().into(),
+        e => e.to_string(),
+    }
+}
 
 struct Task {
     view: Job,
@@ -41,6 +53,8 @@ struct Task {
     /// downloading 时最近一次看到的大小与 mtime，以及之后连续不变的轮询次数。
     last: Option<Stat>,
     same: u32,
+    /// 转换报不完整，等文件再变化。
+    incomplete: bool,
     opts: Option<ConvertOptions>,
 }
 
@@ -121,6 +135,7 @@ impl State {
                 folder,
                 last: None,
                 same: 0,
+                incomplete: false,
                 opts: None,
             },
         );
@@ -254,14 +269,19 @@ impl Engine {
                 if now == t.last {
                     t.same += 1;
                 } else {
-                    t.last = now;
-                    t.same = 0;
+                    (t.last, t.same, t.incomplete) = (now, 0, false);
+                }
+                if t.incomplete && t.same >= INCOMPLETE_POLLS {
+                    t.view.state = JobState::Failed;
+                    t.view.error = Some(reason(&ConvertError::Incomplete));
                 }
             }
             let ready: Vec<u64> = st
                 .tasks
                 .iter()
-                .filter(|t| t.view.state == JobState::Downloading && t.same >= 1)
+                .filter(|t| {
+                    t.view.state == JobState::Downloading && !t.incomplete && t.same >= 1
+                })
                 .map(|t| id_of(&t.view.id))
                 .collect();
             for id in ready {
@@ -285,7 +305,7 @@ impl Engine {
                         if t.view.state == JobState::Failed {
                             t.view.state = JobState::Downloading;
                             t.view.error = None;
-                            (t.last, t.same) = (Some(s), 0);
+                            (t.last, t.same, t.incomplete) = (Some(s), 0, false);
                         }
                         continue;
                     }
@@ -347,13 +367,32 @@ impl Engine {
                         v.renamed = o.renamed;
                         v.output = Some(o.output.to_string_lossy().into_owned());
                     }
+                    Err(ConvertError::Incomplete) => {
+                        t.view.state = JobState::Downloading;
+                        (t.last, t.same, t.incomplete) = (scan::stat(&t.src), 0, true);
+                    }
                     Err(e) => {
                         t.view.state = JobState::Failed;
-                        t.view.error = Some(e.to_string());
+                        t.view.error = Some(reason(&e));
                     }
                 }
             });
         }
+    }
+
+    pub fn retry_job(&self, id: &str) {
+        self.edit(|st| st.enqueue(id_of(id)));
+    }
+
+    pub fn remove_job(&self, id: &str) {
+        let id = id_of(id);
+        self.edit(|st| {
+            st.tasks.retain(|t| id_of(&t.view.id) != id);
+            st.queue.retain(|q| *q != id);
+            if let Some((_, tok)) = st.running.as_ref().filter(|(r, _)| *r == id) {
+                tok.cancel();
+            }
+        });
     }
 
     pub fn snapshot(&self) -> Snapshot {
