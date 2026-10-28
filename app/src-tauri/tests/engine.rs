@@ -734,6 +734,37 @@ async fn output_dir_aliases_are_never_input() {
     assert!(r.fake.calls().is_empty());
 }
 
+/// 输出文件夹外的符号链指向输出文件夹里的子文件夹：经它监听或添加都不算输入。
+#[tokio::test]
+async fn link_into_a_subfolder_of_output_dir_is_never_input() {
+    let r = Rig::new("linkin").await;
+    let album = r.out.join("album");
+    std::fs::create_dir_all(&album).unwrap();
+    put(&album, "existing.mp3", b"x");
+    let link = r.t.0.join("album-link");
+    std::os::unix::fs::symlink(&album, &link).unwrap();
+    r.eng
+        .add_files(vec![link.join("existing.mp3").to_string_lossy().into()]);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        r.eng.snapshot().jobs.is_empty(),
+        "添加文件：{:?}",
+        r.eng.snapshot().jobs
+    );
+    assert_eq!(
+        r.eng
+            .add_watch_folder(&link.to_string_lossy())
+            .unwrap()
+            .existing,
+        0
+    );
+    settle(&r.eng);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let s = r.eng.snapshot();
+    assert!(s.jobs.is_empty() && s.notices.is_empty(), "{:?}", s.jobs);
+    assert!(r.fake.calls().is_empty());
+}
+
 /// 输出文件夹设成监听文件夹里某个子文件夹的别名拼写：递归扫描照样跳过它。
 #[tokio::test]
 async fn output_dir_spelled_differently_inside_watch_folder_is_skipped() {

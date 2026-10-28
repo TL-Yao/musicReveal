@@ -54,10 +54,13 @@ fn same_dir(p: &Path, out: &Path) -> bool {
 }
 
 /// `p` 是输出目录 `out` 本身或在其内（规则同 `same_dir`，逐级比祖先目录）。
+/// 存在的路径先解析掉所有符号链，经链接拼写的祖先指向输出目录里面也认得出。
 pub fn inside(p: &Path, out: &Path) -> bool {
     if dir_id(out).is_none() {
         return p.starts_with(out);
     }
+    let real = std::fs::canonicalize(p);
+    let p = real.as_deref().unwrap_or(p);
     p.ancestors()
         .filter(|a| !a.as_os_str().is_empty())
         .any(|a| same_dir(a, out))
