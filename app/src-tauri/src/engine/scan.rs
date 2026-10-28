@@ -57,17 +57,19 @@ fn same_dir(p: &Path, out: &Path) -> bool {
     }
 }
 
-/// `p` 是输出目录 `out` 本身或在其内（规则同 `same_dir`，逐级比祖先目录）。
-/// 存在的路径先解析掉所有符号链，经链接拼写的祖先指向输出目录里面也认得出。
+/// `p` 是输出目录 `out` 本身或在其内（规则同 `same_dir`，逐级比祖先目录）。两种拼写任一命中即算：
+/// 原拼写只比父目录链（链接本身放在输出目录里、目标在外，也算在内）；
+/// 解析掉所有符号链后的真实路径（经外部链接指进输出目录里面，也认得出）。
 pub fn inside(p: &Path, out: &Path) -> bool {
     if dir_id(out).is_none() {
         return p.starts_with(out);
     }
-    let real = std::fs::canonicalize(p);
-    let p = real.as_deref().unwrap_or(p);
-    p.ancestors()
-        .filter(|a| !a.as_os_str().is_empty())
-        .any(|a| same_dir(a, out))
+    let hit = |q: &Path| {
+        q.ancestors()
+            .filter(|a| !a.as_os_str().is_empty())
+            .any(|a| same_dir(a, out))
+    };
+    p.parent().is_some_and(hit) || std::fs::canonicalize(p).is_ok_and(|r| hit(&r))
 }
 
 /// 监听扫描。`Err` 是给用户看的「不可访问」原因。输出目录本身或其内的文件夹扫出来是空的。

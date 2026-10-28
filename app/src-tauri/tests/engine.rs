@@ -765,6 +765,26 @@ async fn link_into_a_subfolder_of_output_dir_is_never_input() {
     assert!(r.fake.calls().is_empty());
 }
 
+/// 输出文件夹里的符号链指向外面的文件：链接本身在输出文件夹内，经它添加也不算输入。
+#[tokio::test]
+async fn link_inside_output_dir_to_outside_file_is_never_input() {
+    let r = Rig::new("linkout").await;
+    let ext = r.t.dir("external");
+    let a = put(&ext, "a.ogg", b"x");
+    let link = r.out.join("link.ogg");
+    std::os::unix::fs::symlink(&a, &link).unwrap();
+    r.eng.add_files(vec![link.to_string_lossy().into()]);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        r.eng.snapshot().jobs.is_empty(),
+        "{:?}",
+        r.eng.snapshot().jobs
+    );
+    // 外面的原文件本身照常可添加
+    r.eng.add_files(vec![a.to_string_lossy().into()]);
+    r.wait("a.ogg", JobState::Done).await;
+}
+
 /// 输出文件夹设成监听文件夹里某个子文件夹的别名拼写：递归扫描照样跳过它。
 #[tokio::test]
 async fn output_dir_spelled_differently_inside_watch_folder_is_skipped() {
