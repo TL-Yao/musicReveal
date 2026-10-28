@@ -13,6 +13,8 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 pub const POLL: Duration = Duration::from_secs(2);
 /// 扫描期间部分结果的推送间隔。
 const PARTIAL: Duration = Duration::from_millis(250);
+/// 封面缩略图长边上限：歌词视图与「正在播放」用。
+const COVER_PX: u32 = 600;
 const AUDIO: [&str; 5] = ["mp3", "flac", "ogg", "m4a", "wav"];
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -71,6 +73,8 @@ struct Rec {
     disc: Option<u32>,
     duration_ms: u64,
     quality: String,
+    /// 封面缩略图在 covers 目录里的文件名。
+    cover: Option<String>,
 }
 
 struct State {
@@ -127,9 +131,68 @@ fn ms(t: std::io::Result<std::time::SystemTime>) -> Option<u64> {
     Some(t.ok()?.duration_since(UNIX_EPOCH).ok()?.as_millis() as u64)
 }
 
-fn read(path: &Path, stat: Stat) -> Option<Rec> {
+/// 资料库封面缩略图目录（asset 协议要放行它）。
+pub fn covers_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("library-covers")
+}
+
+/// 用 macOS 自带的 sips 把封面转成 JPEG，长边超过 `COVER_PX` 才缩小。
+fn thumbnail(cover: &[u8], jpg: &Path) -> bool {
+    use std::process::{Command, Stdio};
+    let src = jpg.with_extension("src");
+    let ok = (|| {
+        std::fs::create_dir_all(jpg.parent()?).ok()?;
+        std::fs::write(&src, cover).ok()?;
+        let o = Command::new("sips")
+            .args(["-g", "pixelWidth", "-g", "pixelHeight"])
+            .arg(&src)
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        let long = String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter_map(|l| l.split_once(':'))
+            .filter(|(k, _)| k.trim().starts_with("pixel"))
+            .filter_map(|(_, v)| v.trim().parse::<u32>().ok())
+            .max()?;
+        let mut c = Command::new("sips");
+        if long > COVER_PX {
+            c.args(["-Z", &COVER_PX.to_string()]);
+        }
+        c.args(["-s", "format", "jpeg"])
+            .arg(&src)
+            .arg("--out")
+            .arg(jpg)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .ok()?
+            .success()
+            .then_some(())
+    })()
+    .is_some();
+    let _ = std::fs::remove_file(&src);
+    ok
+}
+
+/// 缩略图文件名随路径、大小、mtime 变：文件变了 URL 也变，webview 不会拿旧图。
+fn cover_name(path: &Path, stat: Stat) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (path, stat).hash(&mut h);
+    format!("{:016x}.jpg", h.finish())
+}
+
+fn read(path: &Path, stat: Stat, covers: &Path) -> Option<Rec> {
     let i = reveal_core::read_track(path).ok()?;
     let m = std::fs::metadata(path).ok()?;
+    let cover = i
+        .has_cover
+        .then(|| reveal_core::read_cover(path))
+        .flatten()
+        .map(|c| (c, cover_name(path, stat)))
+        .filter(|(c, n)| thumbnail(c, &covers.join(n)))
+        .map(|(_, n)| n);
     Some(Rec {
         path: path.to_path_buf(),
         stat,
@@ -143,10 +206,12 @@ fn read(path: &Path, stat: Stat) -> Option<Rec> {
         disc: i.disc,
         duration_ms: i.duration_ms,
         quality: i.quality,
+        cover,
     })
 }
 
-fn track_of(r: &Rec) -> Track {
+fn track_of(r: &Rec, covers: &Path) -> Track {
+    let cover = r.cover.as_ref().map(|n| covers.join(n));
     let name = r
         .path
         .file_name()
@@ -166,10 +231,10 @@ fn track_of(r: &Rec) -> Track {
         disc: r.disc,
         duration_ms: r.duration_ms,
         quality: r.quality.clone(),
-        cover_url: None,
+        cover_url: cover.as_deref().map(crate::engine::asset_url),
         has_lyrics: false,
         added_at: r.added_at,
-        cover: None,
+        cover,
         lrc: None,
     }
 }
@@ -178,6 +243,7 @@ fn track_of(r: &Rec) -> Track {
 struct Worker {
     /// library.json：标签缓存。
     file: PathBuf,
+    covers: PathBuf,
     cache: HashMap<PathBuf, Rec>,
     /// 缓存有没写盘的变化。
     dirty: bool,
@@ -189,9 +255,20 @@ struct Worker {
 impl Worker {
     fn new(data_dir: &Path) -> Self {
         let file = data_dir.join("library.json");
-        let recs: Vec<Rec> = store::load(&file);
+        let covers = covers_dir(data_dir);
+        let mut recs: Vec<Rec> = store::load(&file);
+        // 缩略图没了的条目重读；没人用的缩略图删掉
+        recs.retain(|r| r.cover.as_ref().is_none_or(|n| covers.join(n).exists()));
+        let used: std::collections::HashSet<&str> =
+            recs.iter().filter_map(|r| r.cover.as_deref()).collect();
+        for e in std::fs::read_dir(&covers).into_iter().flatten().flatten() {
+            if !used.contains(&*e.file_name().to_string_lossy()) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
         Worker {
             file,
+            covers,
             cache: recs.into_iter().map(|r| (r.path.clone(), r)).collect(),
             dirty: false,
             bad: HashMap::new(),
@@ -225,8 +302,14 @@ impl Worker {
         let audio: Vec<(PathBuf, Stat)> =
             found.into_iter().filter(|(p, _)| ext(p) != "lrc").collect();
         let now: HashMap<&PathBuf, Stat> = audio.iter().map(|(p, s)| (p, *s)).collect();
+        let covers = &self.covers;
         let before = self.cache.len();
-        self.cache.retain(|p, _| now.contains_key(p));
+        self.cache.retain(|p, r| {
+            now.contains_key(p) || {
+                drop_cover(covers, r);
+                false
+            }
+        });
         self.dirty |= self.cache.len() != before;
         self.bad.retain(|p, s| now.get(p) == Some(s));
         let mut known = BTreeMap::new();
@@ -234,7 +317,7 @@ impl Worker {
         for (p, s) in &audio {
             match self.cache.get(p) {
                 Some(r) if r.stat == *s => {
-                    known.insert(p.clone(), track_of(r));
+                    known.insert(p.clone(), track_of(r, &self.covers));
                 }
                 _ if self.bad.get(p) == Some(s) => {}
                 _ => misses.push((p.clone(), *s)),
@@ -259,20 +342,26 @@ impl Worker {
         self.emit(lib);
         let mut shown = Instant::now();
         for (p, s) in misses {
-            let rec = read(&p, s);
+            let rec = read(&p, s, &self.covers);
             let mut st = lock(&lib.st);
             if st.dir != dir {
                 return;
             }
             match rec {
                 Some(r) => {
-                    st.tracks.insert(p.clone(), track_of(&r));
-                    self.cache.insert(p, r);
+                    st.tracks.insert(p.clone(), track_of(&r, &self.covers));
+                    if let Some(old) = self.cache.insert(p, r) {
+                        drop_cover(&self.covers, &old);
+                    }
                     self.dirty = true;
                 }
                 None => {
                     st.tracks.remove(&p);
+                    if let Some(old) = self.cache.remove(&p) {
+                        drop_cover(&self.covers, &old);
+                    }
                     self.bad.insert(p, s);
+                    self.dirty = true;
                 }
             }
             drop(st);
@@ -284,6 +373,12 @@ impl Worker {
         self.save();
         lock(&lib.st).scanning = false;
         self.emit(lib);
+    }
+}
+
+fn drop_cover(covers: &Path, r: &Rec) {
+    if let Some(n) = &r.cover {
+        let _ = std::fs::remove_file(covers.join(n));
     }
 }
 

@@ -327,3 +327,60 @@ fn first_scan_reports_scanning_then_the_full_list() {
     assert!(!partial.is_empty() && partial.iter().all(|p| p.scanning));
     assert_eq!(v.tracks.len(), 40);
 }
+
+fn dims(jpg: &Path) -> (u32, u32) {
+    let o = Command::new("sips")
+        .args(["-g", "pixelWidth", "-g", "pixelHeight"])
+        .arg(jpg)
+        .output()
+        .unwrap();
+    let s = String::from_utf8_lossy(&o.stdout);
+    let n = |k: &str| {
+        s.lines()
+            .find_map(|l| l.trim().strip_prefix(k))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    };
+    (n("pixelWidth:"), n("pixelHeight:"))
+}
+
+#[test]
+fn embedded_covers_become_jpeg_thumbnails_of_at_least_600px() {
+    let r = Rig::new("cover");
+    let big = mp3(&r.out.join("big.mp3"), &[], Some((1000, 800)));
+    let small = mp3(&r.out.join("small.mp3"), &[], Some((300, 200)));
+    let none = mp3(&r.out.join("none.mp3"), &[], None);
+    r.lib.set_dir(&r.out);
+    settled(&r.rx);
+
+    let tb = r.lib.track(&id(&big)).unwrap();
+    let jpg = tb.cover.clone().expect("有封面");
+    assert!(jpg.starts_with(r.data()), "{jpg:?}");
+    assert_eq!(&std::fs::read(&jpg).unwrap()[..2], [0xFF, 0xD8], "JPEG");
+    assert_eq!(dims(&jpg), (600, 480));
+    let url = tb.cover_url.clone().unwrap();
+    assert!(url.starts_with("asset://localhost/%2F"), "{url}");
+    assert!(
+        url.ends_with(&*jpg.file_name().unwrap().to_string_lossy()),
+        "{url}"
+    );
+    let ts = r.lib.track(&id(&small)).unwrap();
+    assert_eq!(dims(&ts.cover.unwrap()), (300, 200), "小图不放大");
+    let tn = r.lib.track(&id(&none)).unwrap();
+    assert_eq!((tn.cover_url, tn.cover), (None, None));
+
+    // 重启后缩略图沿用（内容已坏，只能来自缓存）
+    spoil_keeping_stat(&big);
+    let (lib, rx) = open(&r.data());
+    lib.set_dir(&r.out);
+    settled(&rx);
+    assert_eq!(lib.track(&id(&big)).unwrap().cover_url, Some(url));
+    assert!(jpg.exists());
+
+    std::fs::remove_file(&big).unwrap();
+    lib.refresh();
+    settled(&rx);
+    assert!(!jpg.exists(), "文件删了缩略图也删");
+}
