@@ -456,3 +456,25 @@ async fn cover_skips_non_2xx_and_oversized_candidates() {
     assert_eq!(e.cover(&urls, "").await, Some(vec![b'x'; 2000]));
     assert_eq!(e.cover(&urls[..2], "").await, None);
 }
+
+#[test]
+fn netease_recorded_tlyric_is_kept_and_merges_by_time() {
+    // 米津玄師《Lemon》，录制后删去了 transUser / lyricUser（贡献者账号信息）
+    let l = crate::enrich::netease_lyric(&fx("netease_lyric_536622304.json"))
+        .unwrap()
+        .unwrap();
+    assert!(
+        l.lrc.starts_with("[00:00.000] 作词 : 米津玄師\n"),
+        "{}",
+        l.lrc
+    );
+    let tr = l.translated_lrc.as_deref().unwrap();
+    assert!(
+        tr.starts_with("[00:00.851]如果这一切都是梦境该有多好\n"),
+        "{tr}"
+    );
+    let merged = crate::convert::merge_lrc(&l);
+    assert!(merged.contains(
+        "[00:00.851]夢ならばどれほどよかったでしょう\n[00:00.851]如果这一切都是梦境该有多好\n"
+    ));
+}
