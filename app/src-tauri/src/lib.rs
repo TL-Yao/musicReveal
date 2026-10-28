@@ -232,14 +232,10 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("musicReveal 启动失败")
         .run(|app, ev| {
-            // ⌘Q、系统注销等走 ExitRequested（code 为 None）：同样先取消并清理；
-            // quit() 自己的 app.exit(0) 带 code，直接放行。
-            if let RunEvent::ExitRequested {
-                api, code: None, ..
-            } = ev
-            {
-                api.prevent_exit();
-                quit(app.clone());
+            // ⌘Q、Dock 退出、系统注销走 applicationWillTerminate → RunEvent::Exit，
+            // 无法阻止；在返回前同步取消当前任务并清理半成品（关窗路径已做过，再调是空操作）。
+            if let RunEvent::Exit = ev {
+                tauri::async_runtime::block_on(app.state::<Engine>().shutdown());
             }
         });
 }
