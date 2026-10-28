@@ -5,6 +5,7 @@ use super::*;
 use aes::cipher::{BlockEncrypt, KeyInit};
 use std::path::PathBuf;
 
+mod creds;
 mod naming;
 
 // ---------- 通用工具 ----------

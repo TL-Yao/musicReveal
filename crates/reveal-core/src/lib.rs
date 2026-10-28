@@ -99,6 +99,11 @@ impl From<std::io::Error> for Error {
 }
 
 mod convert;
+mod creds;
+
+pub use creds::{
+    credentials_status, fetch_ekey, load_credentials, Credentials, EkeyError, QqStatus,
+};
 mod ncm;
 mod qmc;
 
