@@ -45,7 +45,7 @@ pub struct Track {
     /// 封面缩略图文件。
     #[serde(skip)]
     pub cover: Option<PathBuf>,
-    /// 同名 .lrc（不论能否解析出歌词）。
+    /// 内嵌没有带时间歌词时回退用的 .lrc：旁边的同名优先，其次 lrc 文件夹里的；都要能解析出歌词。
     #[serde(skip)]
     pub lrc: Option<PathBuf>,
 }
@@ -65,10 +65,23 @@ pub struct Lyric {
     pub trans: Option<String>,
 }
 
+/// 读 .lrc 原文；读不了为 None。
+fn lrc_text(p: &Path) -> Option<String> {
+    Some(String::from_utf8_lossy(&std::fs::read(p).ok()?).into_owned())
+}
+
 /// 读 .lrc 并解析；读不了或没有带时间的行为 None。
 fn parse_lrc(p: &Path) -> Option<Vec<Lyric>> {
-    let text = std::fs::read(p).ok()?;
-    let v: Vec<Lyric> = reveal_core::parse_lrc(&String::from_utf8_lossy(&text))
+    parse_text(&lrc_text(p)?)
+}
+
+/// 内嵌歌词解析出的带时间行；没有为 None。
+fn embedded(p: &Path) -> Option<Vec<Lyric>> {
+    parse_text(&reveal_core::read_lyrics(p)?)
+}
+
+fn parse_text(text: &str) -> Option<Vec<Lyric>> {
+    let v: Vec<Lyric> = reveal_core::parse_lrc(text)
         .into_iter()
         .map(|l| Lyric {
             ms: l.ms,
@@ -98,6 +111,8 @@ struct Rec {
     quality: String,
     /// 封面缩略图在 covers 目录里的文件名。
     cover: Option<String>,
+    /// 内嵌歌词里有带时间的行。旧缓存没有这一项，重读一次。
+    timed: Option<bool>,
 }
 
 struct State {
@@ -234,6 +249,7 @@ fn read(path: &Path, stat: Stat, covers: &Path) -> Option<Rec> {
         duration_ms: i.duration_ms,
         quality: i.quality,
         cover,
+        timed: Some(embedded(path).is_some()),
     })
 }
 
@@ -259,7 +275,7 @@ fn track_of(r: &Rec, covers: &Path) -> Track {
         duration_ms: r.duration_ms,
         quality: r.quality.clone(),
         cover_url: cover.as_deref().map(crate::engine::asset_url),
-        has_lyrics: false,
+        has_lyrics: r.timed == Some(true),
         added_at: r.added_at,
         cover,
         lrc: None,
@@ -278,6 +294,8 @@ struct Worker {
     bad: HashMap<PathBuf, Stat>,
     /// .lrc 能否解析出歌词，按大小 + mtime 记。
     lrc: HashMap<PathBuf, (Stat, bool)>,
+    /// 歌词整理（嵌入 / 挪 .lrc）失败的歌：没变就不再试。
+    failed: HashMap<PathBuf, Stat>,
     last: Option<LibraryView>,
 }
 
@@ -286,8 +304,10 @@ impl Worker {
         let file = data_dir.join("library.json");
         let covers = covers_dir(data_dir);
         let mut recs: Vec<Rec> = store::load(&file);
-        // 缩略图没了的条目重读；没人用的缩略图删掉
-        recs.retain(|r| r.cover.as_ref().is_none_or(|n| covers.join(n).exists()));
+        // 缩略图没了的、旧版缓存（不知道内嵌歌词）的条目重读；没人用的缩略图删掉
+        recs.retain(|r| {
+            r.timed.is_some() && r.cover.as_ref().is_none_or(|n| covers.join(n).exists())
+        });
         let used: HashSet<&str> = recs.iter().filter_map(|r| r.cover.as_deref()).collect();
         for e in std::fs::read_dir(&covers).into_iter().flatten().flatten() {
             if !used.contains(&*e.file_name().to_string_lossy()) {
@@ -301,6 +321,7 @@ impl Worker {
             dirty: false,
             bad: HashMap::new(),
             lrc: HashMap::new(),
+            failed: HashMap::new(),
             last: None,
         }
     }
@@ -362,12 +383,15 @@ impl Worker {
         });
         self.dirty |= self.cache.len() != before;
         self.bad.retain(|p, s| now.get(p) == Some(s));
+        self.failed.retain(|p, s| now.get(p) == Some(s));
         let mut known = BTreeMap::new();
         let mut misses = vec![];
+        let mut pending = false;
         for (p, s) in &audio {
             match self.cache.get(p) {
                 Some(r) if r.stat == *s => {
                     known.insert(p.clone(), track_of(r, &self.covers));
+                    pending |= self.plan(&dir, &lrcs, p, *s).is_some();
                 }
                 _ if self.bad.get(p) == Some(s) => {}
                 _ => misses.push((p.clone(), *s)),
@@ -384,11 +408,11 @@ impl Worker {
                     known.insert(p.clone(), t.clone());
                 }
             }
-            for t in known.values_mut() {
-                lyrics(&mut self.lrc, &lrcs, t);
+            for (p, t) in known.iter_mut() {
+                self.lyrics(&dir, &lrcs, p, t);
             }
             st.tracks = known;
-            st.scanning = !misses.is_empty();
+            st.scanning = !misses.is_empty() || pending;
         }
         // 推送前落盘：收到事件时缓存已是新的
         self.save();
@@ -404,29 +428,43 @@ impl Worker {
                 }
                 return;
             }
-            match rec {
-                Some(r) => {
-                    let mut t = track_of(&r, &self.covers);
-                    lyrics(&mut self.lrc, &lrcs, &mut t);
-                    st.tracks.insert(p.clone(), t);
-                    if let Some(old) = self.cache.insert(p, r) {
-                        drop_cover(&self.covers, &old);
-                    }
-                    self.dirty = true;
-                }
-                None => {
-                    st.tracks.remove(&p);
-                    if let Some(old) = self.cache.remove(&p) {
-                        drop_cover(&self.covers, &old);
-                    }
-                    self.bad.insert(p, s);
-                    self.dirty = true;
-                }
-            }
+            self.settle(&mut st, &dir, &lrcs, p, s, rec);
             drop(st);
             if shown.elapsed() >= PARTIAL {
                 self.emit(lib);
                 shown = Instant::now();
+            }
+        }
+        // 歌词整理：标签都读过之后，锁外改文件；改过的歌重读
+        for (p, s) in &audio {
+            let Some(plan) = self.plan(&dir, &lrcs, p, *s) else {
+                continue;
+            };
+            if lock(&lib.st).epoch != epoch {
+                return;
+            }
+            let changed = self.tidy(&dir, &mut lrcs, p, *s, plan);
+            let rec = changed.map(|ns| (ns, read(p, ns, &self.covers)));
+            let mut st = lock(&lib.st);
+            if st.epoch != epoch {
+                if let Some((_, Some(r))) = &rec {
+                    drop_cover(&self.covers, r);
+                }
+                return;
+            }
+            match rec {
+                Some((ns, rec)) => {
+                    // 写进去却读不出带时间的歌词：别每次扫描都再写
+                    if rec.as_ref().is_some_and(|r| r.timed != Some(true)) {
+                        self.failed.insert(p.clone(), ns);
+                    }
+                    self.settle(&mut st, &dir, &lrcs, p.clone(), ns, rec);
+                }
+                None => {
+                    if let Some(t) = st.tracks.get_mut(p) {
+                        self.lyrics(&dir, &lrcs, p, t);
+                    }
+                }
             }
         }
         self.save();
@@ -435,19 +473,126 @@ impl Worker {
     }
 }
 
-/// 填上同名 .lrc；能否解析出歌词按 .lrc 的大小 + mtime 记在 `seen` 里。
-fn lyrics(
-    seen: &mut HashMap<PathBuf, (Stat, bool)>,
-    lrcs: &HashMap<PathBuf, (PathBuf, Stat)>,
-    t: &mut Track,
-) {
-    let found = lrcs.get(&Path::new(&t.id).with_extension(""));
-    t.lrc = found.map(|l| l.0.clone());
-    t.has_lyrics = found.is_some_and(|(p, s)| {
-        seen.entry(p.clone())
-            .or_insert_with(|| (*s, parse_lrc(p).is_some()))
-            .1
-    });
+/// 去掉扩展名的路径 → 同名 .lrc 与它的 Stat。
+type Lrcs = HashMap<PathBuf, (PathBuf, Stat)>;
+
+/// 与 `q` 同名（不论扩展名）、能解析出歌词的 .lrc。`ok` 是 `Worker::lrc`。
+fn usable(ok: &HashMap<PathBuf, (Stat, bool)>, lrcs: &Lrcs, q: &Path) -> Option<PathBuf> {
+    lrcs.get(&q.with_extension(""))
+        .filter(|(l, _)| ok.get(l).is_some_and(|x| x.1))
+        .map(|(l, _)| l.clone())
+}
+
+impl Worker {
+    /// 读过的一首歌（`rec` 为 None 是读不了）记进缓存与 `tracks`。
+    fn settle(
+        &mut self,
+        st: &mut State,
+        root: &Path,
+        lrcs: &Lrcs,
+        p: PathBuf,
+        s: Stat,
+        rec: Option<Rec>,
+    ) {
+        self.dirty = true;
+        let Some(r) = rec else {
+            st.tracks.remove(&p);
+            if let Some(old) = self.cache.remove(&p) {
+                drop_cover(&self.covers, &old);
+            }
+            self.bad.insert(p, s);
+            return;
+        };
+        let mut t = track_of(&r, &self.covers);
+        let cover = r.cover.clone();
+        if let Some(old) = self.cache.insert(p.clone(), r) {
+            if old.cover != cover {
+                drop_cover(&self.covers, &old);
+            }
+        }
+        self.lyrics(root, lrcs, &p, &mut t);
+        st.tracks.insert(p, t);
+    }
+
+    /// 填上回退用的 .lrc 与 `has_lyrics`。
+    fn lyrics(&self, root: &Path, lrcs: &Lrcs, p: &Path, t: &mut Track) {
+        let usable = |q: &Path| usable(&self.lrc, lrcs, q);
+        t.lrc = usable(p).or_else(|| usable(&reveal_core::lrc_home(root, p)));
+        t.has_lyrics = self.cache.get(p).is_some_and(|r| r.timed == Some(true)) || t.lrc.is_some();
+    }
+
+    /// 这首歌要做的歌词整理：（从哪个 .lrc 嵌入，要挪进 lrc 文件夹的旁边的 .lrc）；没事可做为 None。
+    /// 只看标签已读过且没变的歌。
+    fn plan(
+        &self,
+        root: &Path,
+        lrcs: &Lrcs,
+        p: &Path,
+        s: Stat,
+    ) -> Option<(Option<PathBuf>, Option<PathBuf>)> {
+        let r = self.cache.get(p).filter(|r| r.stat == s)?;
+        if self.failed.get(p) == Some(&s) {
+            return None;
+        }
+        let usable = |q: &Path| usable(&self.lrc, lrcs, q);
+        let beside = usable(p);
+        if r.timed == Some(true) {
+            return beside.map(|b| (None, Some(b)));
+        }
+        let src = beside
+            .clone()
+            .or_else(|| usable(&reveal_core::lrc_home(root, p)))?;
+        Some((Some(src), beside))
+    }
+
+    /// 按 `plan` 嵌入、把旁边的 .lrc 挪进 lrc 文件夹（覆盖）。嵌入过返回音频的新 Stat；
+    /// 失败记进 `failed`，嵌入失败时 .lrc 不挪。
+    fn tidy(
+        &mut self,
+        root: &Path,
+        lrcs: &mut Lrcs,
+        p: &Path,
+        s: Stat,
+        (src, beside): (Option<PathBuf>, Option<PathBuf>),
+    ) -> Option<Stat> {
+        if let Some(src) = &src {
+            let r = lrc_text(src)
+                .ok_or_else(|| format!("读不了 {}", src.display()))
+                .and_then(|t| {
+                    reveal_core::embed_lyrics(p, t.trim_start_matches('\u{feff}'))
+                        .map_err(|e| e.to_string())
+                });
+            if let Err(e) = r {
+                eprintln!("歌词嵌入失败（{}）：{e}", p.display());
+                self.failed.insert(p.to_path_buf(), s);
+                return None;
+            }
+        }
+        if let Some(b) = beside {
+            let home = reveal_core::lrc_home(root, p);
+            let moved = home
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| std::fs::rename(&b, &home));
+            match moved {
+                Ok(()) => {
+                    lrcs.remove(&b.with_extension(""));
+                    self.lrc.remove(&b);
+                    if let Some(hs) = scan::stat(&home) {
+                        lrcs.insert(home.with_extension(""), (home.clone(), hs));
+                        self.lrc.insert(home, (hs, true));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("无法把 {} 挪进 lrc 文件夹：{e}", b.display());
+                    if src.is_none() {
+                        self.failed.insert(p.to_path_buf(), s);
+                    }
+                }
+            }
+        }
+        src.and_then(|_| scan::stat(p))
+    }
 }
 
 /// NSFileManager 移到废纸篓：不经 Finder，不会弹「想要控制 Finder」的授权。
@@ -582,11 +727,16 @@ impl Library {
         lock(&self.0.st).tracks.get(Path::new(id)).cloned()
     }
 
-    /// 歌与同名 .lrc 移到废纸篓，立即从资料库去掉。只认资料库里的歌。
+    /// 歌与它的 .lrc（旁边的、lrc 文件夹里的）移到废纸篓，立即从资料库去掉。只认资料库里的歌。
     pub fn trash(&self, id: &str) -> Result<(), String> {
         let t = self.track(id).ok_or("不在资料库里")?;
-        trash(Path::new(&t.id))?;
-        if let Some(l) = &t.lrc {
+        let root = lock(&self.0.st).dir.clone();
+        let p = Path::new(&t.id);
+        trash(p)?;
+        let mut lrcs: Vec<PathBuf> = t.lrc.into_iter().collect();
+        lrcs.extend([reveal_core::lrc_home(&root, p), p.with_extension("lrc")]);
+        // 逐个现查：同一个路径出现两次时第二次已不在
+        for l in lrcs.iter().filter(|l| l.is_file()) {
             let _ = trash(l);
         }
         {
@@ -609,8 +759,9 @@ impl Library {
             .map_err(|e| format!("无法打开 Finder：{e}"))
     }
 
-    /// 资料库里这首歌的同名 .lrc 解析出的歌词；没有或解析为空为 None。
+    /// 资料库里这首歌的歌词：内嵌的带时间歌词优先，没有就解析回退用的 .lrc。
     pub fn lyrics(&self, id: &str) -> Option<Vec<Lyric>> {
-        parse_lrc(&self.track(id)?.lrc?)
+        let t = self.track(id)?;
+        embedded(Path::new(&t.id)).or_else(|| parse_lrc(&t.lrc?))
     }
 }

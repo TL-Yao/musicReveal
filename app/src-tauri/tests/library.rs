@@ -439,7 +439,7 @@ fn same_name_lrc_gives_lyrics() {
 }
 
 #[test]
-fn trash_moves_song_and_its_lrc_to_the_trash_and_refuses_strangers() {
+fn trash_moves_song_and_its_lrcs_to_the_trash_and_refuses_strangers() {
     let r = Rig::new("trash");
     let tag = format!(
         "mr-trash-{}-{}",
@@ -450,34 +450,204 @@ fn trash_moves_song_and_its_lrc_to_the_trash_and_refuses_strangers() {
             .as_nanos()
     );
     let a = mp3(&r.out.join(format!("{tag}.mp3")), &[], None);
-    let lrc = r.out.join(format!("{tag}.lrc"));
-    std::fs::write(&lrc, "[00:01.00]词\n").unwrap();
+    let beside = r.out.join(format!("{tag}.lrc"));
+    std::fs::write(&beside, "[00:01.00]词\n").unwrap();
     let txt = r.out.join(format!("{tag}.txt"));
     std::fs::write(&txt, "x").unwrap();
     r.lib.set_dir(&r.out);
     settled(&r.rx);
+    let home = r.out.join(format!("lrc/{tag}.lrc"));
+    assert!(home.exists() && !beside.exists(), "扫描时挪进 lrc 文件夹");
+    // 旁边又放了一份（还没扫到）
+    std::fs::write(&beside, "[00:02.00]又一份\n").unwrap();
 
-    for stranger in [&txt, &lrc, &r.t.0.join("nope.mp3")] {
+    for stranger in [&txt, &home, &beside, &r.t.0.join("nope.mp3")] {
         assert!(r.lib.trash(&id(stranger)).is_err(), "{stranger:?}");
         assert!(r.lib.reveal(&id(stranger)).is_err(), "{stranger:?}");
     }
-    assert!(txt.exists() && lrc.exists() && a.exists());
+    assert!(txt.exists() && home.exists() && beside.exists() && a.exists());
 
     r.lib.trash(&id(&a)).unwrap();
     let bin = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".Trash");
-    let gone: Vec<PathBuf> = [&a, &lrc]
-        .iter()
-        .map(|p| bin.join(p.file_name().unwrap()))
-        .collect();
-    let in_bin: Vec<bool> = gone.iter().map(|p| p.exists()).collect();
-    for p in &gone {
-        let _ = std::fs::remove_file(p);
+    let in_bin = bin.join(a.file_name().unwrap()).exists();
+    for e in std::fs::read_dir(&bin).into_iter().flatten().flatten() {
+        if e.file_name().to_string_lossy().starts_with(&tag) {
+            let _ = std::fs::remove_file(e.path());
+        }
     }
-    assert_eq!(in_bin, [true, true], "废纸篓里应有同名项");
-    assert!(!a.exists() && !lrc.exists() && txt.exists());
+    assert!(in_bin, "废纸篓里应有这首歌");
+    assert!(!a.exists() && !home.exists() && !beside.exists() && txt.exists());
     assert!(r.lib.track(&id(&a)).is_none(), "立即从资料库消失");
     let (_, v) = settled(&r.rx);
     assert!(v.tracks.is_empty());
+}
+
+/// 大小、mtime、inode：文件被改写或替换都会变。
+fn fingerprint(p: &Path) -> (u64, std::time::SystemTime, u64) {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(p).unwrap();
+    (m.len(), m.modified().unwrap(), m.ino())
+}
+
+/// 目录下全部文件（递归）的指纹。
+fn fingerprints(
+    dir: &Path,
+) -> std::collections::BTreeMap<PathBuf, (u64, std::time::SystemTime, u64)> {
+    let mut out = std::collections::BTreeMap::new();
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            out.extend(fingerprints(&p));
+        } else {
+            out.insert(p.clone(), fingerprint(&p));
+        }
+    }
+    out
+}
+
+/// 再扫一次并等它完成：没变化的重扫不推送，所以顺带放一首新歌 `zz-<n>.mp3`（不算进指纹）。
+fn rescan(lib: &Library, rx: &Receiver<LibraryView>, dir: &Path, n: u32) {
+    lib.refresh();
+    mp3(&dir.join(format!("zz-{n}.mp3")), &[], None);
+    lib.refresh();
+    settled(rx);
+}
+
+fn without_markers(
+    mut f: std::collections::BTreeMap<PathBuf, (u64, std::time::SystemTime, u64)>,
+) -> std::collections::BTreeMap<PathBuf, (u64, std::time::SystemTime, u64)> {
+    f.retain(|p, _| !p.file_name().unwrap().to_string_lossy().starts_with("zz-"));
+    f
+}
+
+fn texts(l: &[Lyric]) -> Vec<&str> {
+    l.iter().map(|l| l.text.as_str()).collect()
+}
+
+#[test]
+fn scan_embeds_usable_lrc_and_files_it_under_the_lrc_folder() {
+    let r = Rig::new("embed");
+    let o = &r.out;
+    // 已有带时间内嵌歌词：文件不动，旁边的 .lrc 挪进 lrc/，歌词以内嵌为准
+    let timed = mp3(&o.join("timed.mp3"), &[], None);
+    reveal_core::embed_lyrics(&timed, "[00:01.00]内嵌\n").unwrap();
+    std::fs::write(o.join("timed.lrc"), "[00:05.00]旁边\n").unwrap();
+    // 只有纯文本内嵌 + 子文件夹里旁边的 .lrc：换成 .lrc 原文；lrc/ 里已有的同名被覆盖
+    let plain = mp3(&o.join("sub/plain.mp3"), &[], None);
+    reveal_core::embed_lyrics(&plain, "纯文本").unwrap();
+    let plain_lrc = "[ti:x]\n[00:01.00]换上\n[00:01.00]translated\n";
+    std::fs::write(o.join("sub/plain.lrc"), plain_lrc).unwrap();
+    std::fs::create_dir_all(o.join("lrc/sub")).unwrap();
+    std::fs::write(o.join("lrc/sub/plain.lrc"), "旧的").unwrap();
+    // 纯文本内嵌、没有 .lrc：不动
+    let alone = mp3(&o.join("alone.mp3"), &[], None);
+    reveal_core::embed_lyrics(&alone, "纯文本").unwrap();
+    // 没有内嵌、旁边的 .lrc 解析不出带时间的行：不嵌不移
+    let untimed = mp3(&o.join("untimed.mp3"), &[], None);
+    std::fs::write(o.join("untimed.lrc"), "[ti:只有标签]\n").unwrap();
+    // 没有内嵌、.lrc 只在 lrc/ 下：从那里嵌
+    let homed = mp3(&o.join("homed.mp3"), &[], None);
+    std::fs::write(o.join("lrc/homed.lrc"), "[00:02.00]在家\n").unwrap();
+    // lrc/ 里没有对应歌的 .lrc：不是曲目
+    std::fs::write(o.join("lrc/orphan.lrc"), "[00:01.00]孤儿\n").unwrap();
+
+    let born = |p: &Path| std::fs::metadata(p).unwrap().created().unwrap();
+    let plain_born = born(&plain);
+    let before = fingerprints(o);
+    r.lib.set_dir(o);
+    let (_, v) = settled(&r.rx);
+    assert_eq!(
+        ids(&v),
+        [&alone, &homed, &plain, &timed, &untimed].map(|p| id(p))
+    );
+
+    // timed
+    assert_eq!(fingerprint(&timed), before[&timed]);
+    assert!(!o.join("timed.lrc").exists());
+    assert_eq!(
+        std::fs::read_to_string(o.join("lrc/timed.lrc")).unwrap(),
+        "[00:05.00]旁边\n"
+    );
+    let t = r.lib.track(&id(&timed)).unwrap();
+    assert!(t.has_lyrics);
+    assert_eq!(texts(&r.lib.lyrics(&id(&timed)).unwrap()), ["内嵌"]);
+
+    // plain
+    assert_eq!(reveal_core::read_lyrics(&plain).as_deref(), Some(plain_lrc));
+    assert!(!o.join("sub/plain.lrc").exists());
+    assert_eq!(
+        std::fs::read_to_string(o.join("lrc/sub/plain.lrc")).unwrap(),
+        plain_lrc
+    );
+    let t = r.lib.track(&id(&plain)).unwrap();
+    assert!(t.has_lyrics);
+    let born_ms = plain_born.duration_since(std::time::UNIX_EPOCH).unwrap();
+    assert_eq!(
+        t.added_at as u128,
+        born_ms.as_millis(),
+        "最近添加的时间不变"
+    );
+    assert_eq!(born(&plain), plain_born);
+    let l = r.lib.lyrics(&id(&plain)).unwrap();
+    assert_eq!(
+        (l[0].text.as_str(), l[0].trans.as_deref()),
+        ("换上", Some("translated"))
+    );
+
+    // alone
+    assert_eq!(fingerprint(&alone), before[&alone]);
+    assert!(!r.lib.track(&id(&alone)).unwrap().has_lyrics);
+    assert_eq!(r.lib.lyrics(&id(&alone)), None);
+
+    // untimed
+    assert_eq!(fingerprint(&untimed), before[&untimed]);
+    assert!(o.join("untimed.lrc").exists() && !o.join("lrc/untimed.lrc").exists());
+    assert!(!r.lib.track(&id(&untimed)).unwrap().has_lyrics);
+
+    // homed
+    assert_eq!(
+        reveal_core::read_lyrics(&homed).as_deref(),
+        Some("[00:02.00]在家\n")
+    );
+    assert!(r.lib.track(&id(&homed)).unwrap().has_lyrics);
+
+    // 再扫一次：一个文件都不改
+    let after = fingerprints(o);
+    rescan(&r.lib, &r.rx, o, 1);
+    assert_eq!(without_markers(fingerprints(o)), after);
+    // 重启后（缓存）也一样
+    let (lib, rx) = open(&r.data());
+    lib.set_dir(o);
+    let (_, v2) = settled(&rx);
+    assert_eq!(without_markers(fingerprints(o)), after);
+    assert_eq!(v2.tracks, r.lib.view().tracks);
+}
+
+#[test]
+fn read_only_song_keeps_its_lrc_beside_and_is_not_retried() {
+    use std::os::unix::fs::PermissionsExt;
+    let r = Rig::new("readonly");
+    let a = mp3(&r.out.join("a.mp3"), &[], None);
+    let lrc = r.out.join("a.lrc");
+    std::fs::write(&lrc, "[00:01.00]只读\n").unwrap();
+    std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let before = fingerprints(&r.out);
+    r.lib.set_dir(&r.out);
+    settled(&r.rx);
+    // 不重试：重扫无事可做，不进入「扫描中」，什么也不推送
+    r.lib.refresh();
+    let quiet = r.rx.recv_timeout(Duration::from_millis(500));
+    assert!(quiet.is_err(), "{quiet:?}");
+    for n in 0..2 {
+        assert_eq!(without_markers(fingerprints(&r.out)), before);
+        assert!(!r.out.join("lrc").exists());
+        let t = r.lib.track(&id(&a)).unwrap();
+        assert!(t.has_lyrics);
+        assert_eq!(t.lrc.as_deref(), Some(&*lrc));
+        assert_eq!(texts(&r.lib.lyrics(&id(&a)).unwrap()), ["只读"]);
+        rescan(&r.lib, &r.rx, &r.out, n);
+    }
+    std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o644)).unwrap();
 }
 
 #[test]
