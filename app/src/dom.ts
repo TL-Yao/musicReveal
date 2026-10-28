@@ -3,6 +3,18 @@ export const $$ = <T extends Element = HTMLElement>(s: string, el: ParentNode = 
 export const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 export const icon = (n: string) => `<svg><use href="#i-${n}"/></svg>`;
 export const reduced = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+/** el 自己的退场动画 / 过渡结束后执行一次 fn。减少动态、窗口隐藏时事件可能永远不来：ms 后兜底 */
+export function afterMotion(el: Element, ms: number, fn: () => void) {
+  let done = false;
+  const go = (e?: Event) => {
+    if (done || (e && e.target !== el)) return;
+    done = true;
+    fn();
+  };
+  el.addEventListener("animationend", go);
+  el.addEventListener("transitionend", go);
+  setTimeout(go, ms);
+}
 /** 展示用：/Users/xx/Music → ~/Music */
 export const tilde = (p: string) => p.replace(/^\/Users\/[^/]+(?=\/|$)/, "~");
 export const baseName = (p: string) => p.replace(/\/+$/, "").split("/").pop() || p;

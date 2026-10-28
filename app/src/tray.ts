@@ -1,7 +1,7 @@
 // 显影盘：转换队列作为一条托盘压在资料库上方。按 job id 复用 DOM，状态原位变化；封面「显影」由 --dev 驱动。
 // 转换完成 → 入库仪式：显影到底、弹出光圈 → 封面飞进资料库 → 盘里这行收起。
 import type { Job } from "./types";
-import { $, artStyle, esc, glyphHTML, hashArt, icon, reduced, titleFromFile } from "./dom";
+import { $, afterMotion, artStyle, esc, glyphHTML, hashArt, icon, reduced, titleFromFile } from "./dom";
 import { S, call } from "./store";
 import { bumpCount, landing, renderLib, rowEl, toRowMode, trackById } from "./library";
 
@@ -52,8 +52,10 @@ export function renderTray(jobs: Job[], initial: boolean) {
   const shown = jobs.filter((j) => j.state in RANK).sort((a, b) => RANK[a.state]! - RANK[b.state]! || (a.queuePos ?? 0) - (b.queuePos ?? 0));
   const ids = new Set(shown.map((j) => j.id));
   for (const [id, r] of rows) {
-    if (ids.has(id) || r.ritual) continue;
     const j = byId.get(id);
+    // 仪式中仍收展示字段：真后台先发无封面的 done，缩略图生成后再发一次带 coverUrl 的
+    if (r.ritual && j?.state === "done" && r.sig !== sig(j)) fill(r, j);
+    if (ids.has(id) || r.ritual) continue;
     if (j?.state === "done" && j.output && !initial) startRitual(r, j);
     else collapse(r); // 已跳过 / 已移除
   }
@@ -87,8 +89,7 @@ const sig = (j: Job) => JSON.stringify(j) + S.snap?.format;
 function collapse(r: Row) {
   rows.delete(r.job.id);
   r.el.classList.add("collapsed");
-  r.el.addEventListener("transitionend", (e) => e.target === r.el && r.el.remove());
-  if (reduced()) setTimeout(() => r.el.remove(), 200);
+  afterMotion(r.el, reduced() ? 200 : 900, () => r.el.remove());
   chrome();
 }
 
@@ -201,7 +202,11 @@ async function startRitual(r: Row, j: Job) {
     if (landing.delete(out)) renderLib();
     return collapse(r);
   }
-  const tile = $(".tile", r.el);
+  const tile = $(".tile", r.el), img = $<HTMLImageElement>(".art.clear img", tile);
+  // 起飞前封面还没到就用资料库里这首的封面；等它解码完，免得飞出去的是占位字形
+  const cover = trackById(out)!.coverUrl;
+  if (cover && !r.job.coverUrl) fill(r, { ...r.job, coverUrl: cover });
+  if (img.getAttribute("src")) await Promise.race([img.decode().catch(() => {}), sleep(300)]);
   r.el.scrollIntoView({ block: "nearest" });
   const scroll = $("#scroll");
   let row: HTMLElement | undefined;
@@ -241,7 +246,7 @@ async function startRitual(r: Row, j: Job) {
       [{ transform: "translate(0,0) scale(1)", opacity: 1 }, { transform: `translate(${dx}px,${dy}px) scale(${sc})`, opacity: row ? 1 : 0 }],
       { duration: row ? 900 : 700, easing: row ? soft : "cubic-bezier(.3,.7,.3,1)", fill: "forwards" },
     );
-    await a.finished.catch(() => {});
+    await Promise.race([a.finished.catch(() => {}), sleep(1200)]); // 隐藏窗口里动画可能不推进
     fly.remove();
   }
   if (row) {
