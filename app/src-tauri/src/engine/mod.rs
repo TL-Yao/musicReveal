@@ -32,6 +32,8 @@ pub trait Converter: Send + Sync {
 
 /// 一次轮询的间隔；以下以轮询次数计时。
 pub const POLL: Duration = Duration::from_secs(2);
+/// QQ 登录态每 10s 刷新。
+const QQ_POLLS: u64 = 5;
 /// 不完整的文件 60s 不变就判失败。
 const INCOMPLETE_POLLS: u32 = 30;
 
@@ -68,6 +70,13 @@ struct State {
     seen: HashMap<PathBuf, Stat>,
     /// 通知及其涉及的文件（existingSongs 用）。
     notices: Vec<(Notice, Vec<Key>)>,
+    /// 不可访问的监听文件夹及原因。
+    folder_err: HashMap<PathBuf, String>,
+    qq: QqStatus,
+    qq_stamp: Option<SystemTime>,
+    /// 最近一次 QQ 新格式转换被拒（登录过期）。
+    qq_rejected: bool,
+    ticks: u64,
     next_id: u64,
     stopping: bool,
 }
@@ -196,6 +205,27 @@ impl State {
         out
     }
 
+    /// 刷新 QQ 登录态；刚登录上或 plist 变了，就把等登录的任务重新入队。
+    fn refresh_qq(&mut self, conv: &dyn Converter, stamp: Option<SystemTime>) {
+        let s = conv.qq_status();
+        let logged = |q: &QqStatus| matches!(q, QqStatus::LoggedIn { .. });
+        if (logged(&s) && !logged(&self.qq)) || stamp != self.qq_stamp {
+            self.qq_rejected = false;
+            let waiting: Vec<u64> = self
+                .tasks
+                .iter()
+                .rev()
+                .filter(|t| t.view.state == JobState::WaitLogin)
+                .map(|t| id_of(&t.view.id))
+                .collect();
+            for id in waiting {
+                self.enqueue(id);
+            }
+        }
+        self.qq = s;
+        self.qq_stamp = stamp;
+    }
+
     fn queue_new(&mut self, k: Key, folder: Option<PathBuf>) {
         self.seen.insert(k.path.clone(), k.stat);
         let id = self.new_task(k.path, folder, JobState::Queued);
@@ -241,6 +271,11 @@ impl Engine {
                 running: None,
                 seen: HashMap::new(),
                 notices: vec![],
+                folder_err: HashMap::new(),
+                qq: QqStatus::LoggedOut,
+                qq_stamp: None,
+                qq_rejected: false,
+                ticks: 0,
                 next_id: 0,
                 stopping: false,
             }),
@@ -287,9 +322,12 @@ impl Engine {
             store::load::<Settings>(&self.settings_path()),
             store::load::<History>(&self.history_path()),
         );
+        let conv = self.0.conv.clone();
         self.edit(|st| {
             st.settings = settings;
             st.history = history;
+            st.qq = conv.qq_status();
+            st.qq_stamp = conv.qq_stamp();
             // 补转：关窗期间下载的、上次被中断的
             let mut n = 0;
             for folder in st.settings.folders.clone() {
@@ -333,7 +371,13 @@ impl Engine {
 
     /// 一次轮询：跟踪下载中的文件，发现新文件。
     pub fn tick(&self) {
+        let conv = self.0.conv.clone();
         self.edit(|st| {
+            st.ticks += 1;
+            let stamp = conv.qq_stamp();
+            if st.ticks % QQ_POLLS == 0 || stamp != st.qq_stamp {
+                st.refresh_qq(&*conv, stamp);
+            }
             for t in st.tasks.iter_mut() {
                 if t.view.state != JobState::Downloading {
                     continue;
@@ -362,8 +406,15 @@ impl Engine {
             }
             let skip = st.settings.output_dir.clone();
             for folder in st.settings.folders.clone() {
-                let Ok(files) = scan::scan(&folder, &skip) else {
-                    continue;
+                let files = match scan::scan(&folder, &skip) {
+                    Ok(f) => {
+                        st.folder_err.remove(&folder);
+                        f
+                    }
+                    Err(e) => {
+                        st.folder_err.insert(folder, e);
+                        continue;
+                    }
                 };
                 for (p, s) in files {
                     if st.seen.get(&p) == Some(&s) {
@@ -471,6 +522,10 @@ impl Engine {
                         return Some(st.history.clone());
                     }
                     Err(ConvertError::Cancelled) => {}
+                    Err(ConvertError::NeedsLogin) => {
+                        t.view.state = JobState::WaitLogin;
+                        st.qq_rejected = true;
+                    }
                     Err(ConvertError::Incomplete) => {
                         t.view.state = JobState::Downloading;
                         (t.last, t.same, t.incomplete) = (scan::stat(&t.src), 0, true);
@@ -545,6 +600,7 @@ impl Engine {
         let folder = PathBuf::from(path);
         self.edit(|st| {
             st.settings.folders.retain(|f| *f != folder);
+            st.folder_err.remove(&folder);
             st.take_notice(&folder);
             st.seen.retain(|p, _| !p.starts_with(&folder));
             let gone: Vec<u64> = st
@@ -664,15 +720,30 @@ impl Engine {
                 .map(|p| Folder {
                     path: p.to_string_lossy().into_owned(),
                     name: name_of(p),
-                    accessible: true,
-                    reason: None,
+                    accessible: !st.folder_err.contains_key(p),
+                    reason: st.folder_err.get(p).cloned(),
                 })
                 .collect(),
             output_dir: s.output_dir.to_string_lossy().into_owned(),
             format: s.format,
-            qq: Qq {
-                state: QqState::LoggedOut,
-                account: None,
+            qq: match &st.qq {
+                QqStatus::LoggedIn { masked_uin } => Qq {
+                    state: if st.qq_rejected {
+                        QqState::Expired
+                    } else {
+                        QqState::LoggedIn
+                    },
+                    account: Some(masked_uin.clone()),
+                },
+                s => Qq {
+                    state: match s {
+                        QqStatus::NotInstalled => QqState::NotInstalled,
+                        QqStatus::NeedsAuth => QqState::NeedsAuth,
+                        QqStatus::Expired => QqState::Expired,
+                        _ => QqState::LoggedOut,
+                    },
+                    account: None,
+                },
             },
             busy,
             waiting_login,

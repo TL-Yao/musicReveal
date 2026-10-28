@@ -44,6 +44,7 @@ impl Drop for Tmp {
 struct Fake {
     script: Mutex<HashMap<String, VecDeque<ConvertError>>>,
     status: Mutex<Option<QqStatus>>,
+    stamp: Mutex<Option<std::time::SystemTime>>,
     hold: AtomicBool,
     release: AtomicBool,
     calls: Mutex<Vec<String>>,
@@ -121,6 +122,9 @@ impl Converter for Fake {
             .unwrap()
             .clone()
             .unwrap_or(QqStatus::LoggedOut)
+    }
+    fn qq_stamp(&self) -> Option<std::time::SystemTime> {
+        *self.stamp.lock().unwrap()
     }
 }
 
@@ -480,4 +484,148 @@ async fn restart_catches_up_files_missed_while_closed() {
     // 设置也恢复了
     assert!(e2.snapshot().onboarded);
     assert_eq!(e2.snapshot().output_dir, r.out.to_string_lossy());
+}
+
+#[tokio::test]
+async fn shutdown_cancels_running_job_without_recording_it() {
+    let r = Rig::new("shutdown").await;
+    r.fake.hold.store(true, Ordering::SeqCst);
+    put(&r.watch, "a.ncm", b"x");
+    settle(&r.eng);
+    r.wait("a.ncm", JobState::Decrypt).await;
+    let t0 = std::time::Instant::now();
+    r.eng.shutdown().await;
+    assert!(t0.elapsed() < Duration::from_secs(3));
+    assert!(std::fs::read_dir(&r.out).unwrap().next().is_none());
+    // 下次启动由补转接上
+    r.fake.hold.store(false, Ordering::SeqCst);
+    let e2 = engine(&r.t, &r.fake).await;
+    assert_eq!(notices(&e2, NoticeKind::CaughtUp)[0].count, 1);
+    for _ in 0..500 {
+        if r.fake.calls().len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(r.fake.calls(), vec!["a.ncm", "a.ncm"]);
+}
+
+#[tokio::test]
+async fn needs_login_waits_and_resumes_when_qq_logs_in() {
+    let r = Rig::new("login").await;
+    assert_eq!(r.eng.snapshot().qq.state, QqState::LoggedOut);
+    r.fake.fail("q.mflac", ConvertError::NeedsLogin);
+    put(&r.watch, "q.mflac", b"x");
+    settle(&r.eng);
+    let j = r.wait("q.mflac", JobState::WaitLogin).await;
+    assert_eq!(j.error, None);
+    assert_eq!(r.eng.snapshot().waiting_login, 1);
+    *r.fake.status.lock().unwrap() = Some(QqStatus::LoggedIn {
+        masked_uin: "12****89".into(),
+    });
+    // 每 10s（5 次轮询）刷新一次
+    for _ in 0..5 {
+        r.eng.tick();
+    }
+    let s = r.eng.snapshot();
+    assert_eq!(s.qq.state, QqState::LoggedIn);
+    assert_eq!(s.qq.account.as_deref(), Some("12****89"));
+    r.wait("q.mflac", JobState::Done).await;
+    assert_eq!(r.fake.calls().len(), 2);
+}
+
+#[tokio::test]
+async fn logged_in_but_rejected_shows_expired() {
+    let r = Rig::new("expired").await;
+    *r.fake.status.lock().unwrap() = Some(QqStatus::LoggedIn {
+        masked_uin: "12****89".into(),
+    });
+    for _ in 0..5 {
+        r.eng.tick();
+    }
+    assert_eq!(r.eng.snapshot().qq.state, QqState::LoggedIn);
+    r.fake.fail("q.mflac", ConvertError::NeedsLogin);
+    put(&r.watch, "q.mflac", b"x");
+    settle(&r.eng);
+    r.wait("q.mflac", JobState::WaitLogin).await;
+    assert_eq!(r.eng.snapshot().qq.state, QqState::Expired);
+    // 重新登录：plist 的 mtime 变了，下一次轮询就重新入队
+    *r.fake.stamp.lock().unwrap() = Some(std::time::SystemTime::now());
+    r.eng.tick();
+    r.wait("q.mflac", JobState::Done).await;
+    assert_eq!(r.eng.snapshot().qq.state, QqState::LoggedIn);
+}
+
+#[tokio::test]
+async fn deleted_watch_folder_is_inaccessible_and_recovers() {
+    let r = Rig::new("access").await;
+    let other = r.t.dir("other");
+    r.eng.add_watch_folder(&other.to_string_lossy()).unwrap();
+    std::fs::remove_dir_all(&r.watch).unwrap();
+    r.eng.tick();
+    let s = r.eng.snapshot();
+    let f = |p: &Path| s.folders.iter().find(|f| f.path == p.to_string_lossy()).unwrap().clone();
+    assert!(!f(&r.watch).accessible);
+    assert!(f(&r.watch).reason.is_some());
+    assert!(f(&other).accessible);
+    put(&other, "o.ncm", b"x");
+    settle(&r.eng);
+    r.wait("o.ncm", JobState::Done).await;
+    std::fs::create_dir_all(&r.watch).unwrap();
+    put(&r.watch, "w.ncm", b"x");
+    settle(&r.eng);
+    assert!(r.eng.snapshot().folders.iter().all(|f| f.accessible));
+    r.wait("w.ncm", JobState::Done).await;
+}
+
+#[tokio::test]
+async fn output_dir_inside_watch_folder_is_not_rescanned() {
+    let r = Rig::new("inside").await;
+    let out = r.watch.join("converted");
+    r.eng.set_output_dir(&out.to_string_lossy()).unwrap();
+    put(&r.watch, "a.ncm", b"x");
+    settle(&r.eng);
+    r.wait("a.ncm", JobState::Done).await;
+    // 假转换器的输出与源同扩展名，若被扫描到会变成新任务
+    assert!(out.join("a.ncm").exists());
+    for _ in 0..4 {
+        r.eng.tick();
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(r.eng.snapshot().jobs.len(), 1);
+    assert_eq!(r.fake.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn corrupt_settings_and_history_do_not_crash() {
+    let t = Tmp::new("corrupt");
+    let fake = Arc::new(Fake::default());
+    let data = t.dir("data");
+    std::fs::write(data.join("settings.json"), b"{not json").unwrap();
+    std::fs::write(data.join("history.json"), b"\0\0garbage").unwrap();
+    let e = engine(&t, &fake).await;
+    let s = e.snapshot();
+    assert!(!s.onboarded);
+    assert!(s.output_dir.ends_with("Music/musicReveal"));
+    assert_eq!(s.format, Fmt::Original);
+    assert!(data.join("settings.json.bak").exists());
+    assert!(data.join("history.json.bak").exists());
+    // 之后照常保存
+    let out = t.dir("out");
+    e.complete_onboarding(vec![], out.to_string_lossy().into(), "mp3")
+        .unwrap();
+    let text = std::fs::read_to_string(data.join("settings.json")).unwrap();
+    assert!(text.contains("\"mp3\""));
+}
+
+#[tokio::test]
+async fn too_many_entries_marks_folder_inaccessible() {
+    let r = Rig::new("many").await;
+    for i in 0..5001 {
+        std::fs::write(r.watch.join(format!("{i}.txt")), b"").unwrap();
+    }
+    r.eng.tick();
+    let f = &r.eng.snapshot().folders[0];
+    assert!(!f.accessible);
+    assert!(f.reason.as_deref().unwrap().contains("5000"));
 }
