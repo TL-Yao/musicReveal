@@ -1,9 +1,10 @@
-//! musicReveal 桌面应用：Tauri 外壳，把 `engine` 暴露成命令与 `snapshot` 事件。
+//! musicReveal 桌面应用：Tauri 外壳，把 `engine` 与 `library` 暴露成命令与 `snapshot` / `library` 事件。
 
 pub mod engine;
 pub mod library;
 
 use engine::{AddFolderResult, Engine, RealConverter, Snapshot};
+use library::{Library, LibraryView, Lyric};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
 
@@ -125,6 +126,26 @@ async fn dismiss_notice(e: State<'_, Engine>, id: String) -> R<()> {
 }
 
 #[tauri::command]
+async fn get_library(l: State<'_, Library>) -> R<LibraryView> {
+    Ok(l.view())
+}
+
+#[tauri::command]
+async fn get_lyrics(l: State<'_, Library>, id: String) -> R<Option<Vec<Lyric>>> {
+    Ok(l.lyrics(&id))
+}
+
+#[tauri::command]
+async fn trash_track(l: State<'_, Library>, id: String) -> R<()> {
+    l.trash(&id)
+}
+
+#[tauri::command]
+async fn reveal_track(l: State<'_, Library>, id: String) -> R<()> {
+    l.reveal(&id)
+}
+
+#[tauri::command]
 async fn pick_folder(app: tauri::AppHandle) -> R<Option<String>> {
     use tauri_plugin_dialog::DialogExt;
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -189,11 +210,22 @@ pub fn run() {
             }
             app.asset_protocol_scope()
                 .allow_directory(data.join("covers"), true)?;
+            app.asset_protocol_scope()
+                .allow_directory(library::covers_dir(&data), true)?;
+            let h = app.handle().clone();
+            let lib = Library::new(
+                data.clone(),
+                Box::new(move |v| {
+                    let _ = h.emit("library", v);
+                }),
+            );
+            app.manage(lib.clone());
             let h = app.handle().clone();
             let eng = Engine::new(
                 data,
                 Arc::new(RealConverter::new(engine::home())),
                 Box::new(move |s| {
+                    lib.observe(&s);
                     let _ = h.emit("snapshot", s);
                 }),
             );
@@ -229,6 +261,10 @@ pub fn run() {
             open_qq_music,
             pick_folder,
             dismiss_notice,
+            get_library,
+            get_lyrics,
+            trash_track,
+            reveal_track,
         ])
         .build(tauri::generate_context!())
         .expect("musicReveal 启动失败")

@@ -470,3 +470,65 @@ fn trash_moves_song_and_its_lrc_to_the_trash_and_refuses_strangers() {
     let (_, v) = settled(&r.rx);
     assert!(v.tracks.is_empty());
 }
+
+#[test]
+fn a_thousand_cached_tracks_serialize_under_50ms() {
+    let r = Rig::new("perf");
+    let a = mp3(&r.out.join("0000.mp3"), &[("title", "歌")], None);
+    for i in 1..1000 {
+        std::fs::copy(&a, r.out.join(format!("{i:04}.mp3"))).unwrap();
+    }
+    r.lib.set_dir(&r.out);
+    settled(&r.rx);
+
+    let (lib, rx) = open(&r.data());
+    lib.set_dir(&r.out);
+    let (partial, v) = settled(&rx);
+    assert!(partial.is_empty(), "全部命中缓存");
+    assert_eq!(v.tracks.len(), 1000);
+    let t0 = std::time::Instant::now();
+    let json = serde_json::to_string(&lib.view()).unwrap();
+    let took = t0.elapsed();
+    eprintln!("1000 首 get_library 序列化：{took:?}，{} 字节", json.len());
+    assert!(took < Duration::from_millis(50), "{took:?}");
+}
+
+/// 只读核对真实输出文件夹（默认 ~/Music/musicReveal，可用 REVEAL_LIBRARY_DIR 覆盖）：
+/// 缓存与缩略图都写在临时数据目录里。
+#[test]
+#[ignore = "读本机真实输出文件夹"]
+fn real_output_dir_read_only_scan() {
+    let dir = std::env::var_os("REVEAL_LIBRARY_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| musicreveal_app::engine::home().join("Music/musicReveal"));
+    let t = Tmp::new("real");
+    let (lib, rx) = open(&t.0);
+    let t0 = std::time::Instant::now();
+    lib.set_dir(&dir);
+    let (partial, v) = settled(&rx);
+    let cold = t0.elapsed();
+    let covers = v.tracks.iter().filter(|t| t.cover_url.is_some()).count();
+    let lyrics = v.tracks.iter().filter(|t| t.has_lyrics).count();
+    eprintln!(
+        "{}：{} 首，有封面 {covers}，有歌词 {lyrics}；首次扫描 {cold:?}（部分结果 {} 次）",
+        dir.display(),
+        v.tracks.len(),
+        partial.len()
+    );
+    assert!(!v.tracks.is_empty());
+    drop(lib);
+
+    let (lib, rx) = open(&t.0);
+    let t0 = std::time::Instant::now();
+    lib.set_dir(&dir);
+    let (_, v2) = settled(&rx);
+    let warm = t0.elapsed();
+    let t1 = std::time::Instant::now();
+    let json = serde_json::to_string(&lib.view()).unwrap();
+    eprintln!(
+        "缓存命中重扫 {warm:?}；get_library 序列化 {:?}（{} 字节）",
+        t1.elapsed(),
+        json.len()
+    );
+    assert_eq!(v2, v);
+}
