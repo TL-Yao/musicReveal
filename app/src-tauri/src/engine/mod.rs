@@ -174,6 +174,44 @@ fn name_of(p: &Path) -> String {
 
 type ScanResult = Result<Vec<(PathBuf, Stat)>, String>;
 
+/// 源文件内容的 SHA-256（十六进制）；读不了为 None。
+async fn content_hash(p: PathBuf) -> Option<String> {
+    tokio::task::spawn_blocking(move || {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        std::io::copy(&mut std::fs::File::open(p).ok()?, &mut h).ok()?;
+        Some(format!("{:x}", h.finalize()))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// reveal-core 的半成品命名：`.<小写十六进制>.part`。
+fn is_leftover_part(name: &str) -> bool {
+    name.strip_prefix('.')
+        .and_then(|n| n.strip_suffix(".part"))
+        .is_some_and(|h| {
+            !h.is_empty()
+                && h.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+}
+
+/// 崩溃或被强杀后留在输出目录里的半成品；其他文件不碰。
+fn remove_leftover_parts(dir: &Path) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        if is_leftover_part(&e.file_name().to_string_lossy())
+            && e.file_type().is_ok_and(|t| t.is_file())
+        {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
 impl State {
     fn task(&mut self, id: u64) -> Option<&mut Task> {
         let i = self.tasks.binary_search_by_key(&id, |t| t.id).ok()?;
@@ -426,6 +464,7 @@ impl State {
             return;
         }
         match self.live_of(&p) {
+            None if self.history.failed(&p, s) => {}
             Some((id, JobState::Failed)) => {
                 let t = self.task(id).expect("刚查到");
                 t.view.state = JobState::Downloading;
@@ -568,6 +607,7 @@ impl Engine {
         // 任务只属于本次运行，上次的缩略图没用了
         let _ = std::fs::remove_dir_all(self.covers_dir());
         let settings: Settings = store::load(&self.settings_path());
+        remove_leftover_parts(&settings.output_dir);
         let history: History = store::load::<HistoryFile>(&self.history_path()).into();
         let (qq, stamp) = (self.0.conv.qq_status(), self.0.conv.qq_stamp());
         let scans: Vec<(PathBuf, ScanResult)> = settings
@@ -595,7 +635,8 @@ impl Engine {
                     let k = Key { path, stat };
                     if asked.contains(&k.path) {
                         held.push(k);
-                    } else if !st.history.known(&k.path, stat) {
+                    } else if !st.history.known(&k.path, stat) && !st.history.failed(&k.path, stat)
+                    {
                         caught.push((k, folder.clone()));
                     }
                 }
@@ -710,14 +751,32 @@ impl Engine {
             };
             let fmt = fmt_of(opts.format);
             let reuse = self.lock().history.reusable(&key, fmt);
+            // 不同路径的同一份内容：按哈希找已有输出；命中后记到这条路径上，下次不必再算
+            let (reuse, hash) = match reuse {
+                Some(o) => (Some(o), None),
+                None => {
+                    let h = content_hash(src.clone()).await;
+                    let o = h
+                        .as_deref()
+                        .and_then(|h| self.lock().history.same_content(h, fmt));
+                    (o, h)
+                }
+            };
             if let Some(out) = reuse {
+                let fresh = hash.is_some();
                 self.edit(|st| {
                     st.running = None;
                     if let Some(t) = st.task(id) {
                         t.view.state = JobState::Skipped;
                         t.view.output = Some(out.to_string_lossy().into_owned());
                     }
+                    if fresh {
+                        st.history.record(key, fmt, out, hash);
+                    }
                 });
+                if fresh {
+                    self.persist();
+                }
                 continue;
             }
             let r = match std::fs::create_dir_all(&opts.output_dir) {
@@ -771,7 +830,7 @@ impl Engine {
                         v.has_lyrics = o.has_lyrics;
                         v.renamed = o.renamed;
                         v.output = Some(o.output.to_string_lossy().into_owned());
-                        st.history.record(key, fmt, o.output);
+                        st.history.record(key, fmt, o.output, hash);
                         return true;
                     }
                     Err(ConvertError::Cancelled) => {}
@@ -787,6 +846,10 @@ impl Engine {
                     Err(e) => {
                         t.view.state = JobState::Failed;
                         t.view.error = Some(reason(&e));
+                        if matches!(e, ConvertError::Unsupported(_) | ConvertError::Failed(_)) {
+                            st.history.fail(key);
+                            return true;
+                        }
                     }
                 }
                 false

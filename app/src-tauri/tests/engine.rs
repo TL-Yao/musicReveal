@@ -209,9 +209,10 @@ async fn engine(t: &Tmp, fake: &Arc<Fake>) -> Engine {
     e
 }
 
+/// 内容带上文件名：不同文件内容不同，免得被当成同一首歌跳过。
 fn put(dir: &Path, name: &str, data: &[u8]) -> PathBuf {
     let p = dir.join(name);
-    std::fs::write(&p, data).unwrap();
+    std::fs::write(&p, [data, name.as_bytes()].concat()).unwrap();
     p
 }
 
@@ -319,7 +320,7 @@ async fn queue_is_serial_with_queue_pos_in_enqueue_order() {
         .map(|n| r.t.0.join(n))
         .collect();
     for f in &files {
-        std::fs::write(f, b"x").unwrap();
+        std::fs::write(f, f.to_string_lossy().as_bytes()).unwrap();
     }
     r.eng
         .add_files(files.iter().map(|f| f.to_string_lossy().into()).collect());
@@ -1168,4 +1169,95 @@ async fn open_overlapping_question_survives_restart() {
     let asked = notices(&e2, NoticeKind::ExistingSongs);
     assert_eq!(asked.len(), 1);
     assert_eq!(asked[0].count, 1);
+}
+
+#[tokio::test]
+async fn same_content_under_another_name_is_skipped() {
+    let r = Rig::new("dupe").await;
+    std::fs::write(r.watch.join("a.ncm"), b"same bytes").unwrap();
+    settle(&r.eng);
+    let a = r.wait("a.ncm", JobState::Done).await;
+    std::fs::write(r.watch.join("b.ncm"), b"same bytes").unwrap();
+    settle(&r.eng);
+    let b = r.wait("b.ncm", JobState::Skipped).await;
+    assert_eq!(b.output, a.output);
+    assert_eq!(r.fake.calls(), vec!["a.ncm"]);
+    assert_eq!(std::fs::read_dir(&r.out).unwrap().count(), 1);
+    // 不同内容照常转换
+    put(&r.watch, "c.ncm", b"other bytes");
+    settle(&r.eng);
+    r.wait("c.ncm", JobState::Done).await;
+    // b 已记入记录：重启不补转
+    r.eng.shutdown().await;
+    let e2 = engine(&r.t, &r.fake).await;
+    assert!(notices(&e2, NoticeKind::CaughtUp).is_empty());
+    assert_eq!(r.fake.calls(), vec!["a.ncm", "c.ncm"]);
+}
+
+#[tokio::test]
+async fn failed_file_is_not_caught_up_again_until_it_changes() {
+    let r = Rig::new("failrec").await;
+    r.fake
+        .fail("bad.ncm", ConvertError::Failed("文件已损坏：x".into()));
+    r.fake.fail("inc.ncm", ConvertError::Incomplete);
+    let bad = put(&r.watch, "bad.ncm", b"x");
+    put(&r.watch, "inc.ncm", b"x");
+    settle(&r.eng);
+    r.wait("bad.ncm", JobState::Failed).await;
+    r.wait("inc.ncm", JobState::Downloading).await;
+    r.eng.shutdown().await;
+    let e2 = engine(&r.t, &r.fake).await;
+    // 不完整的不算失败：照常补转；损坏且没变的不再自动入队
+    let n = notices(&e2, NoticeKind::CaughtUp);
+    assert_eq!(n.len(), 1);
+    assert_eq!(n[0].count, 1);
+    for _ in 0..500 {
+        if r.fake.calls().len() == 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(r.fake.calls(), vec!["bad.ncm", "inc.ncm", "inc.ncm"]);
+    assert!(e2.snapshot().jobs.iter().all(|j| j.file_name != "bad.ncm"));
+    // 文件变了就当新文件
+    append(&bad, b"2");
+    settle(&e2);
+    for _ in 0..500 {
+        if e2
+            .snapshot()
+            .jobs
+            .iter()
+            .any(|j| j.file_name == "bad.ncm" && j.state == JobState::Done)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(r.fake.calls().len(), 4);
+}
+
+#[tokio::test]
+async fn start_removes_leftover_part_files_only() {
+    let r = Rig::new("parts").await;
+    r.eng.shutdown().await;
+    let keep = [
+        ".notes.part",
+        "a.part",
+        ".1a2b.part.bak",
+        ".XYZ.part",
+        "song.flac",
+    ];
+    for n in keep {
+        put(&r.out, n, b"x");
+    }
+    put(&r.out, ".1a2b3c4d5e6f.part", b"half");
+    let _e2 = engine(&r.t, &r.fake).await;
+    let mut left: Vec<String> = std::fs::read_dir(&r.out)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    let mut want: Vec<String> = keep.iter().map(|s| s.to_string()).collect();
+    want.sort();
+    assert_eq!(left, want);
 }
