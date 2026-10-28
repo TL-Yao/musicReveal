@@ -393,7 +393,7 @@ impl Engine {
             st.qq = conv.qq_status();
             st.qq_stamp = conv.qq_stamp();
             // 补转：关窗期间下载的、上次被中断的
-            let mut n = 0;
+            let mut caught = vec![];
             for folder in st.settings.folders.clone() {
                 let unknown = st.unknown_in(&folder);
                 if st.history.pending.contains(&folder) {
@@ -405,13 +405,12 @@ impl Engine {
                     continue;
                 }
                 for k in unknown {
+                    caught.push(k.clone());
                     st.queue_new(k, Some(folder.clone()));
-                    n += 1;
                 }
             }
-            if n > 0 {
-                st.notice(NoticeKind::CaughtUp, None, vec![]);
-                st.notices.last_mut().unwrap().0.count = n;
+            if !caught.is_empty() {
+                st.notice(NoticeKind::CaughtUp, None, caught);
             }
         });
         tokio::spawn(self.clone().worker());
