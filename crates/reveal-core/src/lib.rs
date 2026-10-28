@@ -99,6 +99,7 @@ impl From<std::io::Error> for Error {
 }
 
 mod ncm;
+mod qmc;
 
 const BUF: usize = 1 << 20;
 
@@ -166,7 +167,41 @@ pub fn sniff(path: &Path) -> Result<SourceKind, Error> {
         ncm::read_header(&mut f)?;
         return Ok(SourceKind::Ncm);
     }
-    Err(Error::Unsupported("无法识别的格式".into()))
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let (v1, v2) = (
+        qmc::V1_EXTS.contains(&ext.as_str()),
+        qmc::V2_EXTS.contains(&ext.as_str()),
+    );
+    if !v1 && !v2 {
+        return Err(Error::Unsupported(format!("无法识别的扩展名 .{ext}")));
+    }
+    if head.is_empty() {
+        return Err(Error::Incomplete);
+    }
+    if let Some(c) = sniff_container(&head) {
+        return Ok(SourceKind::Plain(c));
+    }
+    let mut h = head.clone();
+    qmc::Cipher::Static.xor(&mut h, 0);
+    if v1 || sniff_container(&h).is_some() {
+        return Ok(SourceKind::QmcV1);
+    }
+    Err(Error::Incomplete)
+}
+
+fn qq_meta() -> EmbeddedMeta {
+    EmbeddedMeta {
+        title: None,
+        artists: vec![],
+        album: None,
+        cover: None,
+        song_id: None,
+        platform: Platform::Qq,
+    }
 }
 
 /// ekey 仅 MusicEx 需要；QmcV2 用 kind 里的；其余忽略。流式写出。
@@ -178,10 +213,17 @@ pub fn decrypt(
 ) -> Result<Decrypted, Error> {
     let _ = ekey;
     let f = File::open(path)?;
-    match kind {
-        SourceKind::Ncm => ncm::decrypt(f, out),
-        _ => Err(Error::Unsupported("未实现".into())),
-    }
+    let corrupt = || Err(Error::Corrupt("解密后不是可识别的音频".into()));
+    let container = match kind {
+        SourceKind::Ncm => return ncm::decrypt(f, out),
+        SourceKind::QmcV1 => pump(f, out, |b, o| qmc::Cipher::Static.xor(b, o), corrupt)?,
+        SourceKind::Plain(_) => pump(f, out, |_, _| {}, corrupt)?,
+        _ => return Err(Error::Unsupported("未实现".into())),
+    };
+    Ok(Decrypted {
+        container,
+        meta: qq_meta(),
+    })
 }
 
 #[cfg(test)]

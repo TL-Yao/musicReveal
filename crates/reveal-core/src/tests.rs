@@ -166,3 +166,68 @@ fn ncm_truncated_header_is_incomplete() {
     let p = t.write("c.ncm", &full[..60]);
     assert!(matches!(sniff(&p), Err(Error::Incomplete)));
 }
+
+// ---------- QMC v1 / Plain ----------
+
+fn enc(c: &crate::qmc::Cipher, plain: &[u8]) -> Vec<u8> {
+    let mut v = plain.to_vec();
+    c.xor(&mut v, 0); // 流密码，加密即解密
+    v
+}
+
+fn qq_empty() -> EmbeddedMeta {
+    EmbeddedMeta {
+        title: None,
+        artists: vec![],
+        album: None,
+        cover: None,
+        song_id: None,
+        platform: Platform::Qq,
+    }
+}
+
+#[test]
+fn static_key_known_answer() {
+    let mask = |off: u64| {
+        let mut b = [0u8; 4];
+        crate::qmc::Cipher::Static.xor(&mut b, off);
+        b
+    };
+    assert_eq!(mask(0), [0xC3, 0x4A, 0xD6, 0xCA]);
+    assert_eq!(mask(0x7FFF)[0], 0x4A); // key[127]，0x7FFF 本身不回绕
+    assert_eq!(mask(0x8000), mask(1)); // 超过 0x7FFF 才按 % 0x7FFF 回绕
+}
+
+#[test]
+fn qmc_v1_decrypts_across_boundary() {
+    let t = Tmp::new("v1");
+    let plain = audio(b"fLaC", 200_000);
+    let p = t.write("a.bkcflac", &enc(&crate::qmc::Cipher::Static, &plain));
+    let (kind, d, out) = run(&p, None).unwrap();
+    assert_eq!(kind, SourceKind::QmcV1);
+    assert!(out == plain);
+    assert_eq!(d.container, Container::Flac);
+    assert_eq!(d.meta, qq_empty());
+}
+
+#[test]
+fn renamed_v1_without_footer_is_v1() {
+    let t = Tmp::new("v1r");
+    let plain = audio(b"OggS", 50_000);
+    let p = t.write("a.qmcogg", &enc(&crate::qmc::Cipher::Static, &plain));
+    let (kind, d, out) = run(&p, None).unwrap();
+    assert_eq!(kind, SourceKind::QmcV1);
+    assert!(out == plain);
+    assert_eq!(d.container, Container::Ogg);
+}
+
+#[test]
+fn plain_audio_with_encrypted_extension() {
+    let t = Tmp::new("plain");
+    let plain = audio(b"fLaC", 50_000);
+    let p = t.write("a.mflac", &plain);
+    let (kind, d, out) = run(&p, None).unwrap();
+    assert_eq!(kind, SourceKind::Plain(Container::Flac));
+    assert!(out == plain);
+    assert_eq!(d.container, Container::Flac);
+}
