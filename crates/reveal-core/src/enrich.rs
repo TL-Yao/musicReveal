@@ -56,6 +56,7 @@ pub(crate) fn qq_song(body: &[u8], meta: &mut TrackMeta) -> Result<Option<String
     if let Some(y) = str_at(s, "/time_public")
         .or(str_at(s, "/album/time_public"))
         .and_then(|t| t.get(..4)?.parse().ok())
+        .filter(|&y: &u16| y > 0)
     {
         meta.year = Some(y);
     }
@@ -65,7 +66,7 @@ pub(crate) fn qq_song(body: &[u8], meta: &mut TrackMeta) -> Result<Option<String
     if let Some(n) = s
         .get("index_cd")
         .and_then(Value::as_u64)
-        .and_then(|n| u32::try_from(n + 1).ok())
+        .and_then(|n| u32::try_from(n.checked_add(1)?).ok())
     {
         meta.disc = Some(n);
     }

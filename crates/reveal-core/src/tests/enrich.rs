@@ -263,3 +263,31 @@ fn qq_trailing_copyright_notice_is_dropped() {
         rec.lrc
     );
 }
+
+#[test]
+fn extreme_numeric_fields_keep_original_values() {
+    let max = u64::MAX;
+    let body = format!(
+        r#"{{"code":0,"data":[{{"index_cd":{max},"index_album":{max},"time_public":"0000-01-01",
+        "album":{{"time_public":"9999999"}}}}]}}"#
+    );
+    let mut m = qq();
+    crate::enrich::qq_song(body.as_bytes(), &mut m).unwrap();
+    assert_eq!(m, qq());
+    let body = br#"{"code":0,"data":[{"index_cd":4294967295,"index_album":4294967296,"time_public":"-123"}]}"#;
+    crate::enrich::qq_song(body, &mut m).unwrap();
+    assert_eq!(m, qq());
+
+    for body in [
+        format!(
+            r#"{{"songs":[{{"no":{max},"disc":"99999999999","album":{{"publishTime":{}}}}}]}}"#,
+            i64::MAX
+        ),
+        r#"{"songs":[{"no":-1,"disc":"-1","album":{"publishTime":-5}}]}"#.into(),
+        r#"{"songs":[{"no":1.5,"disc":"0","album":{"publishTime":1e300}}]}"#.into(),
+    ] {
+        let mut m = ne(1);
+        crate::enrich::netease_song(body.as_bytes(), &mut m).unwrap();
+        assert_eq!(m, ne(1), "{body}");
+    }
+}
