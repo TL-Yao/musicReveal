@@ -1,1 +1,3 @@
 .hidyn-design/
+target/
+__pycache__/

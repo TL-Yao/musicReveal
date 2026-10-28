@@ -1,0 +1,188 @@
+//! musicReveal 解密核心：识别 NCM / QMC 加密音频并流式解密。平台无关、无网络。
+
+use std::fmt;
+use std::fs::File;
+use std::io::{Read, Write};
+use std::path::Path;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Platform {
+    Qq,
+    Netease,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SongId {
+    QqMid(String),
+    Netease(u64),
+}
+
+/// 按解密后音频头嗅探出的容器格式。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Container {
+    Flac,
+    Ogg,
+    M4a,
+    Mp3,
+    Wav,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SourceKind {
+    Ncm,
+    QmcV1,
+    /// 文件尾内嵌 ekey（QTag / PcV1Legacy）。
+    QmcV2 {
+        ekey: String,
+    },
+    /// 新版 musicex V1 footer，ekey 需在线获取。
+    MusicEx {
+        song_mid: String,
+        media_filename: String,
+    },
+    /// 扩展名像加密格式但内容是普通音频。
+    Plain(Container),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmbeddedMeta {
+    pub title: Option<String>,
+    pub artists: Vec<String>,
+    pub album: Option<String>,
+    pub cover: Option<Vec<u8>>,
+    pub song_id: Option<SongId>,
+    pub platform: Platform,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Decrypted {
+    pub container: Container,
+    pub meta: EmbeddedMeta,
+}
+
+#[derive(Debug)]
+pub enum Error {
+    Unsupported(String),
+    Incomplete,
+    NeedsEkey,
+    BadEkey,
+    Io(std::io::Error),
+    Corrupt(String),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::Unsupported(s) => write!(f, "不支持的格式：{s}"),
+            Error::Incomplete => f.write_str("文件不完整（可能仍在下载或已被截断）"),
+            Error::NeedsEkey => f.write_str("该文件需要 ekey 才能解密"),
+            Error::BadEkey => f.write_str("ekey 无效或与该文件不匹配"),
+            Error::Io(e) => write!(f, "读写失败：{e}"),
+            Error::Corrupt(s) => write!(f, "文件已损坏：{s}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Self {
+        Error::Io(e)
+    }
+}
+
+mod ncm;
+
+const BUF: usize = 1 << 20;
+
+fn eof(e: std::io::Error) -> Error {
+    if e.kind() == std::io::ErrorKind::UnexpectedEof {
+        Error::Incomplete
+    } else {
+        Error::Io(e)
+    }
+}
+
+fn sniff_container(h: &[u8]) -> Option<Container> {
+    Some(match h {
+        [b'f', b'L', b'a', b'C', ..] => Container::Flac,
+        [b'O', b'g', b'g', b'S', ..] => Container::Ogg,
+        [b'I', b'D', b'3', ..] => Container::Mp3,
+        [0xFF, b, ..] if b & 0xE0 == 0xE0 => Container::Mp3,
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'A', b'V', b'E', ..] => Container::Wav,
+        [_, _, _, _, b'f', b't', b'y', b'p', ..] => Container::M4a,
+        _ => return None,
+    })
+}
+
+/// 分块读 → 就地解密（`xor(buf, 音频内偏移)`）→ 写出；首块先嗅探容器，认不出时交给 `unknown`。
+fn pump(
+    mut r: impl Read,
+    out: &mut dyn Write,
+    mut xor: impl FnMut(&mut [u8], u64),
+    unknown: impl FnOnce() -> Result<Container, Error>,
+) -> Result<Container, Error> {
+    let mut buf = Vec::with_capacity(BUF);
+    (&mut r).take(BUF as u64).read_to_end(&mut buf)?;
+    if buf.is_empty() {
+        return Err(Error::Incomplete);
+    }
+    xor(&mut buf, 0);
+    let container = match sniff_container(&buf) {
+        Some(c) => c,
+        None => unknown()?,
+    };
+    out.write_all(&buf)?;
+    let mut off = buf.len() as u64;
+    buf.resize(BUF, 0);
+    loop {
+        let n = r.read(&mut buf)?;
+        if n == 0 {
+            return Ok(container);
+        }
+        xor(&mut buf[..n], off);
+        out.write_all(&buf[..n])?;
+        off += n as u64;
+    }
+}
+
+fn read_head(f: &mut File, n: usize) -> Result<Vec<u8>, Error> {
+    let mut v = Vec::with_capacity(n);
+    f.take(n as u64).read_to_end(&mut v)?;
+    Ok(v)
+}
+
+pub fn sniff(path: &Path) -> Result<SourceKind, Error> {
+    let mut f = File::open(path)?;
+    let head = read_head(&mut f, 16)?;
+    if head.starts_with(ncm::MAGIC) {
+        ncm::read_header(&mut f)?;
+        return Ok(SourceKind::Ncm);
+    }
+    Err(Error::Unsupported("无法识别的格式".into()))
+}
+
+/// ekey 仅 MusicEx 需要；QmcV2 用 kind 里的；其余忽略。流式写出。
+pub fn decrypt(
+    path: &Path,
+    kind: &SourceKind,
+    ekey: Option<&str>,
+    out: &mut dyn Write,
+) -> Result<Decrypted, Error> {
+    let _ = ekey;
+    let f = File::open(path)?;
+    match kind {
+        SourceKind::Ncm => ncm::decrypt(f, out),
+        _ => Err(Error::Unsupported("未实现".into())),
+    }
+}
+
+#[cfg(test)]
+mod tests;

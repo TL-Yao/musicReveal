@@ -1,0 +1,11 @@
+[package]
+name = "reveal-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "musicReveal: NCM / QMC 加密音频识别与解密核心"
+
+[dependencies]
+aes = "0.8"
+base64 = "0.22"
+serde_json = "1"
