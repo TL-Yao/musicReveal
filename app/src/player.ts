@@ -39,7 +39,8 @@ export function setPlayer(p: PlayerState) {
 export function refreshNowPlaying() {
   renderTransport();
   renderLCD();
-  if (lyrOpen && !lyrReal && trackById(S.player.trackId)) loadLyrics();
+  // 歌词视图按当时的 Track 画的：Track 到达、标签改了、.lrc 放进来或删掉（hasLyrics 变）都重读
+  if (lyrOpen && lyrKey !== keyOf(S.player.trackId)) loadLyrics();
 }
 export function togglePlay() {
   if (S.player.trackId) return void call("player_toggle");
@@ -93,7 +94,9 @@ function updateProgress() {
 
 // 播放中每帧推进进度与歌词
 let raf = 0;
-const kick = () => void (raf ||= requestAnimationFrame(tick));
+// 窗口隐藏（关窗即隐藏）时不跑帧；回来时按时间插值，进度自然对上
+const kick = () => void (document.hidden || (raf ||= requestAnimationFrame(tick)));
+document.addEventListener("visibilitychange", () => (document.hidden ? (cancelAnimationFrame(raf), (raf = 0)) : kick()));
 function tick() {
   raf = 0;
   updateProgress();
@@ -111,7 +114,11 @@ const seek = (ms: number) => {
 /* ===================================================================
    歌词视图：模糊放大的封面做底、左封面右歌词；当前行显影，其余行留在潜影里
    =================================================================== */
-let lyrOpen = false, lyrId: string | undefined, lyrReal = false, wantLyr: string | undefined, lines: LyricLine[] = [], lineEls: HTMLElement[] = [], curLine = -1;
+const keyOf = (id?: string) => {
+  const t = trackById(id);
+  return t ? JSON.stringify([t.hasLyrics, t.title, t.artists, t.album, t.year, t.coverUrl]) : "";
+};
+let lyrOpen = false, lyrId: string | undefined, lyrKey = "", wantLyr: string | undefined, lines: LyricLine[] = [], lineEls: HTMLElement[] = [], curLine = -1;
 
 export function setLyricsOpen(on: boolean) {
   wantLyr = undefined;
@@ -131,7 +138,7 @@ export function openLyricsFor(id: string, start: () => void) {
 async function loadLyrics() {
   const id = S.player.trackId!;
   lyrId = id;
-  lyrReal = !!trackById(id); // 还没有 Track 时先按文件名占位，Track 到了再重载
+  lyrKey = keyOf(id); // 还没有 Track 时先按文件名占位，Track 到了再重载
   const L = await S.B.invoke<LyricLine[] | null>("get_lyrics", { id }).catch((e) => (console.error("get_lyrics", e), null));
   if (lyrId === id) renderLyrics(L ?? []);
 }
@@ -146,7 +153,7 @@ function renderLyrics(L: LyricLine[]) {
   const cover = `<div class="cover" style="${art}">${coverArt(t)}</div>`;
   const head = `<div class="lyr-bg" style="${art}">${t.coverUrl ? `<img src="${esc(t.coverUrl)}" alt="">` : ""}</div><div class="lyr-veil"></div>`;
   if (!L.length) {
-    box.innerHTML = head + `<div class="lyr-none"><div>${cover}<h3>${esc(t.title)}</h3><p>${esc(t.artists.join("、"))}</p><p class="sub">${lyrReal || !S.lib.scanning ? "这首歌没有歌词" : "正在读取资料库…"}</p></div></div>`;
+    box.innerHTML = head + `<div class="lyr-none"><div>${cover}<h3>${esc(t.title)}</h3><p>${esc(t.artists.join("、"))}</p><p class="sub">${lyrKey || !S.lib.scanning ? "这首歌没有歌词" : "正在读取资料库…"}</p></div></div>`;
     return;
   }
   const meta = [t.album, t.year].filter(Boolean).join(" · ");

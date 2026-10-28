@@ -228,12 +228,24 @@ function setState(j: Job, state: Job["state"]): Job {
 async function arrive(j: Job) {
   const x = extra.get(j.id)!;
   if (x.noTrack || !j.output) return;
-  await sleep(450);
+  await sleep(5);
   if (track(j.output)) return;
   const [fmt, ...q] = j.quality!.split(" ");
   const t = mkTrack([x.title, x.artists.join("、"), x.album, 2026, 200 + (uid * 37) % 90, fmt, q.join(" "), x.art, "L"], 0);
   lib.tracks.push(t);
   pushLib();
+}
+/** 完成的真实顺序（真后台实测）：done 但缩略图还没生成 → 约 50ms 后带 coverUrl 的 done → 随后 library 收到这首 */
+async function finish(j: Job) {
+  setState(j, "done");
+  const c = j.coverUrl;
+  j.coverUrl = undefined;
+  pushSnap();
+  await sleep(53);
+  if (!snap.jobs.includes(j)) return;
+  j.coverUrl = c;
+  pushSnap();
+  await arrive(j);
 }
 async function run(j: Job, fromDownload = false) {
   const tok = (runs.get(j.id) ?? 0) + 1;
@@ -250,9 +262,7 @@ async function run(j: Job, fromDownload = false) {
   if (!(await step("queued", 700))) return;
   if (j.platform === "qq" && snap.qq.state !== "loggedIn") return void (setState(j, "waitLogin"), pushSnap());
   for (const [s, ms] of [["decrypt", 1100], ["transcode", 1500], ["metadata", 1000]] as const) if (!(await step(s, ms))) return;
-  setState(j, "done");
-  pushSnap();
-  arrive(j);
+  finish(j);
 }
 
 const PICKS = ["/Volumes/外置盘/音乐/备份", `${HOME}/Downloads`, `${HOME}/Music/网易云音乐`];
@@ -474,6 +484,13 @@ const MR = {
   search,
   lyrics,
   stop,
+  /** 给正在资料库里的某首放进同名 .lrc：library 事件里 hasLyrics false → true */
+  addLrc(title: string) {
+    const t = lib.tracks.find((x) => x.title === title)!;
+    t.hasLyrics = true;
+    LYRICS.set(t.id, toLines(LYR_A));
+    pushLib();
+  },
   finishScan() {
     lib = { dir: OUT, tracks: fullLibrary(), scanning: false };
     pushLib();
@@ -495,9 +512,7 @@ const MR = {
       await sleep(ms);
       if (runs.get(j.id) !== tok) return;
     }
-    setState(j, "done");
-    pushSnap();
-    await arrive(j);
+    await finish(j);
   },
   /** 新下载到达：下载中 → 排队 → 解密 → 转码 → 元数据 → 完成 → 入库 */
   simulateNew() {

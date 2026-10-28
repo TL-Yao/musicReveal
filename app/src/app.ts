@@ -1,7 +1,7 @@
 // 界面外壳：侧栏、通知卡、引导三步（在内容面板里原位呈现）、拖放面、键盘，以及独立的设置窗口视图。
 import type { Backend } from "./backend";
 import type { Library, PlayerState, Snapshot } from "./types";
-import { $, $$, baseName, esc, icon, springLinear, tilde } from "./dom";
+import { $, $$, afterMotion, baseName, esc, icon, reduced, springLinear, tilde } from "./dom";
 import { S, call } from "./store";
 import { closeMenu, initLibrary, renderVoid, setLibrary } from "./library";
 import { initPlayer, lyricsOpen, refreshNowPlaying, setLyricsOpen, setPlayer, togglePlay } from "./player";
@@ -168,7 +168,7 @@ function renderNotices() {
   for (const el of $$(".notice", box)) {
     if (ids.has(el.dataset.id!) || el.classList.contains("gone")) continue;
     el.classList.add("gone");
-    el.addEventListener("animationend", () => el.remove(), { once: true });
+    afterMotion(el, reduced() ? 0 : 600, () => el.remove());
   }
   for (const n of list) {
     const ask = n.kind === "existingSongs";
