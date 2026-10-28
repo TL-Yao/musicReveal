@@ -109,8 +109,6 @@ pub struct Job {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub playing: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]

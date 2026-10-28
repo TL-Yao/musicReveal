@@ -779,32 +779,6 @@ async fn cover_becomes_small_thumbnail_url() {
 }
 
 #[tokio::test]
-async fn preview_reports_playing_until_it_ends_and_rejects_ogg() {
-    let r = Rig::new("preview").await;
-    let a = put(&r.t.0, "a.ncm", b"x");
-    let o = put(&r.t.0, "o.mgg", b"x");
-    r.eng
-        .add_files(vec![a.to_string_lossy().into(), o.to_string_lossy().into()]);
-    let ja = r.wait("a.ncm", JobState::Done).await;
-    let jo = r.wait("o.mgg", JobState::Done).await;
-    assert_eq!(
-        r.eng.play_preview(&jo.id).unwrap_err(),
-        "该格式暂不支持试听"
-    );
-    // 「audio」五个字节不是音频，afplay 很快退出 → playing 回到 false
-    r.eng.play_preview(&ja.id).unwrap();
-    assert!(r.job("a.ncm").unwrap().playing);
-    for _ in 0..500 {
-        if !r.job("a.ncm").unwrap().playing {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert!(!r.job("a.ncm").unwrap().playing);
-    r.eng.stop_preview();
-}
-
-#[tokio::test]
 async fn on_change_receives_snapshots() {
     let t = Tmp::new("emit");
     let fake = Arc::new(Fake::default());
