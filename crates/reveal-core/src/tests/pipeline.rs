@@ -121,7 +121,7 @@ async fn ncm_flac_original_keeps_flac_with_tags_and_cover() {
     let r = run(&input, &out, OutputFormat::Original, &NoopEnricher, None).await;
     let o = r.res.unwrap();
     assert_eq!(r.stages, vec![Stage::Decrypt, Stage::Metadata]);
-    assert_eq!(name(&o.output), "歌手甲, 歌手乙 - 测试歌.flac");
+    assert_eq!(name(&o.output), "歌手甲、歌手乙 - 测试歌.flac");
     let dec = Command::new(&ff)
         .args(["-v", "error", "-i"])
         .arg(&o.output)
@@ -151,7 +151,7 @@ async fn ncm_flac_original_keeps_flac_with_tags_and_cover() {
     // 再跑一次：加编号
     let r2 = run(&input, &out, OutputFormat::Original, &NoopEnricher, None).await;
     let o2 = r2.res.unwrap();
-    assert_eq!(name(&o2.output), "歌手甲, 歌手乙 - 测试歌 (2).flac");
+    assert_eq!(name(&o2.output), "歌手甲、歌手乙 - 测试歌 (2).flac");
     assert_eq!(o2.renamed, Some(2));
 }
 
@@ -169,7 +169,7 @@ async fn ncm_flac_to_mp3_is_cbr_320_with_tags() {
         r.stages,
         vec![Stage::Decrypt, Stage::Transcode, Stage::Metadata]
     );
-    assert_eq!(name(&o.output), "歌手甲, 歌手乙 - 测试歌.mp3");
+    assert_eq!(name(&o.output), "歌手甲、歌手乙 - 测试歌.mp3");
     assert_eq!(o.quality, "MP3 320k");
     let f = read_back(&o.output);
     let kbps = f.properties().audio_bitrate().unwrap();
@@ -344,7 +344,7 @@ async fn enricher_fields_and_lyrics_are_written() {
         .unwrap();
     assert!(o.has_lyrics);
     let lrc = o.lrc.unwrap();
-    assert_eq!(name(&lrc), "歌手甲, 歌手乙 - 测试歌.lrc");
+    assert_eq!(name(&lrc), "歌手甲、歌手乙 - 测试歌.lrc");
     assert_eq!(
         std::fs::read_to_string(&lrc).unwrap(),
         "[ar:x]\n[00:01.00]第一句\n[00:02.50]second\n[00:02.50]第二句\n"
@@ -614,25 +614,25 @@ async fn existing_lrc_or_symlink_is_never_overwritten() {
     let plain = flac24(&ff, &t, &[]);
     let input = t.write("src.ncm", &build_ncm(&plain, b"k", META, None));
     let out = out_dir(&t);
-    std::fs::write(out.join("歌手甲, 歌手乙 - 测试歌.lrc"), "keep").unwrap();
+    std::fs::write(out.join("歌手甲、歌手乙 - 测试歌.lrc"), "keep").unwrap();
     let victim = t.write("victim.txt", b"victim");
-    std::os::unix::fs::symlink(&victim, out.join("歌手甲, 歌手乙 - 测试歌 (2).lrc")).unwrap();
+    std::os::unix::fs::symlink(&victim, out.join("歌手甲、歌手乙 - 测试歌 (2).lrc")).unwrap();
     let o = run(&input, &out, OutputFormat::Original, &LyricEnricher, None)
         .await
         .res
         .unwrap();
-    assert_eq!(name(&o.output), "歌手甲, 歌手乙 - 测试歌 (3).flac");
+    assert_eq!(name(&o.output), "歌手甲、歌手乙 - 测试歌 (3).flac");
     assert_eq!(
         name(o.lrc.as_ref().unwrap()),
-        "歌手甲, 歌手乙 - 测试歌 (3).lrc"
+        "歌手甲、歌手乙 - 测试歌 (3).lrc"
     );
     assert_eq!(o.renamed, Some(3));
     assert_eq!(
-        std::fs::read_to_string(out.join("歌手甲, 歌手乙 - 测试歌.lrc")).unwrap(),
+        std::fs::read_to_string(out.join("歌手甲、歌手乙 - 测试歌.lrc")).unwrap(),
         "keep"
     );
     assert_eq!(std::fs::read(&victim).unwrap(), b"victim");
-    assert!(!out.join("歌手甲, 歌手乙 - 测试歌.flac").exists());
+    assert!(!out.join("歌手甲、歌手乙 - 测试歌.flac").exists());
 }
 
 fn decodes_cleanly(ff: &Path, p: &Path) {

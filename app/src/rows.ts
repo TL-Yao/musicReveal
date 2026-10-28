@@ -182,7 +182,7 @@ function fill(r: Row, j: Job) {
   const state = $(".state", row), meta = $(".meta", row), actions = $(".actions", row);
   state.innerHTML = st;
   meta.innerHTML = mt;
-  actions.className = "actions " + (always ? "always" : "hover");
+  actions.className = "actions " + (always ? "always" : acts ? "hover" : "");
   actions.innerHTML = acts;
   state.style.display = st ? "" : "none";
   meta.style.display = mt ? "" : "none";

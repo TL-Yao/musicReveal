@@ -22,7 +22,7 @@ pub(crate) fn file_stem(title: Option<&str>, artists: &[String], fallback: &str)
     let raw = if artists.is_empty() {
         title.to_string()
     } else {
-        format!("{} - {title}", artists.join(", "))
+        format!("{} - {title}", artists.join("、"))
     };
     let s: String = raw
         .chars()

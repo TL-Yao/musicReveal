@@ -5,14 +5,14 @@ fn s(v: &[&str]) -> Vec<String> {
 }
 
 #[test]
-fn joins_all_artists_with_comma() {
+fn joins_all_artists_with_dunhao() {
     assert_eq!(
         file_stem(
             Some("交织together"),
             &s(&["DMYoung", "Hanser", "泠鸢yousa"]),
             "src"
         ),
-        "DMYoung, Hanser, 泠鸢yousa - 交织together"
+        "DMYoung、Hanser、泠鸢yousa - 交织together"
     );
 }
 

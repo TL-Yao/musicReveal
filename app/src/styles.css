@@ -197,7 +197,7 @@ html.native .sidebar { background: transparent; backdrop-filter: none; box-shado
 .glass-btn svg { width: 14px; height: 14px; }
 
 /* —— 内容区 —— */
-.content { display: grid; grid-template-rows: var(--titlebar-h) minmax(0,1fr); min-width: 0; position: relative; }
+.content { display: grid; grid-template-rows: var(--titlebar-h) minmax(0,1fr); min-width: 0; min-height: 0; position: relative; }
 .toolbar { display: flex; align-items: center; justify-content: space-between; padding: 0 var(--s4) 0 var(--s4); }
 .toolbar .titles h1 { margin: 0; font-size: var(--fs-body); font-weight: 600; line-height: var(--lh-tight); letter-spacing: -.005em; }
 .toolbar .titles p { margin: 2px 0 0; font-size: var(--fs-caption); color: var(--text-2); line-height: var(--lh-tight); min-height: 13px; transition: opacity var(--dur-base); }
@@ -357,7 +357,7 @@ html.native .sidebar { background: transparent; backdrop-filter: none; box-shado
 /* 行上的操作 */
 .actions { position: absolute; inset: 0; display: flex; align-items: center; justify-content: flex-end; gap: 4px; opacity: 0; pointer-events: none; transition: opacity var(--dur-fast); }
 .row:hover .actions.hover, .row.playing .actions.hover { opacity: 1; pointer-events: auto; }
-.row:hover .actions.hover ~ .state, .row:hover .actions.hover ~ .meta, .row.playing .actions.hover ~ .state, .row.playing .actions.hover ~ .meta { opacity: 0; }
+.row:hover .actions.hover ~ .state, .row:hover .actions.hover ~ .meta, .row.playing .actions.hover ~ .state, .row.playing .actions.hover ~ .meta { opacity: 0; pointer-events: none; }
 .side .state, .side .meta { transition: opacity var(--dur-fast); }
 .actions.always { position: static; opacity: 1; pointer-events: auto; }
 .abtn { width: 28px; height: 28px; border-radius: var(--r-btn); border: 0; background: transparent; color: var(--text-2); display: grid; place-items: center; cursor: pointer; transition: background var(--dur-fast), color var(--dur-fast), transform var(--dur-fast); }
