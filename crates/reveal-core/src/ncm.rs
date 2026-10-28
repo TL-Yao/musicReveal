@@ -54,10 +54,15 @@ fn aes_ecb_unpad(key: &[u8; 16], mut data: Vec<u8>) -> Option<Vec<u8>> {
 }
 
 fn parse_meta(blob: &[u8]) -> Option<serde_json::Value> {
-    use base64::Engine;
     let x: Vec<u8> = blob.iter().map(|b| b ^ 0x63).collect();
+    parse_163_key(&x)
+}
+
+/// `163 key(Don't modify):<base64>`（未 XOR，普通 mp3/flac 注释里的形式）→ meta JSON。
+fn parse_163_key(s: &[u8]) -> Option<serde_json::Value> {
+    use base64::Engine;
     let enc = base64::engine::general_purpose::STANDARD
-        .decode(x.strip_prefix(META_PREFIX)?)
+        .decode(s.trim_ascii().strip_prefix(META_PREFIX)?)
         .ok()?;
     let plain = aes_ecb_unpad(META_KEY, enc)?;
     // "music:{...}"（电台节目为 "dj:{...}"）
@@ -108,6 +113,16 @@ fn key_box(key: &[u8]) -> [u8; 256] {
         let a = s[i] as usize;
         s[(a + s[(i + a) & 0xff] as usize) & 0xff]
     })
+}
+
+/// 网易云下载的普通音频：标签里任一文本项是 163 key 就按它取元数据。
+pub(crate) fn plain_meta(tags: &[lofty::tag::Tag]) -> Option<EmbeddedMeta> {
+    let v = tags
+        .iter()
+        .flat_map(|t| t.items())
+        .filter_map(|i| i.value().text())
+        .find_map(|s| parse_163_key(s.as_bytes()))?;
+    Some(meta_of(Some(&v), None))
 }
 
 fn meta_of(v: Option<&serde_json::Value>, cover: Option<Vec<u8>>) -> EmbeddedMeta {

@@ -11,6 +11,7 @@ mod flac_trim;
 mod lyrics;
 mod naming;
 mod pipeline;
+mod track;
 
 // ---------- 通用工具 ----------
 

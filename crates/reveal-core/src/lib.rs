@@ -9,6 +9,8 @@ use std::path::Path;
 pub enum Platform {
     Qq,
     Netease,
+    /// 来源不明的普通音频（无 163 key）。
+    Other,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -43,7 +45,7 @@ pub enum SourceKind {
         song_mid: String,
         media_filename: String,
     },
-    /// 扩展名像加密格式但内容是普通音频。
+    /// 普通音频：普通扩展名，或扩展名像加密格式但内容是普通音频。
     Plain(Container),
 }
 
@@ -105,12 +107,16 @@ mod convert;
 mod creds;
 mod enrich;
 mod flac;
+mod track;
+
+pub use track::{read_cover, read_track, split_artists, title_from_file_name, TrackInfo};
 
 pub use enrich::OnlineEnricher;
 
 pub use convert::{
-    convert, find_ffmpeg, strip_timestamps, CancelToken, ConvertError, ConvertOptions,
-    ConvertOutcome, Enricher, Lyrics, NoopEnricher, OutputFormat, Stage, TrackMeta, PART_PREFIX,
+    convert, find_ffmpeg, parse_lrc, strip_timestamps, CancelToken, ConvertError, ConvertOptions,
+    ConvertOutcome, Enricher, LyricLine, Lyrics, NoopEnricher, OutputFormat, Stage, TrackMeta,
+    PART_PREFIX,
 };
 
 pub use creds::{
@@ -210,24 +216,47 @@ fn decrypt_qmc2(
     )
 }
 
-/// 扩展名属于本库能处理的加密格式（NCM / QMC 各变体）。
-pub fn is_candidate(path: &Path) -> bool {
-    let ext = path
-        .extension()
+fn ext_of(path: &Path) -> String {
+    path.extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
-        .to_ascii_lowercase();
-    ext == "ncm" || qmc::V1_EXTS.contains(&ext.as_str()) || qmc::V2_EXTS.contains(&ext.as_str())
+        .to_ascii_lowercase()
+}
+
+/// 普通音频扩展名对应的容器。
+fn plain_container(ext: &str) -> Option<Container> {
+    Some(match ext {
+        "mp3" => Container::Mp3,
+        "flac" => Container::Flac,
+        "ogg" => Container::Ogg,
+        "m4a" => Container::M4a,
+        "wav" => Container::Wav,
+        _ => return None,
+    })
+}
+
+/// 扩展名属于本库能处理的格式（NCM / QMC 各变体 / 普通音频）。
+pub fn is_candidate(path: &Path) -> bool {
+    let ext = ext_of(path);
+    ext == "ncm"
+        || qmc::V1_EXTS.contains(&ext.as_str())
+        || qmc::V2_EXTS.contains(&ext.as_str())
+        || plain_container(&ext).is_some()
 }
 
 pub fn sniff(path: &Path) -> Result<SourceKind, Error> {
     let mut f = File::open(path)?;
     let head = read_head(&mut f, 16)?;
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let ext = ext_of(path);
+    if let Some(want) = plain_container(&ext) {
+        if head.len() < MIN_HEAD {
+            return Err(Error::Incomplete);
+        }
+        return match sniff_container(&head) {
+            Some(c) if c == want => Ok(SourceKind::Plain(c)),
+            _ => Err(Error::Corrupt(format!("内容不是 .{ext} 音频"))),
+        };
+    }
     if head.starts_with(ncm::MAGIC) {
         ncm::read_header(&mut f)?;
         return Ok(SourceKind::Ncm);
@@ -290,6 +319,19 @@ pub fn decrypt(
         SourceKind::QmcV1 => {
             let c = qmc::Cipher::static_v1();
             pump(f, out, |b, o| c.xor(b, o), corrupt)?
+        }
+        SourceKind::Plain(_) if plain_container(&ext_of(path)).is_some() => {
+            let container = pump(f, out, |_, _| {}, corrupt)?;
+            let tags = lofty::read_from_path(path)
+                .map(|t| lofty::file::TaggedFileExt::tags(&t).to_vec())
+                .unwrap_or_default();
+            return Ok(Decrypted {
+                container,
+                meta: ncm::plain_meta(&tags).unwrap_or(EmbeddedMeta {
+                    platform: Platform::Other,
+                    ..qq_meta()
+                }),
+            });
         }
         SourceKind::Plain(_) => pump(f, out, |_, _| {}, corrupt)?,
         SourceKind::QmcV2 { ekey } => decrypt_qmc2(

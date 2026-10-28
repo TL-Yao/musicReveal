@@ -356,14 +356,14 @@ const CONTAINER_KEYS: [&str; 6] = [
     "language",
 ];
 
-fn read_audio(p: &Path) -> Result<TaggedFile, ConvertError> {
+pub(crate) fn read_audio(p: &Path) -> Result<TaggedFile, ConvertError> {
     lofty::probe::Probe::open(p)
         .and_then(|p| Ok(p.guess_file_type()?))
         .and_then(|p| p.read())
         .map_err(|e| ConvertError::Failed(format!("无法读取解密后的音频：{e}")))
 }
 
-fn tag_of(f: &TaggedFile) -> Option<&Tag> {
+pub(crate) fn tag_of(f: &TaggedFile) -> Option<&Tag> {
     f.primary_tag().or_else(|| f.first_tag())
 }
 
@@ -396,17 +396,20 @@ fn merge(e: EmbeddedMeta, tag: Option<&Tag>) -> TrackMeta {
         year: tag.and_then(|t| t.date()).map(|d| d.year),
         track: tag.and_then(|t| t.track()),
         disc: tag.and_then(|t| t.disk()),
-        cover: e.cover.or_else(|| {
-            let pics = tag?.pictures();
-            pics.iter()
-                .find(|p| p.pic_type() == PictureType::CoverFront)
-                .or(pics.first())
-                .map(|p| p.data().to_vec())
-        }),
+        cover: e.cover.or_else(|| front_cover(tag?)),
         lyrics: None,
         song_id: e.song_id,
         platform: e.platform,
     }
+}
+
+/// 优先封面正面，否则第一张图。
+pub(crate) fn front_cover(tag: &Tag) -> Option<Vec<u8>> {
+    let pics = tag.pictures();
+    pics.iter()
+        .find(|p| p.pic_type() == PictureType::CoverFront)
+        .or(pics.first())
+        .map(|p| p.data().to_vec())
 }
 
 /// 写入标签并返回音质描述。
@@ -464,7 +467,7 @@ fn write_tags(p: &Path, m: &TrackMeta, c: &Container) -> Result<String, ConvertE
     Ok(quality(&f, c))
 }
 
-fn quality(f: &TaggedFile, c: &Container) -> String {
+pub(crate) fn quality(f: &TaggedFile, c: &Container) -> String {
     let pr = f.properties();
     match c {
         Container::Flac | Container::Wav => {
@@ -561,6 +564,40 @@ pub(crate) fn merge_lrc(l: &Lyrics) -> String {
             if let Some(t) = tr.get(&ms) {
                 out += &format!("{tag}{t}\n");
             }
+        }
+    }
+    out
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LyricLine {
+    pub ms: u64,
+    pub text: String,
+    pub trans: Option<String>,
+}
+
+/// 带时间的歌词行按时间升序；同一时刻紧挨的第二行是第一行的译文（`merge_lrc` 的输出形状）。
+pub fn parse_lrc(text: &str) -> Vec<LyricLine> {
+    let mut v: Vec<(u64, &str)> = text
+        .lines()
+        .flat_map(|l| {
+            let (tags, body) = split_line(l);
+            let body = body.trim();
+            tags.into_iter()
+                .filter(move |_| !body.is_empty())
+                .map(move |(ms, _)| (ms, body))
+        })
+        .collect();
+    v.sort_by_key(|&(ms, _)| ms);
+    let mut out: Vec<LyricLine> = vec![];
+    for (ms, t) in v {
+        match out.last_mut() {
+            Some(l) if l.ms == ms && l.trans.is_none() => l.trans = Some(t.into()),
+            _ => out.push(LyricLine {
+                ms,
+                text: t.into(),
+                trans: None,
+            }),
         }
     }
     out
