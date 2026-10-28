@@ -1,7 +1,8 @@
 //! 原生播放器：播放队列规则（`PlayQueue`）与 rodio 输出（`Player`）。不依赖 tauri。
 
 use rodio::source::EmptyCallback;
-use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Source};
+pub use rodio::Source;
+use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -194,7 +195,16 @@ struct St {
     gen: u64,
     /// 已放完的曲目编号：曲终回调在音频线程上先记下它，再发消息。
     finished: Arc<AtomicU64>,
-    ended: mpsc::Sender<u64>,
+    ended: mpsc::Sender<Msg>,
+    /// ffmpeg 兜底解码的缓存目录。
+    cache: PathBuf,
+}
+
+/// 发给后台线程的消息，都带曲目编号。
+enum Msg {
+    Ended(u64),
+    /// ffmpeg 兜底解码完成；None 为解不了。
+    Decoded(u64, Option<PathBuf>),
 }
 
 struct Inner {
@@ -217,6 +227,7 @@ impl Player {
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
         let (ended, rx) = mpsc::channel();
+        let cache = data_dir.join("decoded");
         let inner = Arc::new(Inner {
             data_dir,
             on_change,
@@ -232,6 +243,7 @@ impl Player {
                 gen: 0,
                 finished: Arc::new(AtomicU64::new(0)),
                 ended,
+                cache,
             }),
             media: Mutex::new(None),
             hold: Mutex::new(()),
@@ -244,7 +256,8 @@ impl Player {
             drop(inner.hold.lock().unwrap_or_else(|e| e.into_inner()));
             let p = Player(inner);
             match msg {
-                Ok(gen) => p.ended(gen),
+                Ok(Msg::Ended(gen)) => p.ended(gen),
+                Ok(Msg::Decoded(gen, r)) => p.decoded(gen, r),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     if p.lock().playing {
                         p.notify();
@@ -286,6 +299,8 @@ impl Player {
                     s.play();
                     st.playing = true;
                 }
+                // 兜底解码中按暂停：取消；解出的文件留在缓存里，再按播放可复用
+                None if st.playing => st.halt(),
                 None => {
                     if let Some(id) = st.current() {
                         st.load(id);
@@ -385,6 +400,26 @@ impl Player {
             st.prefs.repeat = r;
             if let Some(q) = st.queue.as_mut() {
                 q.set_repeat(r);
+            }
+        });
+    }
+
+    /// 兜底解码完成：还是这首就开播，解不了就跳过。
+    fn decoded(&self, gen: u64, r: Option<PathBuf>) {
+        self.edit(|st| {
+            let Some(id) = st.track.clone().filter(|_| st.gen == gen) else {
+                return;
+            };
+            match r.ok_or(CORRUPT).and_then(|p| decoder(&p)) {
+                Ok(dec) => {
+                    let ms = st.duration_ms;
+                    st.start(&id, dec, ms);
+                }
+                Err(e) => {
+                    if let Some(next) = st.skip(&id, e) {
+                        st.load(next);
+                    }
+                }
             }
         });
     }
@@ -548,45 +583,67 @@ impl St {
         }
         loop {
             let Err(e) = self.open(&id) else { return };
-            // 界面不显示文件名：用歌名
-            let name = Path::new(&id).file_name().map_or(id.clone(), |n| {
-                reveal_core::title_from_file_name(&n.to_string_lossy())
-            });
-            self.error = Some(format!("「{name}」{e}，已跳过"));
-            let q = self.queue.as_mut().expect("load 只在有队列时调用");
-            q.remove(&id);
-            match q.current() {
-                Some(c) => id = c.to_owned(),
-                None => {
-                    self.track = None;
-                    self.duration_ms = 0;
-                    return self.halt();
-                }
+            match self.skip(&id, e) {
+                Some(next) => id = next,
+                None => return,
             }
         }
     }
 
+    /// `id` 播不了：记下原因、移出队列，返回接着该播的；没有了就停。
+    fn skip(&mut self, id: &str, e: &str) -> Option<String> {
+        // 界面不显示文件名：用歌名
+        let name = Path::new(id).file_name().map_or(id.to_owned(), |n| {
+            reveal_core::title_from_file_name(&n.to_string_lossy())
+        });
+        self.error = Some(format!("「{name}」{e}，已跳过"));
+        let q = self.queue.as_mut().expect("只在有队列时调用");
+        q.remove(id);
+        let next = q.current().map(str::to_owned);
+        if next.is_none() {
+            self.track = None;
+            self.duration_ms = 0;
+            self.halt();
+        }
+        next
+    }
+
+    /// 开播 `id`；rodio 解不了的交给后台 ffmpeg 解码（`Msg::Decoded` 回来再播）。
     fn open(&mut self, id: &str) -> Result<(), &'static str> {
         let path = Path::new(id);
-        let file = std::fs::File::open(path).map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => "文件不存在",
-            _ => "无法读取文件",
-        })?;
-        let len = file.metadata().map_or(0, |m| m.len());
-        let mut b = Decoder::builder()
-            .with_data(std::io::BufReader::new(file))
-            .with_byte_len(len)
-            .with_seekable(true);
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            b = b.with_hint(ext);
-        }
-        let dec = b.build().map_err(|_| "文件已损坏或格式不支持")?;
+        let from_tags = || reveal_core::read_track(path).ok().map(|t| t.duration_ms);
+        let dec = match decoder(path) {
+            Ok(d) => d,
+            Err(CORRUPT) => {
+                self.sink = None;
+                self.gen += 1;
+                let (gen, tx, src, cache) = (
+                    self.gen,
+                    self.ended.clone(),
+                    path.to_owned(),
+                    self.cache.clone(),
+                );
+                std::thread::spawn(move || {
+                    let _ = tx.send(Msg::Decoded(gen, transcode(&src, &cache)));
+                });
+                self.track = Some(id.to_owned());
+                self.playing = true;
+                self.duration_ms = from_tags().unwrap_or(0);
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
         let duration_ms = dec
             .total_duration()
             .map(|d| d.as_millis() as u64)
             .filter(|&d| d > 0)
-            .or_else(|| reveal_core::read_track(path).ok().map(|t| t.duration_ms))
+            .or_else(from_tags)
             .unwrap_or(0);
+        self.start(id, dec, duration_ms);
+        Ok(())
+    }
+
+    fn start(&mut self, id: &str, dec: Audio, duration_ms: u64) {
         let out = self.out.as_ref().expect("设备已打开");
         let sink = rodio::Player::connect_new(out.mixer());
         sink.set_volume(self.prefs.volume);
@@ -595,15 +652,88 @@ impl St {
         sink.append(dec);
         sink.append(EmptyCallback::new(Box::new(move || {
             done.store(gen, Ordering::SeqCst);
-            let _ = tx.send(gen);
+            let _ = tx.send(Msg::Ended(gen));
         })));
         self.sink = Some(sink);
         self.track = Some(id.to_owned());
         self.playing = true;
         self.duration_ms = duration_ms;
-        Ok(())
     }
 }
+pub type Audio = Decoder<std::io::BufReader<std::fs::File>>;
+
+/// rodio 直接解码。
+fn decoder(path: &Path) -> Result<Audio, &'static str> {
+    let file = std::fs::File::open(path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => "文件不存在",
+        _ => "无法读取文件",
+    })?;
+    let len = file.metadata().map_or(0, |m| m.len());
+    let mut b = Decoder::builder()
+        .with_data(std::io::BufReader::new(file))
+        .with_byte_len(len)
+        .with_seekable(true);
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        b = b.with_hint(ext);
+    }
+    b.build().map_err(|_| CORRUPT)
+}
+
+const CORRUPT: &str = "文件已损坏或格式不支持";
+
+/// 能播的音源：先 rodio，解不了再 ffmpeg 兜底（同步版，播放器在后台线程里走同一条路）。
+pub fn open_source(path: &Path, cache: &Path) -> Result<Audio, &'static str> {
+    match decoder(path) {
+        Err(CORRUPT) => decoder(&transcode(path, cache).ok_or(CORRUPT)?),
+        r => r,
+    }
+}
+
+/// rodio 解不了的编码（如 Opus）用 ffmpeg 解成 FLAC 放进 `cache`：按路径 + 大小 + mtime 命名可复用，
+/// 只留最近解的一个。ffmpeg 也解不了为 None。
+fn transcode(path: &Path, cache: &Path) -> Option<PathBuf> {
+    use std::hash::{Hash, Hasher};
+    use std::sync::atomic::AtomicU32;
+    static N: AtomicU32 = AtomicU32::new(0);
+    let m = std::fs::metadata(path).ok()?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (path, m.len(), m.modified().ok()).hash(&mut h);
+    let out = cache.join(format!("{:016x}.flac", h.finish()));
+    if out.exists() {
+        return Some(out);
+    }
+    let ff = reveal_core::find_ffmpeg()?;
+    std::fs::create_dir_all(cache).ok()?;
+    for e in std::fs::read_dir(cache).ok()?.flatten() {
+        let _ = std::fs::remove_file(e.path());
+    }
+    let tmp = cache.join(format!(".{}.tmp", N.fetch_add(1, Ordering::Relaxed)));
+    let ok = std::process::Command::new(ff)
+        .args(["-v", "error", "-nostdin", "-y", "-i"])
+        .arg(path)
+        .args([
+            "-map",
+            "0:a:0",
+            "-c:a",
+            "flac",
+            "-compression_level",
+            "0",
+            "-f",
+            "flac",
+        ])
+        .arg(&tmp)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if ok && std::fs::rename(&tmp, &out).is_ok() {
+        return Some(out);
+    }
+    let _ = std::fs::remove_file(&tmp);
+    None
+}
+
 struct Media {
     controls: souvlaki::MediaControls,
     /// 已经交给系统的曲目。

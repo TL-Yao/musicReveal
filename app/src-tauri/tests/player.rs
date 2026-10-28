@@ -279,24 +279,67 @@ fn make(dir: &Path, name: &str) -> Option<String> {
     let ext = p.extension().unwrap().to_str().unwrap();
     if ext == "wav" {
         wav(&p);
-    } else {
-        let codec: &[&str] = match ext {
-            "ogg" => &["-c:a", "vorbis", "-strict", "-2"],
-            "m4a" => &["-c:a", "aac"],
-            _ => &[],
-        };
-        let ok = std::process::Command::new("ffmpeg")
-            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
-            .arg("anullsrc=r=44100:cl=stereo")
-            .args(["-t", "2"])
-            .args(codec)
-            .arg(&p)
-            .status()
-            .ok()?
-            .success();
-        assert!(ok, "ffmpeg 生成 {name} 失败");
+        return Some(p.to_string_lossy().into_owned());
     }
+    let codec: &[&str] = match ext {
+        "ogg" => &["-c:a", "vorbis", "-strict", "-2"],
+        "m4a" => &["-c:a", "aac"],
+        _ => &[],
+    };
+    encode(dir, name, codec, 2.0)
+}
+
+/// 用 ffmpeg 按 `codec` 生成 `secs` 秒静音文件；没有 ffmpeg 返回 None。
+fn encode(dir: &Path, name: &str, codec: &[&str], secs: f32) -> Option<String> {
+    let p = dir.join(name);
+    let ok = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+        .arg("anullsrc=r=44100:cl=stereo")
+        .args(["-t", &secs.to_string()])
+        .args(codec)
+        .arg(&p)
+        .status()
+        .ok()?
+        .success();
+    assert!(ok, "ffmpeg 生成 {name} 失败");
     Some(p.to_string_lossy().into_owned())
+}
+
+const OPUS: &[&str] = &["-c:a", "libopus", "-ar", "48000"];
+const ALAC: &[&str] = &["-c:a", "alac"];
+
+/// 资料库收的每种编码都能得到可播音源（rodio 解不了的经 ffmpeg 兜底），时长对得上。不需要音频设备。
+#[test]
+fn every_library_codec_decodes_to_a_playable_source() {
+    let t = Tmp::new("codecs");
+    let cache = t.0.join("cache");
+    let cases: [(&str, &[&str]); 7] = [
+        ("a.wav", &[]),
+        ("a.flac", &[]),
+        ("a.mp3", &[]),
+        ("aac.m4a", &["-c:a", "aac"]),
+        ("alac.m4a", ALAC),
+        ("vorbis.ogg", &["-c:a", "vorbis", "-strict", "-2"]),
+        ("opus.ogg", OPUS),
+    ];
+    let mut bad = vec![];
+    for (name, codec) in cases {
+        let Some(p) = encode(&t.0, name, codec, 0.5) else {
+            eprintln!("没有 ffmpeg，跳过");
+            return;
+        };
+        match open_source(Path::new(&p), &cache) {
+            Ok(src) => {
+                let per_sec = src.sample_rate().get() as f64 * src.channels().get() as f64;
+                let secs = src.count() as f64 / per_sec;
+                if !(0.4..0.65).contains(&secs) {
+                    bad.push(format!("{name}：时长 {secs:.3}s"));
+                }
+            }
+            Err(e) => bad.push(format!("{name}：{e}")),
+        }
+    }
+    assert!(bad.is_empty(), "{bad:#?}");
 }
 
 fn quiet(t: &Tmp, on_change: Box<dyn Fn(PlayerState) + Send + Sync>) -> Player {
@@ -319,6 +362,11 @@ fn wait(p: &Player, secs: u64, f: impl Fn(&PlayerState) -> bool) -> PlayerState 
 }
 
 fn plays_seeks_and_advances(ext: &str) {
+    let make = |dir: &Path, name: &str| make(dir, name);
+    plays_seeks_and_advances_with(ext, &make);
+}
+
+fn plays_seeks_and_advances_with(ext: &str, make: &dyn Fn(&Path, &str) -> Option<String>) {
     let _g = audio();
     let t = Tmp::new(ext);
     let (Some(a), Some(b)) = (
@@ -338,8 +386,8 @@ fn plays_seeks_and_advances(ext: &str) {
     );
     p.play(vec![a.clone(), b.clone()], 0).unwrap();
     let before = pushes.load(Ordering::Relaxed);
-    std::thread::sleep(Duration::from_millis(1200));
-    let s = p.state();
+    // ffmpeg 兜底解码时开头会晚一点
+    let s = wait(&p, 3, |s| s.position_ms >= 1000);
     assert!(
         s.playing && s.track_id.as_deref() == Some(a.as_str()),
         "{s:?}"
@@ -394,6 +442,48 @@ fn ogg_plays_seeks_and_advances() {
 #[ignore = "需要音频设备"]
 fn m4a_plays_seeks_and_advances() {
     plays_seeks_and_advances("m4a");
+}
+
+#[test]
+#[ignore = "需要音频设备"]
+fn alac_m4a_plays_seeks_and_advances() {
+    plays_seeks_and_advances_with("m4a", &|d, n| encode(d, n, ALAC, 2.0));
+}
+
+#[test]
+#[ignore = "需要音频设备"]
+fn opus_ogg_plays_seeks_and_advances() {
+    plays_seeks_and_advances_with("ogg", &|d, n| encode(d, n, OPUS, 2.0));
+}
+
+/// 兜底解码还没完就切走：解码结果作废，不把播放拉回那首。
+#[test]
+#[ignore = "需要音频设备"]
+fn switching_away_during_fallback_decode_discards_it() {
+    let _g = audio();
+    let t = Tmp::new("decodeskip");
+    let Some(o) = encode(&t.0, "o.ogg", OPUS, 30.0) else {
+        return;
+    };
+    let w = make(&t.0, "w.wav").unwrap();
+    let p = quiet(&t, noop());
+    p.play(vec![o.clone(), w.clone()], 0).unwrap();
+    let s = p.state();
+    assert_eq!(s.track_id.as_deref(), Some(o.as_str()), "{s:?}");
+    assert!(
+        (29_000..=31_000).contains(&s.duration_ms),
+        "时长按原文件：{s:?}"
+    );
+    p.next();
+    std::thread::sleep(Duration::from_millis(1500));
+    let s = p.state();
+    assert!(
+        s.playing && s.track_id.as_deref() == Some(w.as_str()),
+        "{s:?}"
+    );
+    // 放的确实是 2 秒的 w：到点就停（作废的 30 秒解码若被接上会一直放）
+    let s = wait(&p, 3, |s| !s.playing);
+    assert_eq!((s.track_id.as_deref(), s.error), (Some(w.as_str()), None));
 }
 
 #[test]
@@ -524,8 +614,9 @@ fn missing_or_corrupt_tracks_are_skipped_with_a_reason() {
     );
     assert!(s.error.as_deref().unwrap().contains("不存在"), "{s:?}");
 
+    // 损坏文件先交给 ffmpeg 兜底，它也解不了才跳过
     p.play(vec![bad.clone(), good.clone()], 0).unwrap();
-    let s = p.state();
+    let s = wait(&p, 5, |s| s.track_id.as_deref() != Some(bad.as_str()));
     assert!(
         s.playing && s.track_id.as_deref() == Some(good.as_str()),
         "{s:?}"
@@ -548,7 +639,7 @@ fn all_tracks_failing_stops_playback() {
     let gone = t.0.join("gone.flac").to_string_lossy().into_owned();
     let p = quiet(&t, noop());
     p.play(vec![gone, bad(&t.0)], 0).unwrap();
-    let s = p.state();
+    let s = wait(&p, 5, |s| s.track_id.is_none());
     assert!(
         !s.playing && s.track_id.is_none() && s.error.is_some(),
         "{s:?}"
