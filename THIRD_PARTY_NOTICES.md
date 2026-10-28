@@ -24,7 +24,9 @@ musicReveal 本身以 MIT 许可发布，见 [LICENSE](LICENSE)。它使用或�
 
 ## 3. Rust 依赖
 
-Rust 依赖（Tauri、tokio、lofty、aes、reqwest 等）的许可以 MIT、Apache-2.0 及其组合为主，另有少量 BSD-3-Clause、ISC、Zlib、Unicode-3.0、MPL-2.0 等宽松或弱著作权许可。完整清单与许可全文由 [cargo-about](https://github.com/EmbarkStudios/cargo-about) 根据 `Cargo.lock` 生成：
+Rust 依赖（Tauri、tokio、lofty、aes、reqwest，以及播放器用的 rodio、cpal、souvlaki、objc2-foundation 等）的许可以 MIT、Apache-2.0 及其组合为主，另有少量 BSD-3-Clause、ISC、Zlib、Unicode-3.0、MPL-2.0 等宽松或弱著作权许可。
+
+其中以 MPL-2.0 发布的组件（rodio 用于解码音频的 symphonia 系列，以及 Tauri 间接依赖的 cssparser、selectors、dtoa-short、option-ext 等）均未经修改，原样编译进应用。按 MPL-2.0 的要求，生成的清单在每个 MPL-2.0 组件下列出了对应版本源码的取得方式：crates.io 上该版本的下载地址（`https://crates.io/api/v1/crates/<名称>/<版本>/download`）与源码仓库地址。完整清单与许可全文由 [cargo-about](https://github.com/EmbarkStudios/cargo-about) 根据 `Cargo.lock` 生成：
 
 ```sh
 cargo install --locked cargo-about

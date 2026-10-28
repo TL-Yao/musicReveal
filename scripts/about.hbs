@@ -6,6 +6,14 @@
 ## {{{name}}}
 
 使用此许可的 crate：{{#each used_by}}{{crate.name}} {{crate.version}}{{#unless @last}}，{{/unless}}{{/each}}
+{{#if (eq id "MPL-2.0")}}
+
+以上 MPL-2.0 组件均未经修改，原样编译进 musicReveal。对应版本的源码可从 crates.io 下载（.crate 文件即 gzip 压缩的 tar 源码包），或到各自仓库取得：
+
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}：<https://crates.io/api/v1/crates/{{crate.name}}/{{crate.version}}/download>{{#if crate.repository}}，仓库 <{{crate.repository}}>{{/if}}
+{{/each}}
+{{/if}}
 
 ```
 {{{text}}}
