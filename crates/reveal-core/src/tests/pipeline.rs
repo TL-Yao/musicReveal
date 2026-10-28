@@ -321,3 +321,32 @@ async fn incomplete_source_is_reported() {
         r.res
     );
 }
+
+#[tokio::test]
+async fn lyrics_are_embedded_in_every_format() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("pl-lyr4");
+    let cases: [(&str, &[&str]); 4] = [
+        ("flac", &["-c:a", "flac"]),
+        ("ogg", &["-ac", "2", "-c:a", "vorbis", "-strict", "-2"]),
+        ("m4a", &["-c:a", "aac", "-f", "ipod"]),
+        ("mp3", &["-c:a", "libmp3lame", "-b:a", "128k"]),
+    ];
+    for (ext, args) in cases {
+        let plain = gen(&ff, &t.0.join(format!("p.{ext}")), args);
+        let input = t.write(&format!("{ext}.ncm"), &build_ncm(&plain, b"k", META, None));
+        let out = t.0.join(format!("out-{ext}"));
+        std::fs::create_dir_all(&out).unwrap();
+        let o = run(&input, &out, OutputFormat::Original, &LyricEnricher, None)
+            .await
+            .res
+            .unwrap();
+        assert_eq!(o.output.extension().unwrap(), ext);
+        let f = read_back(&o.output);
+        let tag = f.primary_tag().unwrap();
+        let lyr = tag
+            .get_string(ItemKey::Lyrics)
+            .or(tag.get_string(ItemKey::UnsyncLyrics));
+        assert_eq!(lyr, Some("第一句\nsecond"), "{ext}");
+    }
+}

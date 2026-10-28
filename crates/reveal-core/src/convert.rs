@@ -334,7 +334,13 @@ fn write_tags(p: &Path, m: &TrackMeta, c: &Container) -> Result<String, ConvertE
         t.set_disk(v);
     }
     if let Some(l) = &m.lyrics {
-        t.insert_text(ItemKey::Lyrics, strip_timestamps(&l.lrc));
+        // ID3v2 只认 USLT（UnsyncLyrics），其余格式用 Lyrics
+        let key = if t.tag_type() == lofty::tag::TagType::Id3v2 {
+            ItemKey::UnsyncLyrics
+        } else {
+            ItemKey::Lyrics
+        };
+        t.insert_text(key, strip_timestamps(&l.lrc));
     }
     if let Some(cover) = &m.cover {
         if let Ok(mut pic) = Picture::from_reader(&mut &cover[..]) {
@@ -374,47 +380,74 @@ fn quality(f: &TaggedFile, c: &Container) -> String {
     }
 }
 
-/// 去掉 LRC 时间轴与 `[ar:..]` 等标记，只留歌词正文。
-fn strip_timestamps(lrc: &str) -> String {
+/// `mm:ss[.f…]` → 毫秒；小数位按毫秒对齐（`.5` = `.50` = `.500`）。
+fn parse_time(s: &str) -> Option<u64> {
+    let (m, rest) = s.split_once(':')?;
+    let (sec, frac) = rest.split_once('.').unwrap_or((rest, ""));
+    let digits = |x: &str| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit());
+    if !digits(m) || !digits(sec) || !(frac.is_empty() || digits(frac)) {
+        return None;
+    }
+    let ms: u64 = format!("{frac:0<3}")[..3].parse().ok()?;
+    Some(m.parse::<u64>().ok()? * 60_000 + sec.parse::<u64>().ok()? * 1000 + ms)
+}
+
+/// 行首的时间标签（毫秒, 原文）与剩余正文。
+fn split_line(l: &str) -> (Vec<(u64, &str)>, &str) {
+    let mut tags = vec![];
+    let mut r = l.trim_start();
+    while let Some((inner, rest)) = r.strip_prefix('[').and_then(|x| x.split_once(']')) {
+        let Some(ms) = parse_time(inner) else { break };
+        tags.push((ms, &r[..inner.len() + 2]));
+        r = rest;
+    }
+    (tags, r)
+}
+
+/// `[ar:xx]` 这类元信息行。
+fn is_meta(l: &str) -> bool {
+    let l = l.trim();
+    l.strip_prefix('[')
+        .and_then(|x| x.strip_suffix(']'))
+        .and_then(|x| x.split_once(':'))
+        .is_some_and(|(k, _)| !k.is_empty() && k.chars().all(|c| c.is_ascii_alphabetic()))
+}
+
+/// 去掉 LRC 时间轴与元信息行，只留歌词正文。
+pub(crate) fn strip_timestamps(lrc: &str) -> String {
     lrc.lines()
-        .map(|l| {
-            let mut r = l.trim();
-            while let (true, Some(end)) = (r.starts_with('['), r.find(']')) {
-                r = r[end + 1..].trim_start();
-            }
-            r
+        .filter_map(|l| {
+            let (tags, text) = split_line(l);
+            (!tags.is_empty() || !is_meta(l)).then(|| text.trim())
         })
         .filter(|l| !l.is_empty())
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-fn time_tag(l: &str) -> Option<&str> {
-    let end = l.find(']')?;
-    l[1..end]
-        .starts_with(|c: char| c.is_ascii_digit())
-        .then(|| &l[..=end])
-        .filter(|_| l.starts_with('['))
-}
-
-/// 原文每行之后紧跟同时间戳的译文。
-fn merge_lrc(l: &Lyrics) -> String {
-    let tr: std::collections::HashMap<&str, &str> = l
-        .translated_lrc
-        .iter()
-        .flat_map(|t| t.lines())
-        .filter_map(|x| {
-            let tag = time_tag(x.trim())?;
-            let text = x.trim()[tag.len()..].trim();
-            (!text.is_empty()).then_some((tag, text))
-        })
-        .collect();
+/// 原文每个时间点之后紧跟同一时刻（按毫秒）的译文；一行多时间戳展开成多行。
+pub(crate) fn merge_lrc(l: &Lyrics) -> String {
+    let mut tr = std::collections::HashMap::new();
+    for line in l.translated_lrc.iter().flat_map(|t| t.lines()) {
+        let (tags, text) = split_line(line);
+        if !text.trim().is_empty() {
+            for (ms, _) in tags {
+                tr.insert(ms, text.trim());
+            }
+        }
+    }
     let mut out = String::new();
     for line in l.lrc.lines() {
-        out += line;
-        out += "\n";
-        if let Some(text) = time_tag(line.trim()).and_then(|t| tr.get(t).map(|x| (t, x))) {
-            out += &format!("{}{}\n", text.0, text.1);
+        let (tags, text) = split_line(line);
+        if tags.is_empty() {
+            out += line;
+            out += "\n";
+        }
+        for (ms, tag) in tags {
+            out += &format!("{tag}{text}\n");
+            if let Some(t) = tr.get(&ms) {
+                out += &format!("{tag}{t}\n");
+            }
         }
     }
     out

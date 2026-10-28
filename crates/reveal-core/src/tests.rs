@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 mod creds;
 mod flac_trim;
+mod lyrics;
 mod naming;
 mod pipeline;
 
