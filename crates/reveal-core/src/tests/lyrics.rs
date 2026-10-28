@@ -63,7 +63,7 @@ fn extreme_time_tags_are_not_timestamps_and_never_panic() {
     for l in [
         format!("[{max}:00]词"),
         format!("[{max}:{max}.999]词"),
-        format!("[307445734561825:59.999]词"),
+        "[307445734561825:59.999]词".to_string(),
         format!("[00:{max}]词"),
         "[99999999999999999999999:00]词".to_string(),
     ] {
