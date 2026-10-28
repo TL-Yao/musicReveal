@@ -291,6 +291,9 @@ fn api(id: &crate::SongId) -> Api {
     }
 }
 
+pub(crate) const JSON_MAX: usize = 2 << 20;
+const COVER_MAX: usize = 8 << 20;
+
 /// 按 `TrackMeta.song_id` 精确查 QQ / 网易云公开接口；不带登录凭据。
 pub struct OnlineEnricher {
     http: reqwest::Client,
@@ -312,23 +315,42 @@ impl OnlineEnricher {
         Self { http }
     }
 
-    async fn get(&self, url: &str, referer: &str) -> Result<Vec<u8>, String> {
-        let r = self
+    /// 只收 2xx；边读边计数，超过 `limit` 立即放弃。
+    pub(crate) async fn get(
+        &self,
+        url: &str,
+        referer: &str,
+        limit: usize,
+    ) -> Result<Vec<u8>, String> {
+        let mut r = self
             .http
             .get(url)
             .header(reqwest::header::REFERER, referer)
             .send()
             .await
-            .and_then(|r| r.error_for_status())
             .map_err(|e| e.to_string())?;
-        Ok(r.bytes().await.map_err(|e| e.to_string())?.to_vec())
+        if !r.status().is_success() {
+            return Err(format!("HTTP {}", r.status()));
+        }
+        let too_big = || format!("响应过大（超过 {} 字节）", limit);
+        if r.content_length().is_some_and(|n| n > limit as u64) {
+            return Err(too_big());
+        }
+        let mut body = Vec::new();
+        while let Some(c) = r.chunk().await.map_err(|e| e.to_string())? {
+            if body.len() + c.len() > limit {
+                return Err(too_big());
+            }
+            body.extend_from_slice(&c);
+        }
+        Ok(body)
     }
 
-    /// 依次试，取第一个 2xx、像张图（> 1KB）且不超过 8MB 的。
-    async fn cover(&self, urls: &[String], referer: &str) -> Option<Vec<u8>> {
+    /// 依次试，取第一个成功且像张图（> 1KB）的；失败、超限都换下一个。
+    pub(crate) async fn cover(&self, urls: &[String], referer: &str) -> Option<Vec<u8>> {
         for u in urls {
-            if let Ok(b) = self.get(u, referer).await {
-                if (1025..=8 << 20).contains(&b.len()) {
+            if let Ok(b) = self.get(u, referer, COVER_MAX).await {
+                if b.len() > 1024 {
                     return Some(b);
                 }
             }
@@ -344,8 +366,8 @@ impl crate::Enricher for OnlineEnricher {
             return Ok(());
         };
         let (song, lyric) = tokio::join!(
-            self.get(&api.song_url, api.referer),
-            self.get(&api.lyric_url, api.referer)
+            self.get(&api.song_url, api.referer, JSON_MAX),
+            self.get(&api.lyric_url, api.referer, JSON_MAX)
         );
         let mut errs = vec![];
         match song.and_then(|b| (api.song)(&b, meta)) {

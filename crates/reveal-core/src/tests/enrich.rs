@@ -364,3 +364,95 @@ fn qq_lyric_decodes_html5_named_entities() {
     let l = crate::enrich::qq_lyric(body.as_bytes()).unwrap().unwrap();
     assert_eq!(l.lrc, "[00:01.00]Café – toi… ♥ 'x' &bogus; a&b");
 }
+
+/// 只绑 127.0.0.1 随机端口的一次性 HTTP 服务；每个连接回报（路径, 正文是否完整写出）。
+fn serve() -> (String, std::sync::mpsc::Receiver<(String, bool)>) {
+    use std::io::{Read, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for s in l.incoming() {
+            let (mut s, tx) = (s.unwrap(), tx.clone());
+            std::thread::spawn(move || {
+                let mut req = vec![];
+                let mut b = [0u8; 1024];
+                while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let n = s.read(&mut b).unwrap();
+                    if n == 0 {
+                        return;
+                    }
+                    req.extend_from_slice(&b[..n]);
+                }
+                let req = String::from_utf8_lossy(&req);
+                let path = req.split(' ').nth(1).unwrap_or("").to_owned();
+                const BIG: usize = 16 << 20;
+                let (head, len) = match path.as_str() {
+                    "/big" => (
+                        "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_owned(),
+                        BIG,
+                    ),
+                    "/biglen" => (
+                        format!("HTTP/1.1 200 OK\r\nContent-Length: {BIG}\r\n\r\n"),
+                        BIG,
+                    ),
+                    "/302" => (
+                        "HTTP/1.1 302 Found\r\nContent-Length: 2000\r\n\r\n".to_owned(),
+                        2000,
+                    ),
+                    _ => (
+                        "HTTP/1.1 200 OK\r\nContent-Length: 2000\r\n\r\n".to_owned(),
+                        2000,
+                    ),
+                };
+                let mut ok = s.write_all(head.as_bytes()).is_ok();
+                let chunk = vec![b'x'; 64 << 10];
+                let mut sent = 0;
+                while ok && sent < len {
+                    let n = chunk.len().min(len - sent);
+                    ok = s.write_all(&chunk[..n]).is_ok();
+                    sent += n;
+                }
+                let _ = tx.send((path, ok));
+            });
+        }
+    });
+    (base, rx)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn oversized_bodies_are_abandoned_while_streaming() {
+    let (base, rx) = serve();
+    let e = crate::OnlineEnricher::new();
+    let r = e
+        .get(&format!("{base}/big"), "", crate::enrich::JSON_MAX)
+        .await;
+    assert!(r.is_err_and(|e| e.contains("过大")));
+    // 客户端读到上限就断开：服务端 16MiB 没能写完
+    let done = rx.recv_timeout(std::time::Duration::from_secs(20));
+    assert_eq!(done.unwrap(), ("/big".into(), false));
+
+    let r = e
+        .get(&format!("{base}/biglen"), "", crate::enrich::JSON_MAX)
+        .await;
+    assert!(r.is_err_and(|e| e.contains("过大")));
+
+    let r = e
+        .get(&format!("{base}/ok"), "", crate::enrich::JSON_MAX)
+        .await;
+    assert_eq!(r.unwrap().len(), 2000);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cover_skips_non_2xx_and_oversized_candidates() {
+    let (base, _rx) = serve();
+    let e = crate::OnlineEnricher::new();
+    assert!(e.get(&format!("{base}/302"), "", 1 << 20).await.is_err());
+    let urls = [
+        format!("{base}/302"),
+        format!("{base}/big"),
+        format!("{base}/ok"),
+    ];
+    assert_eq!(e.cover(&urls, "").await, Some(vec![b'x'; 2000]));
+    assert_eq!(e.cover(&urls[..2], "").await, None);
+}
