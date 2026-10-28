@@ -139,3 +139,11 @@ fn parse_lrc_round_trips_merge_lrc() {
         .iter()
         .all(|l| l.trans.is_none()));
 }
+
+#[test]
+fn parse_lrc_ignores_leading_bom() {
+    assert_eq!(
+        parse_lrc("\u{feff}[00:01.00]第一句\n[00:02.00]第二句"),
+        [line(1000, "第一句", None), line(2000, "第二句", None)]
+    );
+}

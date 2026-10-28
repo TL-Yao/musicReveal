@@ -1,9 +1,8 @@
 //! 资料库用：读输出文件夹里普通音频的标签、封面，以及由文件名推歌名。
 
-use crate::convert::{front_cover, quality, read_audio, tag_of};
-use crate::{Container, Error};
+use crate::convert::{front_cover, merge, quality, read_audio, tags_of};
+use crate::{Container, EmbeddedMeta, Error, Platform};
 use lofty::file::{AudioFile, FileType, TaggedFileExt};
-use lofty::prelude::{Accessor, ItemKey};
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -23,19 +22,17 @@ pub struct TrackInfo {
 pub fn read_track(path: &Path) -> Result<TrackInfo, Error> {
     std::fs::File::open(path)?;
     let f = read_audio(path).map_err(|e| Error::Corrupt(e.to_string()))?;
-    let tag = tag_of(&f);
-    let s = |k: ItemKey| {
-        tag.and_then(|t| t.get_string(k))
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
+    let empty = EmbeddedMeta {
+        title: None,
+        artists: vec![],
+        album: None,
+        cover: None,
+        song_id: None,
+        platform: Platform::Other,
     };
+    let m = merge(empty, &tags_of(&f));
     let mut artists: Vec<String> = vec![];
-    for a in tag
-        .into_iter()
-        .flat_map(|t| t.get_strings(ItemKey::TrackArtist))
-        .flat_map(split_artists)
-    {
+    for a in m.artists.iter().flat_map(|a| split_artists(a)) {
         if !artists.contains(&a) {
             artists.push(a);
         }
@@ -51,24 +48,26 @@ pub fn read_track(path: &Path) -> Result<TrackInfo, Error> {
     };
     let quality = match container {
         Some(c) => quality(&f, &c),
-        None => format!("{}k", f.properties().audio_bitrate().unwrap_or(0)),
+        None => format!("{:?}", f.file_type()),
     };
     Ok(TrackInfo {
-        title: s(ItemKey::TrackTitle),
+        title: m.title.map(|s| s.trim().to_owned()),
         artists,
-        album: s(ItemKey::AlbumTitle),
-        album_artist: s(ItemKey::AlbumArtist),
-        year: tag.and_then(|t| t.date()).map(|d| d.year.into()),
-        track: tag.and_then(|t| t.track()),
-        disc: tag.and_then(|t| t.disk()),
+        album: m.album.map(|s| s.trim().to_owned()),
+        album_artist: m.album_artist.map(|s| s.trim().to_owned()),
+        year: m.year.map(u32::from),
+        track: m.track,
+        disc: m.disc,
         duration_ms: f.properties().duration().as_millis() as u64,
         quality,
-        has_cover: tag.is_some_and(|t| !t.pictures().is_empty()),
+        has_cover: m.cover.is_some(),
     })
 }
 
 pub fn read_cover(path: &Path) -> Option<Vec<u8>> {
-    front_cover(tag_of(&read_audio(path).ok()?)?)
+    tags_of(&read_audio(path).ok()?)
+        .into_iter()
+        .find_map(front_cover)
 }
 
 /// 按 `, ` `/` `、` `;` 拆歌手。
