@@ -1109,3 +1109,63 @@ async fn start_is_fast_with_5000_candidates_and_50000_history() {
     assert!(took < Duration::from_secs(1), "start 用了 {took:?}");
     e.shutdown().await;
 }
+
+#[tokio::test]
+async fn song_stays_held_while_any_overlapping_question_is_open() {
+    let r = Rig::new("overlap").await;
+    let lib = r.t.dir("lib");
+    let sub = lib.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    let old = put(&sub, "old.ncm", b"x");
+    let (lib_s, sub_s) = (lib.to_string_lossy(), sub.to_string_lossy());
+    assert_eq!(r.eng.add_watch_folder(&lib_s).unwrap().existing, 1);
+    assert_eq!(r.eng.add_watch_folder(&sub_s).unwrap().existing, 1);
+    r.eng.ignore_existing(&lib_s);
+    append(&old, b"2");
+    for _ in 0..3 {
+        r.eng.tick();
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(r.job("old.ncm").is_none());
+    assert!(r.fake.calls().is_empty());
+    // 最后一次明确选择为准：子目录那张选「全部转换」就转
+    r.eng.convert_existing(&sub_s);
+    settle(&r.eng);
+    r.wait("old.ncm", JobState::Done).await;
+    assert_eq!(r.fake.calls(), vec!["old.ncm"]);
+}
+
+#[tokio::test]
+async fn ignored_song_that_changed_while_asked_is_not_caught_up_after_restart() {
+    let r = Rig::new("ignorechanged").await;
+    let lib = r.t.dir("lib");
+    let old = put(&lib, "old.ncm", b"x");
+    let lib_s = lib.to_string_lossy();
+    assert_eq!(r.eng.add_watch_folder(&lib_s).unwrap().existing, 1);
+    append(&old, b"2");
+    r.eng.tick();
+    r.eng.ignore_existing(&lib_s);
+    r.eng.shutdown().await;
+    let e2 = engine(&r.t, &r.fake).await;
+    assert!(notices(&e2, NoticeKind::CaughtUp).is_empty());
+    assert!(notices(&e2, NoticeKind::ExistingSongs).is_empty());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(r.fake.calls().is_empty());
+}
+
+#[tokio::test]
+async fn open_overlapping_question_survives_restart() {
+    let r = Rig::new("overlaprestart").await;
+    let lib = r.t.dir("lib");
+    let sub = lib.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    put(&sub, "old.ncm", b"x");
+    r.eng.add_watch_folder(&lib.to_string_lossy()).unwrap();
+    r.eng.add_watch_folder(&sub.to_string_lossy()).unwrap();
+    r.eng.ignore_existing(&lib.to_string_lossy());
+    r.eng.shutdown().await;
+    let e2 = engine(&r.t, &r.fake).await;
+    let asked = notices(&e2, NoticeKind::ExistingSongs);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].count, 1);
+}

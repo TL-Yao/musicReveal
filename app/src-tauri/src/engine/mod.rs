@@ -91,8 +91,8 @@ struct State {
     seen: HashMap<PathBuf, Stat>,
     /// 源路径 → 最近一条任务。
     live: HashMap<PathBuf, u64>,
-    /// 「已有旧歌」还没回答的文件：用户选择前一律不处理。
-    held: HashSet<PathBuf>,
+    /// 「已有旧歌」还没回答的文件 → 含它的未回答询问张数：只要还有一张没回答就不处理。
+    held: HashMap<PathBuf, u32>,
     /// 通知及其涉及的文件。
     notices: Vec<(Notice, Vec<Key>)>,
     /// 不可访问的监听文件夹及原因。
@@ -283,7 +283,9 @@ impl State {
 
     /// 问用户要不要转换这批旧歌；回答前它们一律不处理。
     fn ask(&mut self, folder: &Path, files: Vec<Key>) {
-        self.held.extend(files.iter().map(|k| k.path.clone()));
+        for k in &files {
+            *self.held.entry(k.path.clone()).or_default() += 1;
+        }
         self.history.pending.push(Pending {
             folder: folder.to_path_buf(),
             files: files.iter().map(|k| k.path.clone()).collect(),
@@ -323,7 +325,12 @@ impl State {
             !hit
         });
         for k in &out {
-            self.held.remove(&k.path);
+            if let Some(n) = self.held.get_mut(&k.path) {
+                *n -= 1;
+                if *n == 0 {
+                    self.held.remove(&k.path);
+                }
+            }
         }
         out
     }
@@ -415,7 +422,7 @@ impl State {
             return;
         }
         self.seen.insert(p.clone(), s);
-        if self.held.contains(&p) {
+        if self.held.contains_key(&p) {
             return;
         }
         match self.live_of(&p) {
@@ -481,7 +488,7 @@ impl Engine {
                 running: None,
                 seen: HashMap::new(),
                 live: HashMap::new(),
-                held: HashSet::new(),
+                held: HashMap::new(),
                 notices: vec![],
                 folder_err: HashMap::new(),
                 qq: QqStatus::LoggedOut,
@@ -585,13 +592,10 @@ impl Engine {
                 let mut held = vec![];
                 for (path, stat) in st.apply_scan(&folder, r) {
                     st.seen.insert(path.clone(), stat);
-                    if st.history.known(&path, stat) {
-                        continue;
-                    }
                     let k = Key { path, stat };
                     if asked.contains(&k.path) {
                         held.push(k);
-                    } else {
+                    } else if !st.history.known(&k.path, stat) {
                         caught.push((k, folder.clone()));
                     }
                 }
@@ -874,9 +878,14 @@ impl Engine {
         self.persist();
     }
 
+    /// 按忽略这一刻的磁盘样子记下：询问期间变过的也不再补转；之后再变（重新下载）照常转换。
     pub fn ignore_existing(&self, path: &str) {
         self.edit(|st| {
-            let files = st.take_notice(Path::new(path));
+            let files = st
+                .take_notice(Path::new(path))
+                .into_iter()
+                .filter_map(|k| scan::stat(&k.path).map(|stat| Key { stat, ..k }))
+                .collect();
             st.history.ignore(files);
         });
         self.persist();
