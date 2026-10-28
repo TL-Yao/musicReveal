@@ -128,3 +128,23 @@ fn real_musicex_sniffs() {
         other => panic!("{other:?}"),
     }
 }
+
+#[test]
+#[ignore]
+fn all_local_ncm_files_have_sniffable_container() {
+    let mut stats = std::collections::BTreeMap::<String, usize>::new();
+    let mut failed = Vec::new();
+    for e in std::fs::read_dir(home("Music/网易云音乐")).unwrap() {
+        let p = e.unwrap().path();
+        if p.extension().and_then(|x| x.to_str()) != Some("ncm") {
+            continue;
+        }
+        // 只要容器判定与完整解密是否成功，输出丢进 sink，不落盘
+        match sniff(&p).and_then(|k| decrypt(&p, &k, None, &mut std::io::sink())) {
+            Ok(d) => *stats.entry(format!("{:?}", d.container)).or_default() += 1,
+            Err(err) => failed.push(format!("{}: {err}", p.display())),
+        }
+    }
+    println!("NCM 统计：{stats:?}，失败 {}：{failed:#?}", failed.len());
+    assert!(failed.is_empty());
+}
