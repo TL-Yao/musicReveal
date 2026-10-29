@@ -66,6 +66,25 @@ impl PlayQueue {
         self.order.get(self.pos).map(String::as_str)
     }
 
+    /// 实际播放顺序。
+    pub fn order(&self) -> &[String] {
+        &self.order
+    }
+
+    /// 当前曲在 `order()` 里的下标；等于长度表示没有当前曲。
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+
+    /// 跳到 `order()[i]`，顺序不变；越界返回 None 且什么都不改。
+    pub fn jump(&mut self, i: usize) -> Option<&str> {
+        if i >= self.order.len() {
+            return None;
+        }
+        self.pos = i;
+        self.current()
+    }
+
     /// 前进一首；`auto` 为曲终自动前进。到队尾且不循环时返回 None，当前曲不变。
     pub fn next(&mut self, auto: bool) -> Option<&str> {
         if self.pos >= self.order.len() {
@@ -169,6 +188,16 @@ pub struct PlayerState {
     pub repeat: Repeat,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// 队列内容或顺序每变一次加一；界面据此重新拉 `Player::queue`。
+    pub queue_rev: u64,
+}
+
+/// 播放队列：实际播放顺序与当前曲下标（`pos == ids.len()` 为没有当前曲）。
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueView {
+    pub ids: Vec<String>,
+    pub pos: usize,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -192,6 +221,7 @@ impl Default for Prefs {
 struct St {
     prefs: Prefs,
     queue: Option<PlayQueue>,
+    queue_rev: u64,
     track: Option<String>,
     playing: bool,
     duration_ms: u64,
@@ -265,6 +295,7 @@ impl Player {
             st: Mutex::new(St {
                 prefs,
                 queue: None,
+                queue_rev: 0,
                 track: None,
                 playing: false,
                 duration_ms: 0,
@@ -311,6 +342,7 @@ impl Player {
             let q = PlayQueue::new(ids, index, st.prefs.shuffle, st.prefs.repeat);
             let id = q.current().map(str::to_owned);
             st.queue = Some(q);
+            st.queue_rev += 1;
             if let Some(id) = id {
                 st.load(id);
             }
@@ -395,11 +427,52 @@ impl Player {
         });
     }
 
+    pub fn queue(&self) -> QueueView {
+        let st = self.lock();
+        st.queue.as_ref().map_or_else(QueueView::default, |q| QueueView {
+            ids: q.order().to_vec(),
+            pos: q.pos(),
+        })
+    }
+
+    /// 跳到队列（实际播放顺序）第 `index` 首播放，不重排；越界不动。
+    pub fn jump(&self, index: usize) {
+        self.edit(|st| {
+            let Some(id) = st.queue.as_mut().and_then(|q| q.jump(index)) else {
+                return;
+            };
+            let id = id.to_owned();
+            st.error = None;
+            st.load(id);
+        });
+    }
+
+    /// 曲目没了（移到废纸篓）：移出队列；是当前曲就接着播它之后的那首，没有了就停。
+    pub fn remove(&self, id: &str) {
+        self.edit(|st| {
+            let Some(q) = st.queue.as_mut() else { return };
+            q.remove(id);
+            st.queue_rev += 1;
+            if st.track.as_deref() != Some(id) {
+                return;
+            }
+            match st.current() {
+                Some(next) => st.load(next),
+                None => {
+                    st.track = None;
+                    st.duration_ms = 0;
+                    st.halt();
+                }
+            }
+        });
+    }
+
     /// 曲目换了路径（格式互转）：队列与当前曲跟过去，正在放的不打断。
     pub fn rename(&self, from: &str, to: &str) {
         self.edit(|st| {
             if let Some(q) = st.queue.as_mut() {
                 q.rename(from, to);
+                st.queue_rev += 1;
             }
             if st.track.as_deref() == Some(from) {
                 st.track = Some(to.to_owned());
@@ -439,6 +512,7 @@ impl Player {
             st.prefs.shuffle = on;
             if let Some(q) = st.queue.as_mut() {
                 q.set_shuffle(on);
+                st.queue_rev += 1;
             }
         });
     }
@@ -581,6 +655,7 @@ impl St {
             shuffle: self.prefs.shuffle,
             repeat: self.prefs.repeat,
             error: self.error.clone(),
+            queue_rev: self.queue_rev,
         }
     }
 
@@ -660,6 +735,7 @@ impl St {
         self.error = Some(format!("「{name}」{e}，已跳过"));
         let q = self.queue.as_mut().expect("只在有队列时调用");
         q.remove(id);
+        self.queue_rev += 1;
         let next = q.current().map(str::to_owned);
         if next.is_none() {
             self.track = None;

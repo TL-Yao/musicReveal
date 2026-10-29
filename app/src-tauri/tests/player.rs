@@ -194,6 +194,55 @@ fn remove_current_last_track_ends_queue_unless_repeat_all() {
 }
 
 #[test]
+fn order_and_pos_expose_the_play_order() {
+    let p = q(1, Repeat::Off);
+    assert_eq!(p.order(), abc().as_slice());
+    assert_eq!(p.pos(), 1);
+}
+
+#[test]
+fn shuffled_order_is_the_shuffled_play_order_with_every_track() {
+    let mut p = PlayQueue::new(ids(20), 5, true, Repeat::Off);
+    let order = p.order().to_vec();
+    assert_eq!((order[0].as_str(), p.pos()), ("5", 0));
+    let played: Vec<String> = std::iter::once("5".to_owned())
+        .chain(std::iter::from_fn(|| p.next(false).map(String::from)))
+        .collect();
+    assert_eq!(played, order, "order() 就是实际播放顺序");
+    assert_ne!(order, ids(20), "被打乱（20! 分之一的概率恰好原序）");
+    let mut sorted = order;
+    sorted.sort_by_key(|s| s.parse::<u32>().unwrap());
+    assert_eq!(sorted, ids(20));
+}
+
+#[test]
+fn jump_moves_to_index_without_reordering() {
+    let mut p = PlayQueue::new(ids(10), 0, true, Repeat::Off);
+    let order = p.order().to_vec();
+    assert_eq!(p.jump(4), Some(order[4].as_str()));
+    assert_eq!((p.pos(), p.order()), (4, order.as_slice()));
+    assert_eq!(p.next(false), Some(order[5].as_str()));
+}
+
+#[test]
+fn jump_out_of_range_changes_nothing() {
+    let mut p = q(1, Repeat::Off);
+    assert_eq!(p.jump(3), None);
+    assert_eq!((p.current(), p.pos()), (Some("b"), 1));
+}
+
+#[test]
+fn remove_current_then_current_is_the_next_in_order() {
+    let mut p = PlayQueue::new(ids(10), 0, true, Repeat::Off);
+    let order = p.order().to_vec();
+    p.jump(3);
+    p.remove(&order[3]);
+    assert_eq!(p.current(), Some(order[4].as_str()));
+    assert_eq!(p.pos(), 3);
+    assert_eq!(p.order().len(), 9);
+}
+
+#[test]
 fn repeat_parses_only_known_modes() {
     assert_eq!("off".parse::<Repeat>(), Ok(Repeat::Off));
     assert_eq!("all".parse::<Repeat>(), Ok(Repeat::All));
@@ -257,9 +306,20 @@ fn state_serializes_to_the_ipc_contract() {
         v,
         serde_json::json!({
             "playing": false, "positionMs": 0, "durationMs": 0,
-            "volume": 0.8, "shuffle": false, "repeat": "off"
+            "volume": 0.8, "shuffle": false, "repeat": "off", "queueRev": 0
         })
     );
+}
+
+#[test]
+fn empty_player_has_an_empty_queue() {
+    let t = Tmp::new("queue");
+    let p = Player::new(t.0.clone(), noop());
+    let v = serde_json::to_value(p.queue()).unwrap();
+    assert_eq!(v, serde_json::json!({ "ids": [], "pos": 0 }));
+    p.jump(0);
+    p.remove("x");
+    assert_eq!(p.state().track_id, None);
 }
 
 // ---------- 真实解码（需要音频设备；音量 0，音频本身也是静音） ----------
