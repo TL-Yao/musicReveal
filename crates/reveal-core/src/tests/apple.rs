@@ -494,3 +494,302 @@ fn recodable_matches_what_recode_would_accept() {
     std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o444)).unwrap();
     assert!(!recodable(&ro, Lossless::Alac), "只读");
 }
+
+// ---------- recode_lossless：标签按独立读取（完整 ffmpeg）核对 ----------
+
+/// 完整 ffmpeg 读到的全局元数据（键小写），去掉容器自带的几项与 encoder；值按出现顺序。
+fn ff_meta(ff: &Path, p: &Path) -> Vec<(String, String)> {
+    let o = Command::new(ff)
+        .args(["-v", "error", "-i"])
+        .arg(p)
+        .args(["-f", "ffmetadata", "-"])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", p.display());
+    let text = String::from_utf8(o.stdout).unwrap();
+    let mut out: Vec<(String, String)> = vec![];
+    let mut cont = false;
+    for l in text.lines().skip(1) {
+        if cont {
+            let last = out.last_mut().unwrap();
+            last.1.push('\n');
+            last.1 += l.trim_end_matches('\\');
+            cont = l.ends_with('\\');
+            continue;
+        }
+        if l.starts_with('[') {
+            break;
+        }
+        let (k, v) = l.split_once('=').unwrap();
+        cont = v.ends_with('\\');
+        out.push((
+            k.to_lowercase(),
+            v.trim_end_matches('\\').replace("\\=", "="),
+        ));
+    }
+    out.retain(|(k, _)| {
+        ![
+            "major_brand",
+            "minor_version",
+            "compatible_brands",
+            "encoder",
+        ]
+        .contains(&k.as_str())
+    });
+    out
+}
+
+fn has(meta: &[(String, String)], k: &str, v: &str) -> bool {
+    meta.iter().any(|(a, b)| a == k && b == v)
+}
+
+/// 审查实验一：完整 ffmpeg 以 mdta 键（`use_metadata_tags`）写标签的 ALAC，转 FLAC 后一项不少。
+#[test]
+fn mdta_tagged_alac_keeps_every_tag_when_recoded_to_flac() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("ap-mdta");
+    let src = t.0.join("m.m4a");
+    gen(
+        &ff,
+        &src,
+        &[
+            "-c:a",
+            "alac",
+            "-movflags",
+            "use_metadata_tags",
+            "-metadata",
+            "title=标题",
+            "-metadata",
+            "artist=歌手",
+            "-metadata",
+            "album=专辑",
+            "-metadata",
+            "date=2020",
+            "-metadata",
+            "track=3/10",
+            "-metadata",
+            "disc=1",
+            "-metadata",
+            "lyrics=[00:01.00]一",
+            "-f",
+            "ipod",
+        ],
+    );
+    assert!(is_alac(&src));
+    let before = ff_meta(&ff, &src);
+    assert!(has(&before, "title", "标题"), "{before:?}");
+    let flac = recode_lossless(&src, Lossless::Flac, &CancelToken::default()).unwrap();
+    let m = ff_meta(&ff, &flac);
+    for (k, v) in [
+        ("title", "标题"),
+        ("artist", "歌手"),
+        ("album", "专辑"),
+        ("date", "2020"),
+        ("track", "3"),
+        ("tracktotal", "10"),
+        ("disc", "1"),
+        ("lyrics", "[00:01.00]一"),
+    ] {
+        assert!(has(&m, k, v), "{k}={v} 丢了：{m:?}");
+    }
+    assert_eq!(read_lyrics(&flac).as_deref(), Some("[00:01.00]一"));
+    no_parts(&t.0);
+}
+
+/// 审查实验二：FLAC 里的自定义 Vorbis 注释转 ALAC、再转回都还在。
+#[test]
+fn custom_vorbis_comment_survives_both_ways() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("ap-custom");
+    let src = sample(&ff, &t, "a.flac", &["-c:a", "flac"]);
+    {
+        use lofty::config::WriteOptions;
+        use lofty::flac::FlacFile;
+        use lofty::prelude::*;
+        let mut f = FlacFile::read_from(
+            &mut std::fs::File::open(&src).unwrap(),
+            lofty::config::ParseOptions::new(),
+        )
+        .unwrap();
+        let vc = f.vorbis_comments_mut().unwrap();
+        vc.push("REVIEW_CUSTOM".into(), "自定义值".into());
+        vc.push("ENCODER".into(), "某编码器 1.0".into());
+        f.save_to_path(&src, WriteOptions::default()).unwrap();
+    }
+    let want = ff_meta(&ff, &src);
+    assert!(has(&want, "review_custom", "自定义值"), "{want:?}");
+    let tok = CancelToken::default();
+    let m4a = recode_lossless(&src, Lossless::Alac, &tok).unwrap();
+    assert!(has(&ff_meta(&ff, &m4a), "review_custom", "自定义值"));
+    let flac = recode_lossless(&m4a, Lossless::Flac, &tok).unwrap();
+    let back = ff_meta(&ff, &flac);
+    assert!(has(&back, "review_custom", "自定义值"), "{back:?}");
+}
+
+/// 转不过去的标签（MP4 里 FLAC 表达不了的原子）：不转，原文件不变。
+#[test]
+fn unconvertible_mp4_atom_is_refused_and_the_original_kept() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("ap-atom");
+    let src = sample(&ff, &t, "a.flac", &["-c:a", "flac"]);
+    let tok = CancelToken::default();
+    let m4a = recode_lossless(&src, Lossless::Alac, &tok).unwrap();
+    {
+        use lofty::config::WriteOptions;
+        use lofty::mp4::{Atom, AtomData, AtomIdent, Mp4File};
+        use lofty::prelude::*;
+        let mut f = Mp4File::read_from(
+            &mut std::fs::File::open(&m4a).unwrap(),
+            lofty::config::ParseOptions::new(),
+        )
+        .unwrap();
+        f.ilst_mut().unwrap().insert(Atom::new(
+            AtomIdent::Fourcc(*b"zzzz"),
+            AtomData::UTF8("x".into()),
+        ));
+        f.save_to_path(&m4a, WriteOptions::default()).unwrap();
+    }
+    let bytes = std::fs::read(&m4a).unwrap();
+    let e = recode_lossless(&m4a, Lossless::Flac, &tok).unwrap_err();
+    assert!(e.to_string().contains("zzzz"), "{e}");
+    assert_eq!(std::fs::read(&m4a).unwrap(), bytes);
+    assert!(!src.exists());
+    no_parts(&t.0);
+}
+
+/// 歌词只要一侧独立读到而另一侧没有或不同就不替换（副本里多出一份歌词）。
+#[test]
+fn extra_lyrics_on_one_side_fail_the_check() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("ap-lyr2");
+    let src = sample(&ff, &t, "a.flac", &["-c:a", "flac"]);
+    let m4a = recode_lossless(&src, Lossless::Alac, &CancelToken::default()).unwrap();
+    let bytes = std::fs::read(&m4a).unwrap();
+    TAMPER.set(Some(|p: &Path| {
+        use lofty::config::WriteOptions;
+        use lofty::flac::FlacFile;
+        use lofty::prelude::*;
+        let mut f =
+            FlacFile::read_from(&mut std::fs::File::open(p).unwrap(), Default::default()).unwrap();
+        let vc = f.vorbis_comments_mut().unwrap();
+        vc.push("UNSYNCEDLYRICS".into(), "多出来的".into());
+        f.save_to_path(p, WriteOptions::default()).unwrap();
+    }));
+    let e = recode_lossless(&m4a, Lossless::Flac, &CancelToken::default()).unwrap_err();
+    TAMPER.set(None);
+    assert!(e.to_string().contains("不一致"), "{e}");
+    assert_eq!(std::fs::read(&m4a).unwrap(), bytes);
+    no_parts(&t.0);
+}
+
+struct OwnEnricher(Vec<u8>);
+#[async_trait::async_trait]
+impl Enricher for OwnEnricher {
+    async fn enrich(&self, meta: &mut TrackMeta) -> Result<(), String> {
+        meta.title = Some("歌名".into());
+        meta.artists = vec!["甲".into(), "乙".into()];
+        meta.album = Some("专辑".into());
+        meta.album_artist = Some("甲".into());
+        meta.year = Some(2019);
+        meta.track = Some(4);
+        meta.disc = Some(1);
+        meta.cover = Some(self.0.clone());
+        meta.lyrics = Some(Lyrics {
+            lrc: "[00:00.50]一\n[00:01.20]二".into(),
+            translated_lrc: Some("[00:00.50]one".into()),
+        });
+        Ok(())
+    }
+}
+
+/// 我们自己产出的那类 FLAC（原格式档补全后的标题、艺人、专辑、年份、曲序、碟号、歌词、封面、
+/// ENCODER 等）转 ALAC 再转回：每次都成功，独立读到的标签一项不变。
+#[tokio::test]
+async fn our_own_flac_output_recodes_both_ways() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("ap-own");
+    let src = t.0.join("src.flac");
+    gen(
+        &ff,
+        &src,
+        &[
+            "-ar",
+            "44100",
+            "-c:a",
+            "flac",
+            "-metadata",
+            "comment=163 key(Don't modify):abc",
+        ],
+    );
+    let out = t.0.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let opts = ConvertOptions {
+        output_dir: out.clone(),
+        format: OutputFormat::Original,
+        ffmpeg: find_ffmpeg(),
+    };
+    let o = convert(
+        &src,
+        &opts,
+        &OwnEnricher(png(&ff, &t, "red")),
+        None,
+        &CancelToken::default(),
+        &mut |_| {},
+    )
+    .await
+    .unwrap();
+    let flac = o.output;
+    assert_eq!(flac.extension().unwrap(), "flac");
+    let want = ff_meta(&ff, &flac);
+    assert!(has(&want, "title", "歌名"), "{want:?}");
+    let tok = CancelToken::default();
+    let m4a = recode_lossless(&flac, Lossless::Alac, &tok).unwrap();
+    let back = recode_lossless(&m4a, Lossless::Flac, &tok).unwrap();
+    let mut a = want.clone();
+    let mut b = ff_meta(&ff, &back);
+    a.sort();
+    b.sort();
+    assert_eq!(a, b);
+}
+
+/// 审查插桩实验：新文件换上后、删原文件前退出，两份并存。再转一次：新文件与原文件完全一致，
+/// 补上属性、删掉原文件，算成功；不一致的同名文件（用户自己的另一版）照旧不动、报同名。
+#[test]
+fn rerun_after_halt_between_place_and_delete_finishes_the_job() {
+    use crate::recode::HALT_AFTER_PLACE;
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("ap-halt");
+    let tok = CancelToken::default();
+    let src = sample(&ff, &t, "a.flac", &["-c:a", "flac"]);
+    xattr(&src, Some("蓝色"));
+    let (hash, snap, b) = (pcm(&ff, &src), snapshot(&src), born(&src));
+    HALT_AFTER_PLACE.set(true);
+    let e = recode_lossless(&src, Lossless::Alac, &tok).unwrap_err();
+    HALT_AFTER_PLACE.set(false);
+    assert_eq!(e.to_string(), "测试：换上新文件后中断");
+    let m4a = src.with_extension("m4a");
+    assert!(src.exists() && m4a.exists());
+
+    assert_eq!(recode_lossless(&src, Lossless::Alac, &tok).unwrap(), m4a);
+    assert!(!src.exists());
+    assert_eq!(pcm(&ff, &m4a), hash);
+    assert_eq!(snapshot(&m4a), snap);
+    assert_eq!(born(&m4a), b);
+    assert_eq!(xattr(&m4a, None).as_deref(), Some("蓝色"));
+    no_parts(&t.0);
+
+    // 同名的 FLAC 是另一版（标题不同）：不删、报同名
+    let other = sample(&ff, &t, "a.flac", &["-c:a", "flac"]);
+    {
+        let mut f = read_part(&other);
+        f.primary_tag_mut().unwrap().set_title("另一版".into());
+        f.save_to_path(&other, lofty::config::WriteOptions::default())
+            .unwrap();
+    }
+    let (fb, mb) = (std::fs::read(&other).unwrap(), std::fs::read(&m4a).unwrap());
+    let e = recode_lossless(&m4a, Lossless::Flac, &tok).unwrap_err();
+    assert_eq!(e.to_string(), "已有同名的 .flac 文件，未覆盖");
+    assert_eq!(std::fs::read(&other).unwrap(), fb);
+    assert_eq!(std::fs::read(&m4a).unwrap(), mb);
+    no_parts(&t.0);
+}

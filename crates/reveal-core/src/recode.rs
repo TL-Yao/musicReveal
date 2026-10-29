@@ -5,11 +5,13 @@ use crate::convert::{
 };
 use lofty::config::{ParseOptions, WriteOptions};
 use lofty::file::{AudioFile, FileType, TaggedFile, TaggedFileExt};
-use lofty::mp4::{Mp4Codec, Mp4File};
+use lofty::flac::FlacFile;
+use lofty::mp4::{Atom, AtomData, AtomIdent, Mp4Codec, Mp4File};
+use lofty::ogg::tag::VorbisComments;
 use lofty::picture::PictureType;
 use lofty::prelude::ItemKey;
 use lofty::tag::{ItemValue, Tag, TagExt, TagType};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard};
@@ -81,6 +83,15 @@ pub fn recodable(path: &Path, to: Lossless) -> bool {
 thread_local! {
     /// 测试钩子：比对前改动隐藏副本，模拟转换不保真。
     pub(crate) static TAMPER: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
+    /// 测试钩子：新文件换上后、删原文件前中断，模拟此刻退出。
+    pub(crate) static HALT_AFTER_PLACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn other(to: Lossless) -> Lossless {
+    match to {
+        Lossless::Alac => Lossless::Flac,
+        Lossless::Flac => Lossless::Alac,
+    }
 }
 
 fn fail(s: impl Into<String>) -> ConvertError {
@@ -92,9 +103,11 @@ fn io(e: std::io::Error) -> ConvertError {
 }
 
 /// 把 `path`（FLAC / WAV 或 ALAC .m4a）无损转成 `to`，以「同名 + 新扩展名」落在原处并删掉原文件，
-/// 返回新路径。隐藏副本上转好后比对：解码后的 PCM、位深与采样率、非歌词标签、图片字节、内嵌歌词
-/// 全部一致才替换；保留创建时间、权限与扩展属性（Finder 标签）。任一步不成返回一句中文原因，
-/// 原文件不变、不留副本。符号链接、只读文件不转；新文件名已被占用不覆盖。
+/// 返回新路径。隐藏副本上转好后比对：解码后的 PCM、位深与采样率，以及经 ffmpeg 独立读到的全部标签
+/// （含自定义键）、附图与歌词（lofty 也再比一遍）全部一致才替换；保留创建时间、权限与扩展属性
+/// （Finder 标签）。表达不了的标签宁可不转。任一步不成返回一句中文原因，原文件不变、不留副本。
+/// 符号链接、只读文件不转；新文件名已被占用不覆盖——除非那个文件与原文件完全一致（上次换上后
+/// 没来得及删原文件），那就补上属性、删原文件，算转好。
 pub fn recode_lossless(
     path: &Path,
     to: Lossless,
@@ -118,9 +131,29 @@ pub fn recode_lossless(
         Lossless::Alac => ("m4a", ["-c:a", "alac", "-f", "ipod"]),
         Lossless::Flac => ("flac", ["-c:a", "flac", "-f", "flac"]),
     };
+    let raw = ff_meta(&ff, path, cancel)?;
+    let want = norm(&raw);
+    if to == Lossless::Flac {
+        let bad = unconvertible(path, &want);
+        if !bad.is_empty() {
+            return Err(fail(format!(
+                "有无法转换的标签（{}），未转换",
+                bad.join("、")
+            )));
+        }
+    }
     let dst = path.with_extension(ext);
     if dst.symlink_metadata().is_ok() {
-        return Err(fail(format!("已有同名的 .{ext} 文件，未覆盖")));
+        // 上次换上新文件后没来得及删原文件（或本来就有一模一样的）：完全一致才删原文件
+        let same = dst.symlink_metadata().is_ok_and(|d| d.is_file())
+            && read_audio(&dst).is_ok_and(|d| accepts(&d, &dst, other(to)).is_ok())
+            && verify(&ff, path, &src, &want, &dst, cancel).is_ok();
+        if !same {
+            return Err(fail(format!("已有同名的 .{ext} 文件，未覆盖")));
+        }
+        keep_attrs(&m, path, &dst).map_err(io)?;
+        std::fs::remove_file(path).map_err(io)?;
+        return Ok(dst);
     }
     let mut parts = Parts::default();
     let tmp = parts.add(path.parent().unwrap_or(Path::new(".")));
@@ -136,11 +169,12 @@ pub fn recode_lossless(
         _ => fail("ffmpeg 转换失败，未替换"),
     })?;
     copy_tags(&src, &tmp, to).map_err(|e| fail(format!("写入标签失败：{e}")))?;
+    top_up(&ff, &raw, &want, &tmp, to, cancel)?;
     #[cfg(test)]
     if let Some(f) = TAMPER.get() {
         f(&tmp);
     }
-    verify(&ff, path, &src, &tmp, cancel)?;
+    verify(&ff, path, &src, &want, &tmp, cancel)?;
     keep_attrs(&m, path, &tmp).map_err(io)?;
     match place(&tmp, &dst) {
         Ok(()) => {}
@@ -148,6 +182,10 @@ pub fn recode_lossless(
             return Err(fail(format!("已有同名的 .{ext} 文件，未覆盖")))
         }
         Err(e) => return Err(io(e)),
+    }
+    #[cfg(test)]
+    if HALT_AFTER_PLACE.get() {
+        return Err(fail("测试：换上新文件后中断"));
     }
     if let Err(e) = std::fs::remove_file(path) {
         let _ = std::fs::remove_file(&dst);
@@ -267,11 +305,285 @@ fn view(f: &TaggedFile, ty: TagType) -> HashMap<ItemKey, Vec<String>> {
     out
 }
 
-/// 新文件与原文件逐项比对，不一致返回原因。
+/// ffmpeg 读到的全局元数据（`-f ffmetadata`），键与值原样。和写入用的 lofty 互不相干，
+/// 比对时用它独立看两边。
+fn ff_meta(
+    ff: &Path,
+    p: &Path,
+    cancel: &CancelToken,
+) -> Result<Vec<(String, String)>, ConvertError> {
+    let mut cmd = Command::new(ff);
+    cmd.args(["-v", "error", "-nostdin", "-i"])
+        .arg(p)
+        .args(["-f", "ffmetadata", "-"]);
+    let out = run(cmd, cancel).map_err(|e| match e {
+        ConvertError::Cancelled => e,
+        _ => fail("无法读取标签，未转换"),
+    })?;
+    Ok(parse_ffmeta(&String::from_utf8_lossy(&out)))
+}
+
+/// 解析 ffmetadata 文本的全局段：`\` 转义 `=`、`;`、`#`、`\` 与换行；`;` / `#` 开头是注释，
+/// 遇到第一个 `[段]` 为止。
+fn parse_ffmeta(s: &str) -> Vec<(String, String)> {
+    let mut out = vec![];
+    let (mut k, mut v) = (String::new(), String::new());
+    let (mut in_v, mut esc, mut start, mut skip) = (false, false, true, false);
+    for ch in s.chars() {
+        if start {
+            start = false;
+            match ch {
+                ';' | '#' => skip = true,
+                '[' => break,
+                _ => {}
+            }
+        }
+        if esc {
+            if in_v { &mut v } else { &mut k }.push(ch);
+            esc = false;
+            continue;
+        }
+        match ch {
+            '\\' => esc = true,
+            '\n' => {
+                if in_v && !skip {
+                    out.push((std::mem::take(&mut k), std::mem::take(&mut v)));
+                }
+                (k, v) = (String::new(), String::new());
+                (in_v, start, skip) = (false, true, false);
+            }
+            '=' if !in_v => in_v = true,
+            c => if in_v { &mut v } else { &mut k }.push(c),
+        }
+    }
+    if in_v && !skip {
+        out.push((k, v));
+    }
+    out
+}
+
+/// 按键归一后的元数据：键小写、别名合一，「3/10」拆成序号与总数，序号去前导零，值去首尾空白；
+/// 同键多值排序。容器自带的几项不算。
+type Meta = BTreeMap<String, Vec<String>>;
+
+const NUMERIC: [&str; 4] = ["track", "tracktotal", "disc", "disctotal"];
+
+/// 歌词的各种键（`lyrics-<语言>`、`UNSYNCEDLYRICS`）算一个；ffmpeg 把 FLAC 的 `DESCRIPTION` 读成
+/// `comment`、MP4 的 `desc` 读成 `description`，两者算一个（值按多重集比，不会丢）。
+fn norm_key(k: &str) -> String {
+    let k = k.to_lowercase();
+    if k.starts_with("lyrics") || k == "unsyncedlyrics" {
+        return "lyrics".into();
+    }
+    match k.as_str() {
+        "description" => "comment",
+        "albumartist" | "album artist" => "album_artist",
+        "tracknumber" => "track",
+        "discnumber" | "disk" => "disc",
+        "totaltracks" => "tracktotal",
+        "totaldiscs" => "disctotal",
+        _ => return k,
+    }
+    .into()
+}
+
+fn norm(items: &[(String, String)]) -> Meta {
+    let mut m = Meta::new();
+    for (k, v) in items {
+        let k = norm_key(k);
+        if ["major_brand", "minor_version", "compatible_brands"].contains(&k.as_str()) {
+            continue;
+        }
+        let mut put = |k: &str, v: &str| {
+            let v = v.trim();
+            let v = match NUMERIC.contains(&k) {
+                true => v.parse::<u64>().map_or(v.to_owned(), |n| n.to_string()),
+                false => v.to_owned(),
+            };
+            m.entry(k.to_owned()).or_default().push(v);
+        };
+        match v.split_once('/') {
+            Some((n, total)) if k == "track" || k == "disc" => {
+                put(&k, n);
+                put(&format!("{k}total"), total);
+            }
+            _ => put(&k, v),
+        }
+    }
+    m.values_mut().for_each(|v| v.sort());
+    m
+}
+
+/// MP4 里 FLAC 表达不了、也没被 ffmpeg 读出来的标签原子（转过去会丢）。
+fn unconvertible(path: &Path, seen: &Meta) -> Vec<String> {
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return vec![];
+    };
+    let Ok(mp4) = Mp4File::read_from(&mut f, ParseOptions::new()) else {
+        return vec![];
+    };
+    let Some(ilst) = mp4.ilst() else {
+        return vec![];
+    };
+    ilst.into_iter()
+        .filter_map(|a| match a.ident() {
+            AtomIdent::Fourcc([b'c', b'o', b'v', b'r']) => None,
+            AtomIdent::Fourcc(f) => {
+                let key: String = f.iter().map(|&b| b as char).collect();
+                let ok = ItemKey::from_key(TagType::Mp4Ilst, &key)
+                    .is_some_and(|k| k.map_key(TagType::VorbisComments).is_some());
+                (!ok).then_some(key)
+            }
+            AtomIdent::Freeform { mean, name } => {
+                (!seen.contains_key(&norm_key(name))).then(|| format!("----:{mean}:{name}"))
+            }
+        })
+        .collect()
+}
+
+/// ffmpeg 在 MP4 里从固定原子读出的键：这些只能由 lofty 写进对应原子，不拿自由格式原子凑。
+const MP4_FIXED: &[&str] = &[
+    "title",
+    "artist",
+    "album_artist",
+    "album",
+    "date",
+    "comment",
+    "genre",
+    "composer",
+    "copyright",
+    "grouping",
+    "lyrics",
+    "encoder",
+    "description",
+    "synopsis",
+    "show",
+    "episode_id",
+    "network",
+    "track",
+    "tracktotal",
+    "disc",
+    "disctotal",
+    "compilation",
+    "gapless_playback",
+    "media_type",
+    "rating",
+    "hd_video",
+    "podcast",
+    "category",
+    "keywords",
+    "sort_name",
+    "sort_artist",
+    "sort_album",
+    "sort_album_artist",
+    "sort_composer",
+];
+
+fn vorbis_key(k: &str) -> String {
+    match k {
+        "track" => "TRACKNUMBER".into(),
+        "disc" => "DISCNUMBER".into(),
+        "album_artist" => "ALBUMARTIST".into(),
+        _ => k.to_uppercase(),
+    }
+}
+
+/// lofty 按通用标签写过之后，ffmpeg 读到源里有、新文件里没有或不同的项照原值补上：
+/// FLAC 写成 Vorbis 注释，MP4 写成 `----:com.apple.iTunes:<原键名>` 自由格式原子。
+fn top_up(
+    ff: &Path,
+    raw: &[(String, String)],
+    want: &Meta,
+    tmp: &Path,
+    to: Lossless,
+    cancel: &CancelToken,
+) -> Result<(), ConvertError> {
+    let have = norm(&ff_meta(ff, tmp, cancel)?);
+    let missing: Vec<&String> = want
+        .keys()
+        .filter(|k| have.get(*k) != want.get(*k))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    fn werr(e: impl std::fmt::Display) -> ConvertError {
+        fail(format!("写入标签失败：{e}"))
+    }
+    let mut file = std::fs::File::open(tmp).map_err(io)?;
+    match to {
+        Lossless::Flac => {
+            let mut f = FlacFile::read_from(&mut file, ParseOptions::new()).map_err(werr)?;
+            if f.vorbis_comments().is_none() {
+                f.set_vorbis_comments(VorbisComments::default());
+            }
+            let vc = f.vorbis_comments_mut().expect("刚补上");
+            for k in missing {
+                let old: Vec<String> = vc
+                    .items()
+                    .filter(|(x, _): &(&str, &str)| norm_key(x) == **k)
+                    .map(|(x, _)| x.to_owned())
+                    .collect();
+                for x in old {
+                    vc.remove(&x).for_each(drop);
+                }
+                for v in &want[k] {
+                    vc.push(vorbis_key(k), v.clone());
+                }
+            }
+            f.save_to_path(tmp, WriteOptions::default()).map_err(werr)
+        }
+        Lossless::Alac => {
+            let mut f = Mp4File::read_from(&mut file, ParseOptions::new()).map_err(werr)?;
+            if f.ilst().is_none() {
+                f.set_ilst(Default::default());
+            }
+            let ilst = f.ilst_mut().expect("刚补上");
+            for k in missing
+                .into_iter()
+                .filter(|k| !MP4_FIXED.contains(&k.as_str()))
+            {
+                let name = raw
+                    .iter()
+                    .find(|(x, _)| norm_key(x) == *k)
+                    .map_or(k.clone(), |(x, _)| x.clone());
+                let ident = AtomIdent::Freeform {
+                    mean: "com.apple.iTunes".into(),
+                    name: name.into(),
+                };
+                ilst.remove(&ident).for_each(drop);
+                let data = want[k].iter().map(|v| AtomData::UTF8(v.clone())).collect();
+                ilst.insert(Atom::from_collection(ident, data).expect("至少一个值"));
+            }
+            f.save_to_path(tmp, WriteOptions::default()).map_err(werr)
+        }
+    }
+}
+
+/// 附图（ffmpeg 的附带图片流）逐张的 SHA-256，按顺序。
+fn ff_pics(ff: &Path, p: &Path, cancel: &CancelToken) -> Result<Vec<String>, ConvertError> {
+    let mut cmd = Command::new(ff);
+    cmd.args(["-v", "error", "-nostdin", "-i"])
+        .arg(p)
+        .args(["-map", "0:v?", "-map", "0:a:0", "-c", "copy"])
+        .args(["-f", "streamhash", "-hash", "sha256", "-"]);
+    let out = run(cmd, cancel).map_err(|e| match e {
+        ConvertError::Cancelled => e,
+        _ => fail("无法读取封面比对，未替换"),
+    })?;
+    Ok(String::from_utf8_lossy(&out)
+        .lines()
+        .filter(|l| l.split(',').nth(1) == Some("v"))
+        .filter_map(|l| l.split_once('=').map(|x| x.1.to_owned()))
+        .collect())
+}
+
+/// 新文件与原文件逐项比对，不一致返回原因。`want` 是原文件经 ffmpeg 独立读到的元数据：
+/// 新文件经 ffmpeg 读到的必须一项不差（多了少了都不行）；封面、歌词另由 ffmpeg 与 lofty 各比一遍。
 fn verify(
     ff: &Path,
     path: &Path,
     src: &TaggedFile,
+    want: &Meta,
     tmp: &Path,
     cancel: &CancelToken,
 ) -> Result<(), ConvertError> {
@@ -286,19 +598,33 @@ fn verify(
     if pcm(ff, path, cancel)? != pcm(ff, tmp, cancel)? {
         return Err(fail("转换后的音频与原文件不一致，未替换"));
     }
+    let got = norm(&ff_meta(ff, tmp, cancel)?);
+    let differ = |lyr: bool| {
+        let keys = want.keys().chain(got.keys());
+        keys.filter(|k| (*k == "lyrics") == lyr)
+            .any(|k| want.get(k) != got.get(k))
+    };
+    let (a, b) = (tags_of(src), tags_of(&new));
+    // lofty 也比一遍；它读不了原文件的歌词（如 mdta 键）时，新文件里的须是 ffmpeg 在原文件里读到的
+    let lofty_ok = match (lyrics_of(&a), lyrics_of(&b)) {
+        (Some(x), y) => y.as_ref() == Some(&x),
+        (None, None) => true,
+        (None, Some(y)) => want
+            .get("lyrics")
+            .is_some_and(|v| v.iter().any(|w| *w == y.trim())),
+    };
+    if differ(true) || !lofty_ok {
+        return Err(fail("转换后歌词不一致，未替换"));
+    }
     let ty = new.primary_tag_type();
-    let (want, got) = (view(src, ty), view(&new, ty));
-    if want.iter().any(|(k, v)| got.get(k) != Some(v)) {
+    let (lw, lg) = (view(src, ty), view(&new, ty));
+    if differ(false) || lw.iter().any(|(k, v)| lg.get(k) != Some(v)) {
         return Err(fail("转换后标签不一致，未替换"));
     }
-    let (a, b) = (tags_of(src), tags_of(&new));
     let bytes =
         |t: &[&Tag]| -> Vec<Vec<u8>> { pictures(t).iter().map(|p| p.data().to_vec()).collect() };
-    if bytes(&a) != bytes(&b) {
+    if bytes(&a) != bytes(&b) || ff_pics(ff, path, cancel)? != ff_pics(ff, tmp, cancel)? {
         return Err(fail("转换后封面不一致，未替换"));
-    }
-    if lyrics_of(&a) != lyrics_of(&b) {
-        return Err(fail("转换后歌词不一致，未替换"));
     }
     Ok(())
 }
