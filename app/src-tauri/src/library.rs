@@ -687,8 +687,16 @@ impl Worker {
 }
 
 /// NSFileManager 移到废纸篓：不经 Finder，不会弹「想要控制 Finder」的授权。
+/// 测试构建（`test-home`）里挪进临时主目录下的 `.Trash`，碰不到真实废纸篓。
 fn trash(p: &Path) -> Result<(), String> {
     use objc2_foundation::{NSFileManager, NSURL};
+    if cfg!(feature = "test-home") {
+        let bin = crate::engine::home().join(".Trash");
+        let name = p.file_name().ok_or("路径无效")?;
+        return std::fs::create_dir_all(&bin)
+            .and_then(|()| std::fs::rename(p, bin.join(name)))
+            .map_err(|e| format!("无法移到废纸篓：{e}"));
+    }
     let url = NSURL::from_file_path(p).ok_or("路径无效")?;
     NSFileManager::defaultManager()
         .trashItemAtURL_resultingItemURL_error(&url, None)

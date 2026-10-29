@@ -472,7 +472,7 @@ fn trash_moves_song_and_its_lrcs_to_the_trash_and_refuses_strangers() {
     assert!(txt.exists() && home.exists() && beside.exists() && a.exists());
 
     r.lib.trash(&id(&a)).unwrap();
-    let bin = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".Trash");
+    let bin = musicreveal_app::engine::home().join(".Trash");
     let in_bin = bin.join(a.file_name().unwrap()).exists();
     for e in std::fs::read_dir(&bin).into_iter().flatten().flatten() {
         if e.file_name().to_string_lossy().starts_with(&tag) {
@@ -505,7 +505,7 @@ fn trash_does_not_follow_an_lrc_folder_swapped_for_a_link_after_the_scan() {
     std::os::unix::fs::symlink(&outside, &lrcs).unwrap();
 
     r.lib.trash(&id(&a)).unwrap();
-    let bin = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".Trash");
+    let bin = musicreveal_app::engine::home().join(".Trash");
     for e in std::fs::read_dir(&bin).into_iter().flatten().flatten() {
         if e.file_name().to_string_lossy().starts_with(&tag) {
             let _ = std::fs::remove_file(e.path());
@@ -684,7 +684,7 @@ fn lrc_folder_linked_outside_is_left_alone() {
     assert!(quiet.is_err(), "{quiet:?}");
     // 删到废纸篓也不碰外部文件
     r.lib.trash(&id(&a)).unwrap();
-    let bin = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".Trash");
+    let bin = musicreveal_app::engine::home().join(".Trash");
     for n in ["a.mp3", "a.lrc"] {
         let _ = std::fs::remove_file(bin.join(n));
     }
@@ -992,4 +992,20 @@ fn credit_lines_after_a_bom_are_cleaned_in_embedded_lyrics_and_lrc_files() {
     let after = fingerprints(o);
     rescan(&r.lib, &r.rx, o, 1);
     assert_eq!(without_markers(fingerprints(o)), after);
+}
+
+/// 测试构建里删到废纸篓只进临时主目录下的 `.Trash`，真实废纸篓不碰。
+#[test]
+fn trash_in_tests_goes_to_the_private_home() {
+    let bin = musicreveal_app::engine::home().join(".Trash");
+    assert!(bin.starts_with(std::env::temp_dir()), "{}", bin.display());
+    let r = Rig::new("trashhome");
+    let tag = format!("mr-trashhome-{}", std::process::id());
+    let a = mp3(&r.out.join(format!("{tag}.mp3")), &[], None);
+    r.lib.set_dir(&r.out);
+    settled(&r.rx);
+    r.lib.trash(&id(&a)).unwrap();
+    let got = bin.join(a.file_name().unwrap());
+    assert!(!a.exists() && got.exists());
+    std::fs::remove_file(got).unwrap();
 }
