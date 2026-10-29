@@ -302,3 +302,32 @@ fn id3v22_unknown_frames_are_kept_or_the_write_is_refused() {
     assert!(ffmeta(&ff, &p).contains(&"title=title22".to_string()));
     keeps_or_refuses(&ff, &p, b"xzz-payload-keep");
 }
+
+#[test]
+fn mp3_ape_lyrics_are_dropped_and_other_ape_fields_kept() {
+    use lofty::ape::{ApeItem, ApeTag};
+    use lofty::tag::{ItemValue, TagExt, TagType};
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("emb-ape");
+    let p = t.0.join("a.mp3");
+    gen(
+        &ff,
+        &p,
+        &["-c:a", "libmp3lame", "-metadata", "title=原标题"],
+    );
+    let mut ape = ApeTag::new();
+    let item = |k: &str, v: &str| ApeItem::new(k.into(), ItemValue::Text(v.into())).unwrap();
+    ape.insert(item("LYRICS", "OLD"));
+    ape.insert(item("Artist", "APE艺人"));
+    ape.save_to_path(&p, lofty::config::WriteOptions::default())
+        .unwrap();
+    assert!(lyric_fields(&p).contains(&"OLD".to_string()));
+
+    embed_lyrics(&p, LRC).unwrap();
+    assert_eq!(lyric_fields(&p), [LRC]);
+    let f = lofty::read_from_path(&p).unwrap();
+    let ape = f.tag(TagType::Ape).expect("APE 标签还在");
+    assert_eq!(ape.artist().as_deref(), Some("APE艺人"));
+    let id3 = f.tag(TagType::Id3v2).unwrap();
+    assert_eq!(id3.title().as_deref(), Some("原标题"));
+}

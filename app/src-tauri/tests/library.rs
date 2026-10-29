@@ -482,6 +482,35 @@ fn trash_moves_song_and_its_lrcs_to_the_trash_and_refuses_strangers() {
     assert!(v.tracks.is_empty());
 }
 
+#[test]
+fn trash_does_not_follow_an_lrc_folder_swapped_for_a_link_after_the_scan() {
+    let r = Rig::new("trashlink");
+    let tag = format!("mr-trashlink-{}", std::process::id());
+    let a = mp3(&r.out.join(format!("{tag}.mp3")), &[], None);
+    std::fs::write(r.out.join(format!("{tag}.lrc")), "[00:01.00]词\n").unwrap();
+    r.lib.set_dir(&r.out);
+    settled(&r.rx);
+    let lrcs = r.out.join("lrc");
+    assert!(lrcs.join(format!("{tag}.lrc")).exists());
+    // 扫描之后：lrc 文件夹换成指向外部的链接，外部有同名文件
+    std::fs::rename(&lrcs, r.out.join("lrc-old")).unwrap();
+    let outside = r.t.0.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let victim = outside.join(format!("{tag}.lrc"));
+    std::fs::write(&victim, "外部").unwrap();
+    std::os::unix::fs::symlink(&outside, &lrcs).unwrap();
+
+    r.lib.trash(&id(&a)).unwrap();
+    let bin = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".Trash");
+    for e in std::fs::read_dir(&bin).into_iter().flatten().flatten() {
+        if e.file_name().to_string_lossy().starts_with(&tag) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+    assert!(!a.exists());
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "外部");
+}
+
 /// 大小、mtime、inode：文件被改写或替换都会变。
 fn fingerprint(p: &Path) -> (u64, std::time::SystemTime, u64) {
     use std::os::unix::fs::MetadataExt;

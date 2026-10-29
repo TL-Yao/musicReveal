@@ -737,14 +737,13 @@ impl Library {
         let p = Path::new(&t.id);
         trash(p)?;
         let mut lrcs: Vec<PathBuf> = t.lrc.into_iter().collect();
-        let home = reveal_core::lrc_home(&root, p);
-        // lrc 文件夹链到外面时不碰那边的文件
-        if reveal_core::safe_lrc_dir(&root, &home, false).is_ok() {
-            lrcs.push(home);
-        }
-        lrcs.push(p.with_extension("lrc"));
-        // 逐个现查：同一个路径出现两次时第二次已不在
-        for l in lrcs.iter().filter(|l| l.is_file()) {
+        lrcs.extend([reveal_core::lrc_home(&root, p), p.with_extension("lrc")]);
+        // 逐个现查：所在文件夹（含扫描之后才换成的）链到输出文件夹外面的不碰；
+        // 同一个路径出现两次时第二次已不在
+        for l in lrcs
+            .iter()
+            .filter(|l| reveal_core::safe_lrc_dir(&root, l, false).is_ok() && l.is_file())
+        {
             let _ = trash(l);
         }
         {

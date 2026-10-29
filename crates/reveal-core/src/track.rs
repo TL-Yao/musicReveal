@@ -179,7 +179,18 @@ fn set_lyrics(p: &Path, lrc: &str) -> Result<(), Error> {
     let po = ParseOptions::new();
     let wo = WriteOptions::default();
     match ty {
-        Some(FileType::Mpeg) => id3(MpegFile::read_from(f, po).map_err(bad)?.id3v2()),
+        Some(FileType::Mpeg) => {
+            let mp = MpegFile::read_from(f, po).map_err(bad)?;
+            // APE 里的旧歌词也删掉，整个文件只留一份；APE 其余字段不动
+            if let Some(mut ape) = mp.ape().cloned() {
+                const KEYS: [&str; 2] = ["LYRICS", "UNSYNCEDLYRICS"];
+                if KEYS.iter().any(|k| ape.get(k).is_some()) {
+                    KEYS.iter().for_each(|k| ape.remove(k));
+                    ape.save_to_path(p, wo).map_err(bad)?;
+                }
+            }
+            id3(mp.id3v2())
+        }
         Some(FileType::Wav) => id3(WavFile::read_from(f, po).map_err(bad)?.id3v2()),
         Some(FileType::Flac) => {
             // 图片在 FlacFile 里另存，整个文件一起写回才不丢
