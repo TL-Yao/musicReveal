@@ -7,7 +7,7 @@ pub mod player;
 
 use engine::{AddFolderResult, Engine, Preview, RealConverter, Snapshot};
 use library::{Library, LibraryView, Lyric};
-use player::{Player, PlayerState};
+use player::{Player, PlayerState, QueueView};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
 
@@ -161,6 +161,17 @@ async fn player_set_repeat(p: State<'_, Player>, mode: String) -> R<()> {
 }
 
 #[tauri::command]
+async fn player_queue(p: State<'_, Player>) -> R<QueueView> {
+    Ok(p.queue())
+}
+
+#[tauri::command]
+async fn player_jump(p: State<'_, Player>, index: u32) -> R<()> {
+    p.jump(index as usize);
+    Ok(())
+}
+
+#[tauri::command]
 async fn get_player(p: State<'_, Player>) -> R<PlayerState> {
     Ok(p.state())
 }
@@ -242,8 +253,10 @@ async fn get_lyrics(l: State<'_, Library>, id: String) -> R<Option<Vec<Lyric>>> 
 }
 
 #[tauri::command]
-async fn trash_track(l: State<'_, Library>, id: String) -> R<()> {
-    l.trash(&id)
+async fn trash_track(l: State<'_, Library>, p: State<'_, Player>, id: String) -> R<()> {
+    l.trash(&id)?;
+    p.remove(&id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -390,6 +403,8 @@ pub fn run() {
             player_set_volume,
             player_set_shuffle,
             player_set_repeat,
+            player_queue,
+            player_jump,
             get_player,
             open_settings,
             open_auth_settings,
