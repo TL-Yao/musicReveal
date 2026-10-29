@@ -98,7 +98,10 @@ function cover(art: string, glyph: string) {
 }
 const LYRICS = new Map<string, LyricLine[]>();
 const toLines = (L: any[]): LyricLine[] => L.map(([s, text, trans]) => ({ ms: s * 1000, text, ...(trans ? { trans } : {}) }));
-const pathOf = (artists: string[], title: string, fmt: string) => `${OUT}/${artists.join("、")} - ${title}.${fmt === "MP3" ? "mp3" : fmt.toLowerCase()}`;
+const EXT: Record<string, string> = { ALAC: "m4a", AAC: "m4a" };
+const pathOf = (artists: string[], title: string, fmt: string) => `${OUT}/${artists.join("、")} - ${title}.${EXT[fmt] ?? fmt.toLowerCase()}`;
+/** Apple Music 兼容：无损 → ALAC，OGG / Opus → AAC 256k，其余不变 */
+const appleQ = (q: string) => q.replace(/^(FLAC|WAV)\b/, "ALAC").replace(/^(OGG|Opus)\b.*/, "AAC 256k");
 
 function mkTrack(r: any[], i: number, now = Date.now()): Track {
   const [title, artists, album, year, sec, fmt, q, art, lyr] = r;
@@ -217,7 +220,7 @@ function setState(j: Job, state: Job["state"]): Job {
   j.artists = known ? x.artists : [];
   j.album = known && ["metadata", "done", "skipped"].includes(state) ? x.album : undefined;
   const fin = state === "done" || state === "skipped";
-  const q = snap.format === "mp3" ? "MP3 320k" : x.quality;
+  const q = snap.format === "apple" ? appleQ(x.quality) : x.quality;
   j.quality = fin ? q : undefined;
   j.coverUrl = fin ? cover(x.art, glyphOf(x.title ?? "?")) : undefined;
   j.output = fin && x.title ? pathOf(x.artists, x.title, q.split(" ")[0]) : undefined;
@@ -265,6 +268,54 @@ async function run(j: Job, fromDownload = false) {
   finish(j);
 }
 
+/* —— 切换输出格式：资料库里已有的歌逐首转换（同真后台：转完一首推一次资料库与快照） —— */
+const RF = { step: 700, list: [] as Track[], fail: new Set<string>(), reject: "", timer: 0 };
+const needs = (to: Snapshot["format"]) =>
+  lib.tracks.filter((t) => (to === "apple" ? /^(FLAC|WAV) /.test(t.quality) : /^ALAC /.test(t.quality))).sort((a, b) => b.addedAt - a.addedAt);
+const SEC_PER_SONG = 5;
+/** 转换后路径（扩展名）变了：资料库 id、播放队列、歌词一起跟着换 */
+function convertTrack(t: Track, to: Snapshot["format"]) {
+  const fmt = to === "apple" ? "ALAC" : "FLAC", id = pathOf(t.artists, t.title, fmt), old = t.id;
+  P.queue = P.queue.map((x) => (x === old ? id : x));
+  files.set(id, t.durationMs);
+  if (LYRICS.has(old)) LYRICS.set(id, LYRICS.get(old)!);
+  t.id = id;
+  t.quality = t.quality.replace(/^\S+/, fmt);
+}
+function startReformat(to: Snapshot["format"]) {
+  RF.list = needs(to);
+  snap.reformat = { target: to, total: RF.list.length, done: 0, failed: [], finished: false };
+  aim();
+}
+/** current / 封面 / 剩余时间指向下一首 */
+function aim() {
+  const rf = snap.reformat!, t = RF.list[rf.done];
+  if (rf.done >= rf.total) return Object.assign(rf, { finished: true, current: undefined, coverUrl: undefined, etaSecs: undefined });
+  Object.assign(rf, { current: t.title, coverUrl: t.coverUrl, etaSecs: (rf.total - rf.done) * SEC_PER_SONG });
+}
+function stepReformat() {
+  const rf = snap.reformat;
+  if (!rf || rf.finished) return false;
+  const t = RF.list[rf.done];
+  if (RF.fail.has(t.title)) rf.failed.push({ title: t.title, reason: "转换后逐项比对未通过，原文件保持不变" });
+  else convertTrack(t, rf.target);
+  rf.done++;
+  aim();
+  return true;
+}
+function runReformat() {
+  clearInterval(RF.timer);
+  RF.timer = window.setInterval(() => {
+    if (!stepReformat()) return clearInterval(RF.timer);
+    pushLib();
+    pushSnap();
+    pushPlayer();
+  }, RF.step);
+}
+const checkFmt = (f: string) => {
+  if (f !== "original" && f !== "apple") throw `无效的输出格式：${f}`;
+};
+
 const PICKS = ["/Volumes/外置盘/音乐/备份", `${HOME}/Downloads`, `${HOME}/Music/网易云音乐`];
 
 export const mockBackend: Backend = {
@@ -278,6 +329,7 @@ export const mockBackend: Backend = {
         case "get_player": snapChanged = false; return playerState();
         case "get_lyrics": snapChanged = false; return track(a.id) ? clone(LYRICS.get(a.id) ?? null) : null; // 同真后台：资料库不认识的歌没有歌词
         case "complete_onboarding":
+          checkFmt(a.format);
           Object.assign(snap, { onboarded: true, outputDir: a.outputDir, format: a.format, folders: a.folders.map((p: string) => ({ path: p, name: p.split("/").pop(), accessible: true })) });
           break;
         case "add_watch_folder": snap.folders.push({ path: a.path, name: a.path.split("/").pop(), accessible: true }); return { existing: 0 };
@@ -300,7 +352,22 @@ export const mockBackend: Backend = {
           setTimeout(pushLib, 50);
           setTimeout(() => ((lib.scanning = false), pushLib()), 900);
           break;
-        case "set_format": snap.format = a.format; break;
+        case "preview_format": {
+          snapChanged = false;
+          checkFmt(a.format);
+          const n = a.format === snap.format ? 0 : needs(a.format).length;
+          return { count: n, etaSecs: n * SEC_PER_SONG };
+        }
+        case "set_format": {
+          checkFmt(a.format);
+          if (snap.reformat && !snap.reformat.finished) throw "正在转换，完成前不能更改";
+          if (RF.reject) throw RF.reject;
+          const n = a.format === snap.format ? 0 : needs(a.format).length;
+          snap.format = a.format;
+          if (n) startReformat(a.format), runReformat();
+          break;
+        }
+        case "dismiss_reformat": if (snap.reformat?.finished) delete snap.reformat; break;
         case "add_files":
           for (const p of a.paths as string[]) {
             const file = p.split("/").pop()!;
@@ -364,7 +431,8 @@ function player(cmd: string, a: Record<string, any>) {
 const $ = (s: string) => document.querySelector<HTMLElement>(s);
 const frames = (n = 2) => new Promise<void>((r) => { const f = () => (--n ? requestAnimationFrame(f) : r()); requestAnimationFrame(f); });
 function search(q: string) {
-  const inp = $("#searchInput") as HTMLInputElement;
+  const inp = $("#searchInput") as HTMLInputElement | null;
+  if (!inp) return; // 设置窗口没有资料库
   inp.value = q;
   inp.dispatchEvent(new Event("input"));
 }
@@ -402,10 +470,14 @@ const MR = {
   /** 恢复日常：有歌、显影盘少量、播放中、已登录、无通知、无搜索 / 歌词 / 菜单 / 拖放 */
   reset() {
     document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); // 关掉设置窗口里开着的确认 sheet
     search("");
     lyrics(false);
     drag({ type: "leave" });
     snap = base(true);
+    clearInterval(RF.timer);
+    RF.fail.clear();
+    RF.reject = "";
     lib = { dir: OUT, tracks: fullLibrary(), scanning: false };
     lib.tracks.forEach((t) => files.set(t.id, t.durationMs));
     broken.clear();
@@ -442,6 +514,17 @@ const MR = {
       case "qq-needauth": snap.qq = { state: "needsAuth" }; break;
       case "onboarding": snap = base(false); lib.tracks = []; stop(); break;
       case "menu": tray("empty"); break;
+      // 输出格式「Apple Music 兼容」：主窗口（?mock）与设置窗口（?mock&view=settings）各开一份、同名场景
+      case "format-off": case "format-confirm-on": case "format-error": tray("empty"); RF.reject = name === "format-error" ? "无法保存设置，请稍后再试" : ""; break;
+      case "format-on": case "format-confirm-off": tray("empty"); snap.format = "apple"; needs("apple").forEach((t) => convertTrack(t, "apple")); break;
+      case "format-converting": case "format-done": case "format-partial":
+        tray("empty");
+        snap.format = "apple";
+        if (name === "format-partial") RF.fail.add("不需要陪伴的闲暇");
+        startReformat("apple");
+        // format-done 留最后一首到界面渲染之后再转，同真实流程（主窗口那一行先见过转换中）
+        for (let i = 0; i < (name === "format-converting" ? 3 : RF.list.length - (name === "format-done" ? 1 : 0)); i++) stepReformat();
+        break;
       default: throw new Error("unknown scene " + name);
     }
     pushSnap();
@@ -452,6 +535,13 @@ const MR = {
     if (name.startsWith("lyrics")) lyrics(true);
     if (name === "drag") MR.drag(true);
     if (name === "menu") await sleep(700), MR.menu(2);
+    if (name === "format-done") stepReformat(), pushLib(), pushSnap(), await frames(2);
+    // 设置窗口：拨开关 → 确认 sheet（format-error 再点确认，后台拒绝）
+    if (/^format-(confirm|error)/.test(name) && $("#fmtSwitch")) {
+      $("#fmtSwitch")!.click();
+      await sleep(80);
+      if (name === "format-error") $("#shOk")?.click(), await sleep(80);
+    }
     await frames(2);
   },
   /** 引导第 n 步：从当前步点「上一步」「继续」走过去 */
@@ -523,6 +613,11 @@ const MR = {
   skip() {
     const j = snap.jobs.find((x) => x.state === "queued");
     if (j) setState(j, "skipped"), pushSnap();
+  },
+  rf: RF,
+  /** 现场跑一遍格式切换（同前端调 set_format） */
+  convert(to: Snapshot["format"]) {
+    return mockBackend.invoke("set_format", { format: to });
   },
   /** n 首的大资料库（性能验收） */
   bigLibrary(n = 2000) {

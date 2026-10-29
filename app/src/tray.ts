@@ -1,7 +1,7 @@
 // 显影盘：转换队列作为一条托盘压在资料库上方。按 job id 复用 DOM，状态原位变化；封面「显影」由 --dev 驱动。
 // 转换完成 → 入库仪式：显影到底、弹出光圈 → 封面飞进资料库 → 盘里这行收起。
-import type { Job } from "./types";
-import { $, afterMotion, artStyle, esc, glyphHTML, hashArt, icon, reduced, titleFromFile } from "./dom";
+import type { Job, Reformat } from "./types";
+import { $, afterMotion, artStyle, esc, glyphHTML, hashArt, icon, minutes, reduced, titleFromFile } from "./dom";
 import { S, call } from "./store";
 import { bumpCount, landing, renderLib, rowEl, toRowMode, trackById } from "./library";
 
@@ -45,9 +45,10 @@ export function initTray() {
   list.addEventListener("scroll", fade);
   list.addEventListener("transitionend", fade); // 行展开 / 收起完才知道还能不能滚
   $("#trayHead").addEventListener("click", (e) => (e.target as Element).closest("#trayQQ") && call("open_qq_music"));
+  $("#batch").addEventListener("click", (e) => (e.target as Element).closest("[data-batch]") && dismissBatch());
 }
 
-export function renderTray(jobs: Job[], initial: boolean) {
+export function renderTray(jobs: Job[], initial: boolean, reformat?: Reformat) {
   const byId = new Map(jobs.map((j) => [j.id, j]));
   const shown = jobs.filter((j) => j.state in RANK).sort((a, b) => RANK[a.state]! - RANK[b.state]! || (a.queuePos ?? 0) - (b.queuePos ?? 0));
   const ids = new Set(shown.map((j) => j.id));
@@ -80,6 +81,7 @@ export function renderTray(jobs: Job[], initial: boolean) {
     }
     prev = r.el;
   }
+  renderBatch(reformat);
   chrome(shown);
   kick();
 }
@@ -96,7 +98,7 @@ function collapse(r: Row) {
 /** 盘头计数、「打开 QQ 音乐」、底部渐隐、空盘收起 */
 function chrome(shown = [...rows.values()].filter((r) => !r.ritual).map((r) => r.job)) {
   const c = (...st: Job["state"][]) => shown.filter((j) => st.includes(j.state)).length;
-  const parts = [];
+  const parts = batchTs ? [batchTs] : [];
   if (c("decrypt", "transcode", "metadata")) parts.push(`${c("decrypt", "transcode", "metadata")} 首转换中`);
   if (c("downloading")) parts.push(`${c("downloading")} 首下载中`);
   if (c("queued")) parts.push(`${c("queued")} 首排队`);
@@ -106,7 +108,7 @@ function chrome(shown = [...rows.values()].filter((r) => !r.ritual).map((r) => r
   const html = `<span class="tl">正在转换</span><span class="ts">${parts.join(" · ")}</span>${qq}`;
   const head = $("#trayHead");
   if (head.innerHTML !== html) head.innerHTML = html;
-  $("#tray").classList.toggle("off", rows.size === 0);
+  $("#tray").classList.toggle("off", rows.size === 0 && !batch);
   requestAnimationFrame(fade);
 }
 const fade = () => $("#tasksWrap").classList.toggle("more", list.scrollHeight - list.scrollTop - list.clientHeight > 2);
@@ -118,20 +120,8 @@ function fill(r: Row, j: Job) {
   r.job = j;
   row.dataset.state = L;
 
-  // 封面：占位色块 + 字形；有 coverUrl 后淡入真实封面
   const name = nameOf(j);
-  if (tile.dataset.name !== name) {
-    tile.dataset.name = name;
-    tile.setAttribute("style", `${artStyle(hashArt(name))};--dev:${r.dev}`);
-    for (const g of tile.querySelectorAll(".glyph")) g.outerHTML = glyphHTML(name);
-  }
-  const imgs = tile.querySelectorAll("img");
-  if (!j.coverUrl) tile.classList.remove("has-cover");
-  else if (imgs[0].getAttribute("src") !== j.coverUrl) {
-    tile.classList.remove("has-cover");
-    imgs[1].onload = () => tile.classList.add("has-cover");
-    imgs.forEach((i) => (i.src = j.coverUrl!));
-  }
+  paintTile(tile, name, j.coverUrl, r.dev);
 
   // 歌名：没有标签歌名时用文件名解析的歌名（灰字）；拿到正式歌名时换场
   const t1 = $(".t1", row);
@@ -152,7 +142,7 @@ function fill(r: Row, j: Job) {
   if (t2.innerHTML !== sub) t2.innerHTML = sub;
 
   // 右列
-  const fmt = S.snap?.format === "mp3" ? "MP3 320k" : (j.quality ?? "");
+  const fmt = j.quality ?? "";
   let st = "", mt = "", acts = "";
   switch (L) {
     case "downloading": st = "下载中"; break;
@@ -184,6 +174,97 @@ function fill(r: Row, j: Job) {
     row.classList.add("just-done");
   }
   r.sig = sig(j);
+}
+
+/** 封面：占位色块 + 字形；有 coverUrl 后淡入真实封面 */
+function paintTile(tile: HTMLElement, name: string, cover: string | undefined, dev: number) {
+  if (tile.dataset.name !== name) {
+    tile.dataset.name = name;
+    tile.setAttribute("style", `${artStyle(hashArt(name))};--dev:${dev}`);
+    for (const g of tile.querySelectorAll(".glyph")) g.outerHTML = glyphHTML(name);
+  }
+  const imgs = tile.querySelectorAll("img");
+  if (!cover) tile.classList.remove("has-cover");
+  else if (imgs[0].getAttribute("src") !== cover) {
+    tile.classList.remove("has-cover");
+    imgs[1].onload = () => tile.classList.add("has-cover");
+    imgs.forEach((i) => (i.src = cover));
+  }
+}
+
+/* —— 格式转换批次：整批只占一行，封面跟着正在转的那首；完成约 3 秒后收起，部分失败等「好」 —— */
+const BATCH_HTML = `<div><div class="row"><div class="tile">
+    <div class="art latent"><span class="glyph"></span><img alt=""></div>
+    <div class="art clear"><span class="glyph"></span><img alt=""></div>
+    <div class="wash"></div><div class="overlay warn">${icon("warn")}</div>
+  </div>
+  <div class="info"><div class="t1"></div><div class="t2"></div></div>
+  <div class="side"><div class="actions"></div><div class="state"></div><div class="meta"></div></div>
+</div></div>`;
+const VERB = { apple: "转为 Apple 无损", original: "转回 FLAC" };
+let batch: HTMLLIElement | null = null, batchTs = "", dismissed = false, doneTimer = 0;
+
+function renderBatch(rf?: Reformat) {
+  if (!rf?.finished) dismissed = false;
+  if (!rf || dismissed) return void (batch && dropBatch());
+  if (!batch) {
+    const el = (batch = document.createElement("li"));
+    el.className = "row-wrap collapsed";
+    el.innerHTML = BATCH_HTML;
+    $("#batch").append(el);
+    requestAnimationFrame(() => requestAnimationFrame(() => el.classList.remove("collapsed")));
+  }
+  const row = $(".row", batch), n = rf.failed.length;
+  const L = !rf.finished ? "convert" : n ? "partial" : "done2";
+  row.dataset.state = L;
+  // 封面：转换中跟着正在转的那首；部分失败换成没转成的那首；完成时留着最后那首（没见过就用占位）
+  const tile = $(".tile", row), fail = rf.failed[0]?.title;
+  if (L === "partial") paintTile(tile, fail, S.lib.tracks.find((t) => t.title === fail)?.coverUrl, 1);
+  else if (rf.current) paintTile(tile, rf.current, rf.coverUrl, 1);
+  else if (!tile.dataset.name) paintTile(tile, VERB[rf.target], undefined, 1);
+  $(".t1", row).textContent = VERB[rf.target];
+  let sub = "", st = "", mt = "", acts = "";
+  if (L === "convert") {
+    const artists = S.lib.tracks.find((t) => t.title === rf.current)?.artists.join("、");
+    sub = [rf.current, artists].filter(Boolean).map((s) => esc(s!)).join('<span class="sep">·</span>');
+    st = `${Math.min(rf.done + 1, rf.total)} / ${rf.total}`;
+    mt = `<span class="batchbar"><i style="--p:${((rf.done / Math.max(1, rf.total)) * 100).toFixed(1)}%"></i></span>`;
+    batchTs = "格式转换" + (rf.etaSecs == null ? "" : ` · 剩余约 ${minutes(rf.etaSecs)} 分钟`);
+  } else if (L === "done2") {
+    sub = `${rf.total} 首歌曲 · 音质不变`;
+    st = "已完成";
+    batchTs = "格式转换已完成";
+    doneTimer ||= window.setTimeout(dismissBatch, 3000);
+  } else {
+    sub = esc(n === 1 ? `${rf.failed[0].title}：${rf.failed[0].reason}` : `${rf.failed.map((f) => f.title).join("、")} 未转换`);
+    acts = `<button class="btn" data-batch="ok">好</button>`;
+    batchTs = `${rf.total - n} 首已完成 · <span class="warn">${n} 首未转换</span>`;
+  }
+  const set = (sel: string, html: string) => {
+    const el = $(sel, row);
+    if (el.innerHTML !== html) el.innerHTML = html;
+    el.style.display = html ? "" : "none";
+  };
+  set(".t2", sub);
+  set(".state", st);
+  set(".meta", mt);
+  set(".actions", acts);
+  $(".actions", row).classList.toggle("always", !!acts);
+}
+function dismissBatch() {
+  dismissed = true;
+  call("dismiss_reformat");
+  if (batch) dropBatch();
+}
+function dropBatch() {
+  const el = batch!;
+  batch = null;
+  batchTs = "";
+  clearTimeout(doneTimer);
+  doneTimer = 0;
+  el.classList.add("collapsed");
+  afterMotion(el, reduced() ? 200 : 900, () => el.remove());
+  chrome();
 }
 
 /* —— 入库仪式 —— */
