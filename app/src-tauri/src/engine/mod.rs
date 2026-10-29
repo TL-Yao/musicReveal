@@ -1067,19 +1067,18 @@ impl Engine {
         }
         let _ = std::fs::remove_dir_all(&covers);
         let finished = !tok.is_cancelled();
-        self.edit(|st| {
-            st.batch = None;
-            if finished {
-                st.settings.reformatting = false;
-                if let Some(r) = st.reformat.as_mut() {
-                    r.finished = true;
-                    (r.current, r.cover_url, r.eta_secs) = (None, None, None);
-                }
-            }
-        });
+        // 先落盘「不再续转」，再对外报结束：看到结束时设置文件已是新的
         if finished {
+            self.lock().settings.reformatting = false;
             self.persist();
         }
+        self.edit(|st| {
+            st.batch = None;
+            if let Some(r) = st.reformat.as_mut().filter(|_| finished) {
+                r.finished = true;
+                (r.current, r.cover_url, r.eta_secs) = (None, None, None);
+            }
+        });
     }
 
     /// 清掉已结束的批次；没结束时不动。
