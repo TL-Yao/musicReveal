@@ -26,7 +26,7 @@ check_muxers() { # ffmpeg 路径
   have="$("$1" -hide_banner -muxers 2>/dev/null | awk '$1 ~ /E/ {print $2}')"
   local m
   for m in "${MUXERS[@]}"; do
-    grep -qx "$m" <<<"$have" || { echo "$1 缺少 muxer：$m，终止" >&2; return 1; }
+    grep -qx "$m" <<<"$have" || { echo "$1 缺少 muxer：${m}，终止" >&2; return 1; }
   done
 }
 
