@@ -1181,10 +1181,8 @@ fn id3_text(id: &str, s: &str) -> Vec<u8> {
     id3_frame(id, &[&[3u8][..], s.as_bytes()].concat())
 }
 
-/// 不带标签的 16 bit WAV，末尾加一个由 `frames` 组成的 ID3v2.4 `id3 ` 块（逐字节自己写，不经 lofty）。
-fn wav_with_id3(ff: &Path, t: &Tmp, name: &str, frames: &[Vec<u8>]) -> PathBuf {
-    let p = t.0.join(name);
-    gen(ff, &p, &["-c:a", "pcm_s16le", "-bitexact"]);
+/// 由 `frames` 组成的 ID3v2.4 标签（逐字节自己写，不经 lofty）。
+fn id3_tag(frames: &[Vec<u8>]) -> Vec<u8> {
     let body: Vec<u8> = frames.concat();
     let n = body.len() as u32;
     let mut tag = b"ID3\x04\x00\x00".to_vec();
@@ -1195,13 +1193,25 @@ fn wav_with_id3(ff: &Path, t: &Tmp, name: &str, frames: &[Vec<u8>]) -> PathBuf {
         n as u8 & 0x7f,
     ]);
     tag.extend(body);
-    if tag.len() % 2 == 1 {
-        tag.push(0);
-    }
+    tag
+}
+
+/// 不带标签的 16 bit WAV，末尾加一个由 `frames` 组成的 ID3v2.4 `id3 ` 块。
+fn wav_with_id3(ff: &Path, t: &Tmp, name: &str, frames: &[Vec<u8>]) -> PathBuf {
+    wav_with_chunk(ff, t, name, b"id3 ", &id3_tag(frames))
+}
+
+/// 不带标签的 16 bit WAV，末尾加一个原样的数据块（奇数长度补一个 0）。
+fn wav_with_chunk(ff: &Path, t: &Tmp, name: &str, id: &[u8; 4], body: &[u8]) -> PathBuf {
+    let p = t.0.join(name);
+    gen(ff, &p, &["-c:a", "pcm_s16le", "-bitexact"]);
     let mut b = std::fs::read(&p).unwrap();
-    b.extend(b"id3 ");
-    b.extend((tag.len() as u32).to_le_bytes());
-    b.extend(tag);
+    b.extend(id);
+    b.extend((body.len() as u32).to_le_bytes());
+    b.extend(body);
+    if body.len() % 2 == 1 {
+        b.push(0);
+    }
     let riff = (b.len() - 8) as u32;
     b[4..8].copy_from_slice(&riff.to_le_bytes());
     std::fs::write(&p, b).unwrap();
@@ -1375,4 +1385,144 @@ async fn import_keeps_track_and_disc_totals() {
             o.output.display()
         );
     }
+}
+
+/// INFO 子项：ID、长度、内容、奇数补 0。
+fn info_item(id: &[u8; 4], v: &[u8]) -> Vec<u8> {
+    let mut b = id.to_vec();
+    b.extend((v.len() as u32).to_le_bytes());
+    b.extend(v);
+    if v.len() % 2 == 1 {
+        b.push(0);
+    }
+    b
+}
+
+/// 第四轮反例一：LIST INFO 子项声明的长度越过 LIST，或子项铺不满 LIST（尾部夹带字节）。
+#[test]
+fn review4_wav_info_items_must_tile_the_list() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("ap-r4-info");
+    let good = [&b"INFO"[..], &info_item(b"INAM", b"title\0")].concat();
+    // 对照：恰好铺满（含奇数补齐）的照转
+    let ok = wav_with_chunk(
+        &ff,
+        &t,
+        "ok.wav",
+        b"LIST",
+        &[&good[..], &info_item(b"IART", b"ab\0")].concat(),
+    );
+    assert!(recodable(&ok, Lossless::Alac));
+    let mut over = good.clone();
+    over.extend(b"IART\xff\x00\x00\x00ab");
+    let a = wav_with_chunk(&ff, &t, "a.wav", b"LIST", &over);
+    refused(&t, &a, Lossless::Alac, "INFO");
+    let mut tail = good.clone();
+    tail.extend(b"xyz!");
+    let b = wav_with_chunk(&ff, &t, "b.wav", b"LIST", &tail);
+    refused(&t, &b, Lossless::Alac, "INFO");
+}
+
+/// 第四轮反例二：`id3 ` 块里标签声明的大小之后还有非零字节；帧区 padding 之后又出现非零字节。
+#[test]
+fn review4_wav_id3_bytes_outside_the_frames_are_refused() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("ap-r4-id3");
+    let title = id3_text("TIT2", "标题");
+    // 对照：标签后、帧区末尾全是 0 的照转
+    let mut padded = id3_tag(&[title.clone(), vec![0; 16]]);
+    padded.extend([0; 6]);
+    let ok = wav_with_chunk(&ff, &t, "ok.wav", b"id3 ", &padded);
+    assert!(recodable(&ok, Lossless::Alac));
+    let mut after = id3_tag(std::slice::from_ref(&title));
+    after.extend(id3_text("TPE1", "藏在标签外"));
+    let a = wav_with_chunk(&ff, &t, "a.wav", b"id3 ", &after);
+    refused(&t, &a, Lossless::Alac, "ID3");
+    let hidden = id3_tag(&[title, vec![0; 4], id3_text("TPE1", "藏在 padding 后")]);
+    let b = wav_with_chunk(&ff, &t, "b.wav", b"id3 ", &hidden);
+    refused(&t, &b, Lossless::Alac, "ID3");
+}
+
+/// 在盒子路径 `path`（自顶层起）的最后一个盒子末尾追加 `atom`，沿途改长度（moov 在 mdat 之后，不影响偏移）。
+fn mp4_append(p: &Path, path: &[&[u8; 4]], atom: &[u8]) {
+    let mut b = std::fs::read(p).unwrap();
+    let (mut from, mut to, mut chain) = (0, b.len(), vec![]);
+    for ty in path {
+        let mut i = from;
+        loop {
+            assert!(i < to, "没有 {ty:?}");
+            let n = u32::from_be_bytes(b[i..i + 4].try_into().unwrap()) as usize;
+            if &&b[i + 4..i + 8] == ty {
+                chain.push(i);
+                // meta 是带版本的盒子
+                from = i + if *ty == b"meta" { 12 } else { 8 };
+                to = i + n;
+                break;
+            }
+            i += n;
+        }
+    }
+    let mdat = b.windows(4).position(|w| w == b"mdat").unwrap();
+    assert!(chain[0] > mdat);
+    b.splice(to..to, atom.iter().copied());
+    for at in chain {
+        let n = u32::from_be_bytes(b[at..at + 4].try_into().unwrap()) + atom.len() as u32;
+        b[at..at + 4].copy_from_slice(&n.to_be_bytes());
+    }
+    std::fs::write(p, b).unwrap();
+}
+
+fn mbox(ty: &[u8], body: &[u8]) -> Vec<u8> {
+    [&((body.len() + 8) as u32).to_be_bytes()[..], ty, body].concat()
+}
+
+/// 第四轮反例三：meta 里第二个 ilst（lofty 只读一个）。
+#[test]
+fn review4_second_ilst_is_refused() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("ap-r4-ilst");
+    let src = sample(&ff, &t, "a.flac", &["-c:a", "flac"]);
+    let m4a = recode_lossless(&src, Lossless::Alac, &CancelToken::default()).unwrap();
+    let data = mbox(
+        b"data",
+        &[&[0, 0, 0, 1, 0, 0, 0, 0][..], "第二个".as_bytes()].concat(),
+    );
+    mp4_append(
+        &m4a,
+        &[b"moov", b"udta", b"meta"],
+        &mbox(b"ilst", &mbox(b"\xa9wrt", &data)),
+    );
+    refused(&t, &m4a, Lossless::Flac, "ilst");
+}
+
+/// 第四轮反例四：data 类型与键不符——BMP（27）的封面、整数（21）写的作曲。
+#[test]
+fn review4_mp4_data_type_must_match_the_key() {
+    use lofty::mp4::{Atom, AtomData, AtomIdent, Mp4File};
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("ap-r4-type");
+    let src = sample(&ff, &t, "a.flac", &["-c:a", "flac"]);
+    let m4a = recode_lossless(&src, Lossless::Alac, &CancelToken::default()).unwrap();
+    let mut b = std::fs::read(&m4a).unwrap();
+    let at = b
+        .windows(8)
+        .position(|w| &w[..4] == b"covr" && &w[4..] != b"\0\0\0\0")
+        .unwrap();
+    assert_eq!(&b[at + 8..at + 12], b"data");
+    assert_eq!(b[at + 15], 14);
+    b[at + 15] = 27;
+    std::fs::write(&m4a, b).unwrap();
+    refused(&t, &m4a, Lossless::Flac, "covr");
+
+    let src = sample(&ff, &t, "b.flac", &["-c:a", "flac"]);
+    let m4a = recode_lossless(&src, Lossless::Alac, &CancelToken::default()).unwrap();
+    let mut f =
+        Mp4File::read_from(&mut std::fs::File::open(&m4a).unwrap(), Default::default()).unwrap();
+    f.ilst_mut().unwrap().insert(Atom::new(
+        AtomIdent::Fourcc(*b"\xa9wrt"),
+        AtomData::SignedInteger(7),
+    ));
+    f.save_to_path(&m4a, lofty::config::WriteOptions::default())
+        .unwrap();
+    refused(&t, &m4a, Lossless::Flac, "©wrt");
 }

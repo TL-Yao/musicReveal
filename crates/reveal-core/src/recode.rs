@@ -109,12 +109,15 @@ const KNOWN: &[&str] = &[
 /// - FLAC：以 `fLaC` 开头（前面不带 ID3），只有 STREAMINFO、PADDING、SEEKTABLE、VORBIS_COMMENT
 ///   （至多一个）、PICTURE（至多一张，正面封面、无描述）块；文件尾没有 ID3v1 / APE 标签。
 /// - WAV：RIFF/WAVE，只有 `fmt `、`data`、`JUNK`/`junk`/`PAD `/`FLLR` 填充、至多一个 `LIST`（须是
-///   INFO，子项逐个枚举、同一项至多一次）、至多一个 `id3 `/`ID3 ` 块。ID3 须是 v2.3 / v2.4、标签头
-///   与各帧都没有标志位；原始帧逐个枚举，同一帧 ID 至多一次；只有对应 `KNOWN` 的标准文本帧与至多
+///   INFO，子项逐个枚举、恰好铺满 LIST、同一项至多一次）、至多一个 `id3 `/`ID3 ` 块。ID3 须是
+///   v2.3 / v2.4、标签头与各帧都没有标志位，帧与 padding 恰好铺满声明的大小、padding 与标签之后
+///   只有 0；原始帧逐个枚举，同一帧 ID 至多一次；只有对应 `KNOWN` 的标准文本帧与至多
 ///   一张正面封面、无描述的 APIC（TXXX、COMM、USLT 等一律不收）。
 /// - MP4（ALAC）：顶层只有 ftyp、moov、mdat、free、skip、wide；moov 下只有 mvhd、iods、一条 trak、
 ///   至多一个 udta（trak 下只有 tkhd、edts、mdia）；udta 下只有一个 meta，其 hdlr 是 mdir、下面只有
-///   hdlr、ilst 与填充；ilst 里每个原子只有一个值，covr 至多一张，没有自由格式（`----`）原子。
+///   hdlr、恰好一个 ilst 与填充；盒子长度恰好嵌套；ilst 里每个原子只有一个值、data 类型是该键的规范
+///   类型（文本 UTF-8，trkn / disk 二进制，gnre 整数，covr JPEG / PNG），covr 至多一张，没有自由格式
+///   （`----`）原子。
 /// - 所有格式的标签项：键在 `KNOWN` 里且就是规范名（别名不收）；同一项（大小写、别名、「描述 / 注释」
 ///   都算同一项）只出现一次；值非空、没有 NUL（多值）；曲序、碟号及其总数是 1–65535 的规范十进制数，
 ///   有总数就得有序号。
@@ -244,14 +247,20 @@ fn wav_items(f: &mut std::fs::File) -> Result<Items, String> {
                 if b.get(..4) != Some(b"INFO") {
                     return Err("非 INFO 的 LIST 块".into());
                 }
+                // 子项须恰好铺满 LIST：奇数长度后的补齐字节须是 0，只有最后一项可省
                 let mut ids = HashSet::new();
                 let mut i = 4;
-                while i + 8 <= b.len() {
+                while i < b.len() {
+                    let n = u32le(&b, i + 4).ok_or("INFO 结构损坏")?;
                     let id = fourcc(&b[i..i + 4]);
+                    i += 8 + n;
+                    if i > b.len() || (n % 2 == 1 && i < b.len() && b[i] != 0) {
+                        return Err(format!("INFO {id} 项的长度越界"));
+                    }
+                    i += (n % 2).min(b.len() - i);
                     if !ids.insert(id.clone()) {
                         return Err(format!("INFO {id} 项出现多次"));
                     }
-                    i += 8 + u32le(&b, i + 4).unwrap_or(0).next_multiple_of(2);
                 }
             }
             id => return Err(format!("{} 数据块", fourcc(id))),
@@ -333,7 +342,11 @@ fn id3_frame_ids(b: &[u8]) -> Result<(), String> {
     if !matches!(ver, 3 | 4) || b[5] != 0 {
         return Err(format!("ID3v2.{ver} 或带标志位的 ID3"));
     }
-    let end = (10 + syncsafe(&b[6..10])).min(b.len());
+    let end = 10 + syncsafe(&b[6..10]);
+    // 标签之后到块尾只能是 0
+    if end > b.len() || b[end..].iter().any(|&c| c != 0) {
+        return Err("ID3 标签外有多余字节".into());
+    }
     let (mut ids, mut i) = (HashSet::new(), 10);
     while i + 10 <= end && b[i] != 0 {
         let id = fourcc(&b[i..i + 4]);
@@ -348,6 +361,13 @@ fn id3_frame_ids(b: &[u8]) -> Result<(), String> {
             return Err(format!("ID3 {id} 帧出现多次"));
         }
         i += 10 + size;
+        if i > end {
+            return Err(format!("ID3 {id} 帧的长度越界"));
+        }
+    }
+    // 帧区的 padding 之后不能再有内容
+    if b[i..end].iter().any(|&c| c != 0) {
+        return Err("ID3 padding 之后有多余字节".into());
     }
     Ok(())
 }
@@ -366,8 +386,6 @@ fn boxes(b: &[u8]) -> Result<Box<Boxes<'_>>, String> {
             let big = b.get(i + 8..i + 16).ok_or_else(bad)?;
             size = u64::from_be_bytes(big.try_into().unwrap()) as usize;
             hl = 16;
-        } else if size == 0 {
-            size = b.len() - i;
         }
         if size < hl || size > b.len() - i {
             return Err(bad());
@@ -401,6 +419,9 @@ fn mp4_meta(b: &[u8]) -> Result<(), String> {
         }
     }
     only(&kids, &[b"hdlr", b"ilst", b"free", b"skip"], "meta ")?;
+    if count(&kids, b"ilst") != 1 {
+        return Err("meta 里不是恰好一个 ilst".into());
+    }
     kids.iter()
         .filter(|(t, _)| t == b"ilst")
         .try_for_each(|(_, c)| ilst_raw(c))
@@ -426,6 +447,19 @@ fn ilst_raw(b: &[u8]) -> Result<(), String> {
             ));
         }
         only(&kids, &[b"data"], &format!("{name} "))?;
+        // data 头：版本 0、类型码、locale；类型须是该键的规范类型
+        let want: &[usize] = match t {
+            b"covr" => &[13, 14],
+            b"trkn" | b"disk" => &[0],
+            b"gnre" => &[21],
+            _ => &[1],
+        };
+        if let Some((_, d)) = kids
+            .iter()
+            .find(|(_, d)| !u32be(d, 0).is_some_and(|c| want.contains(&c)))
+        {
+            return Err(format!("{name} 的数据类型 {}", u32be(d, 0).unwrap_or(0)));
+        }
         match &kids[..] {
             [(_, d)] if d.len() > 8 => {}
             [_] => return Err(format!("{name} 的值为空")),
