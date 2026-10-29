@@ -319,6 +319,15 @@ fn sample(ff: &Path, t: &Tmp, name: &str, args: &[&str]) -> PathBuf {
     let p = t.0.join(name);
     gen(ff, &p, args);
     tag(&p, &png(ff, t, "red"), &[]);
+    if name.ends_with(".wav") {
+        // WAV 的歌词是带语言的 USLT，不在互转白名单里
+        let mut f = read_part(&p);
+        f.primary_tag_mut()
+            .unwrap()
+            .remove_key(ItemKey::UnsyncLyrics);
+        f.save_to_path(&p, lofty::config::WriteOptions::default())
+            .unwrap();
+    }
     age(&p);
     p
 }
@@ -575,34 +584,16 @@ fn mdta_tagged_alac_is_refused() {
     refused(&t, &src, Lossless::Flac, "mdta");
 }
 
-/// 审查实验二：FLAC 里的自定义 Vorbis 注释转 ALAC、再转回都还在。
+/// 审查实验二：FLAC 里的自定义 Vorbis 注释：白名单外的键一律不转。
 #[test]
-fn custom_vorbis_comment_survives_both_ways() {
+fn custom_vorbis_comment_is_refused() {
     let Some(ff) = ffmpeg() else { return };
     let t = Tmp::new("ap-custom");
     let src = sample(&ff, &t, "a.flac", &["-c:a", "flac"]);
-    {
-        use lofty::config::WriteOptions;
-        use lofty::flac::FlacFile;
-        use lofty::prelude::*;
-        let mut f = FlacFile::read_from(
-            &mut std::fs::File::open(&src).unwrap(),
-            lofty::config::ParseOptions::new(),
-        )
-        .unwrap();
-        let vc = f.vorbis_comments_mut().unwrap();
-        vc.push("REVIEW_CUSTOM".into(), "自定义值".into());
-        vc.insert("ENCODER".into(), "某编码器 1.0".into());
-        f.save_to_path(&src, WriteOptions::default()).unwrap();
-    }
-    let want = ff_meta(&ff, &src);
-    assert!(has(&want, "review_custom", "自定义值"), "{want:?}");
-    let tok = CancelToken::default();
-    let m4a = recode_lossless(&src, Lossless::Alac, &tok).unwrap();
-    assert!(has(&ff_meta(&ff, &m4a), "review_custom", "自定义值"));
-    let flac = recode_lossless(&m4a, Lossless::Flac, &tok).unwrap();
-    let back = ff_meta(&ff, &flac);
-    assert!(has(&back, "review_custom", "自定义值"), "{back:?}");
+    with_vc(&src, |vc| {
+        vc.push("REVIEW_CUSTOM".into(), "自定义值".into())
+    });
+    refused(&t, &src, Lossless::Alac, "REVIEW_CUSTOM");
 }
 
 /// 转不过去的标签（MP4 里 FLAC 表达不了的原子）：不转，原文件不变。
@@ -803,6 +794,34 @@ fn add_flac_block(p: &Path, ty: u8, payload: &[u8]) {
     std::fs::write(p, b).unwrap();
 }
 
+/// 逐字节往 VORBIS_COMMENT 块里追加注释（不经 lofty：它会丢掉空值、合并大小写）。
+fn add_vc_raw(p: &Path, entries: &[&str]) {
+    let mut b = std::fs::read(p).unwrap();
+    let mut i = 4;
+    loop {
+        let len = u32::from_be_bytes([0, b[i + 1], b[i + 2], b[i + 3]]) as usize;
+        if b[i] & 0x7f == 4 {
+            let body = i + 4;
+            let vendor = u32::from_le_bytes(b[body..body + 4].try_into().unwrap()) as usize;
+            let at = body + 4 + vendor;
+            let n = u32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+            b[at..at + 4].copy_from_slice(&(n + entries.len() as u32).to_le_bytes());
+            let mut add = vec![];
+            for e in entries {
+                add.extend((e.len() as u32).to_le_bytes());
+                add.extend(e.as_bytes());
+            }
+            let new = (len + add.len()) as u32;
+            b[i + 1..i + 4].copy_from_slice(&new.to_be_bytes()[1..]);
+            b.splice(body + len..body + len, add);
+            break;
+        }
+        assert_eq!(b[i] & 0x80, 0, "没有 VORBIS_COMMENT 块");
+        i += 4 + len;
+    }
+    std::fs::write(p, b).unwrap();
+}
+
 fn with_vc(p: &Path, f: impl FnOnce(&mut lofty::ogg::tag::VorbisComments)) {
     use lofty::flac::FlacFile;
     let mut file =
@@ -821,9 +840,8 @@ fn review_multi_value_and_case_collision_are_refused() {
     with_vc(&a, |vc| vc.push("ARTIST".into(), "第二位".into()));
     refused(&t, &a, Lossless::Alac, "ARTIST 出现多次");
     let b = sample(&ff, &t, "b.flac", &["-c:a", "flac"]);
-    with_vc(&b, |vc| vc.push("Review_X".into(), "甲".into()));
-    with_vc(&b, |vc| vc.push("REVIEW_X".into(), "乙".into()));
-    refused(&t, &b, Lossless::Alac, "REVIEW_X 出现多次");
+    add_vc_raw(&b, &["genre=摇滚"]);
+    refused(&t, &b, Lossless::Alac, "GENRE 出现多次");
 }
 
 /// 复审实验：MP4 里两个同名自由格式原子，mean 不同。
@@ -848,7 +866,7 @@ fn review_mp4_same_freeform_name_with_different_mean_is_refused() {
     }
     f.save_to_path(&m4a, lofty::config::WriteOptions::default())
         .unwrap();
-    refused(&t, &m4a, Lossless::Flac, "REVIEW");
+    refused(&t, &m4a, Lossless::Flac, "REVIEW 自由格式原子");
 }
 
 /// 复审实验：FLAC 里的 APPLICATION 块。
@@ -1071,4 +1089,234 @@ async fn apple_keeps_multichannel_flac_as_flac() {
         assert_eq!(ch, Some(n.parse().unwrap()), "{n}");
         assert_eq!(pcm(&ff, &src), pcm(&ff, &o.output), "{n}");
     }
+}
+
+// ---------- 第三轮复审：白名单收紧到我们自己的产物 ----------
+
+/// 第三轮反例一：会被当成容器字段忽略的名字写成自定义 Vorbis 键。直接转、续跑都拒。
+#[test]
+fn review3_container_field_names_as_vorbis_keys_are_refused() {
+    use crate::recode::HALT_AFTER_PLACE;
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("ap-r3-brand");
+    let put = |vc: &mut lofty::ogg::tag::VorbisComments| {
+        vc.push("major_brand".into(), "M4A ".into());
+        vc.push("minor_version".into(), "512".into());
+        vc.push("compatible_brands".into(), "M4A isom".into());
+    };
+    let a = sample(&ff, &t, "a.flac", &["-c:a", "flac"]);
+    with_vc(&a, put);
+    refused(&t, &a, Lossless::Alac, "MAJOR_BRAND");
+
+    // 续跑：上次换上 .m4a 后中断，源里多了这三个键（ffmpeg 两边都当容器字段丢掉）
+    let tok = CancelToken::default();
+    let b = sample(&ff, &t, "b.flac", &["-c:a", "flac"]);
+    HALT_AFTER_PLACE.set(true);
+    let _ = recode_lossless(&b, Lossless::Alac, &tok).unwrap_err();
+    HALT_AFTER_PLACE.set(false);
+    with_vc(&b, put);
+    let m4a = b.with_extension("m4a");
+    let (sb, mb) = (std::fs::read(&b).unwrap(), std::fs::read(&m4a).unwrap());
+    assert!(!recodable(&b, Lossless::Alac));
+    assert!(recode_lossless(&b, Lossless::Alac, &tok).is_err());
+    assert!(std::fs::read(&b).unwrap() == sb && std::fs::read(&m4a).unwrap() == mb);
+    no_parts(&t.0);
+}
+
+/// 第三轮反例二：空值（自定义键、白名单内的键）与空的 UTF8 自由格式原子。
+#[test]
+fn review3_empty_values_are_refused() {
+    use lofty::mp4::{Atom, AtomData, AtomIdent, Mp4File};
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("ap-r3-empty");
+    let a = sample(&ff, &t, "a.flac", &["-c:a", "flac"]);
+    add_vc_raw(&a, &["REVIEW_EMPTY="]);
+    refused(&t, &a, Lossless::Alac, "REVIEW_EMPTY");
+    let b = sample(&ff, &t, "b.flac", &["-c:a", "flac"]);
+    add_vc_raw(&b, &["COMMENT="]);
+    refused(&t, &b, Lossless::Alac, "COMMENT 的值为空");
+
+    // 空的 UTF8 自由格式原子、空的 ©grp：lofty 照写，但读回时跳过空值
+    for (name, ident, why) in [
+        (
+            "c.flac",
+            AtomIdent::Freeform {
+                mean: "com.apple.iTunes".into(),
+                name: "EMPTY".into(),
+            },
+            "----:com.apple.iTunes:EMPTY",
+        ),
+        ("d.flac", AtomIdent::Fourcc(*b"\xa9grp"), "©grp 的值为空"),
+    ] {
+        let src = sample(&ff, &t, name, &["-c:a", "flac"]);
+        let m4a = recode_lossless(&src, Lossless::Alac, &CancelToken::default()).unwrap();
+        let mut f = Mp4File::read_from(&mut std::fs::File::open(&m4a).unwrap(), Default::default())
+            .unwrap();
+        f.ilst_mut()
+            .unwrap()
+            .insert(Atom::new(ident, AtomData::UTF8(String::new())));
+        f.save_to_path(&m4a, lofty::config::WriteOptions::default())
+            .unwrap();
+        refused(&t, &m4a, Lossless::Flac, why);
+    }
+}
+
+/// ID3v2.4 帧：ID、同步安全长度、无标志位。
+fn id3_frame(id: &str, body: &[u8]) -> Vec<u8> {
+    let n = body.len() as u32;
+    let mut f = id.as_bytes().to_vec();
+    f.extend([
+        (n >> 21) as u8 & 0x7f,
+        (n >> 14) as u8 & 0x7f,
+        (n >> 7) as u8 & 0x7f,
+        n as u8 & 0x7f,
+    ]);
+    f.extend([0, 0]);
+    f.extend(body);
+    f
+}
+
+/// UTF-8 文本帧。
+fn id3_text(id: &str, s: &str) -> Vec<u8> {
+    id3_frame(id, &[&[3u8][..], s.as_bytes()].concat())
+}
+
+/// 不带标签的 16 bit WAV，末尾加一个由 `frames` 组成的 ID3v2.4 `id3 ` 块（逐字节自己写，不经 lofty）。
+fn wav_with_id3(ff: &Path, t: &Tmp, name: &str, frames: &[Vec<u8>]) -> PathBuf {
+    let p = t.0.join(name);
+    gen(ff, &p, &["-c:a", "pcm_s16le", "-bitexact"]);
+    let body: Vec<u8> = frames.concat();
+    let n = body.len() as u32;
+    let mut tag = b"ID3\x04\x00\x00".to_vec();
+    tag.extend([
+        (n >> 21) as u8 & 0x7f,
+        (n >> 14) as u8 & 0x7f,
+        (n >> 7) as u8 & 0x7f,
+        n as u8 & 0x7f,
+    ]);
+    tag.extend(body);
+    if tag.len() % 2 == 1 {
+        tag.push(0);
+    }
+    let mut b = std::fs::read(&p).unwrap();
+    b.extend(b"id3 ");
+    b.extend((tag.len() as u32).to_le_bytes());
+    b.extend(tag);
+    let riff = (b.len() - 8) as u32;
+    b[4..8].copy_from_slice(&riff.to_le_bytes());
+    std::fs::write(&p, b).unwrap();
+    p
+}
+
+/// 第三轮反例三：WAV 里带语言 jpn 的 COMM、USLT（语言属性两边表达不了）。
+#[test]
+fn review3_wav_comm_and_uslt_are_refused() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("ap-r3-lang");
+    let lang = |id: &str, s: &str| id3_frame(id, &[&[3u8][..], b"jpn\0", s.as_bytes()].concat());
+    let title = id3_text("TIT2", "标题");
+    let a = wav_with_id3(&ff, &t, "a.wav", &[title.clone(), lang("COMM", "注释")]);
+    refused(&t, &a, Lossless::Alac, "COMM");
+    let b = wav_with_id3(&ff, &t, "b.wav", &[title, lang("USLT", "[00:01.00]词")]);
+    refused(&t, &b, Lossless::Alac, "USLT");
+}
+
+/// 第三轮反例四：WAV 里两个 description 相同的 TXXX（lofty 读时折叠成一个）；同一标准帧出现两次同理。
+#[test]
+fn review3_wav_duplicate_frames_are_refused() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("ap-r3-txxx");
+    let txxx = |v: &str| id3_frame("TXXX", &[&[3u8][..], b"REVIEW\0", v.as_bytes()].concat());
+    let a = wav_with_id3(&ff, &t, "a.wav", &[txxx("一"), txxx("二")]);
+    refused(&t, &a, Lossless::Alac, "TXXX");
+    let b = wav_with_id3(
+        &ff,
+        &t,
+        "b.wav",
+        &[id3_text("TIT2", "一"), id3_text("TIT2", "二")],
+    );
+    refused(&t, &b, Lossless::Alac, "TIT2");
+    // 只用白名单内的标准帧、各一次：照转
+    let c = wav_with_id3(
+        &ff,
+        &t,
+        "c.wav",
+        &[
+            id3_text("TIT2", "标题"),
+            id3_text("TPE1", "歌手"),
+            id3_text("TRCK", "3/12"),
+        ],
+    );
+    let m4a = recode_lossless(&c, Lossless::Alac, &CancelToken::default()).unwrap();
+    assert!(is_alac(&m4a));
+}
+
+/// 转换期间源文件被改了权限：不删源、不留新文件，记失败。
+#[test]
+fn source_changed_during_recode_is_not_replaced() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("ap-chmod");
+    let src = sample(&ff, &t, "a.flac", &["-c:a", "flac"]);
+    std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let bytes = std::fs::read(&src).unwrap();
+    TAMPER.set(Some(|p: &Path| {
+        let src = p.parent().unwrap().join("a.flac");
+        std::fs::set_permissions(src, std::fs::Permissions::from_mode(0o400)).unwrap();
+    }));
+    let e = recode_lossless(&src, Lossless::Alac, &CancelToken::default()).unwrap_err();
+    TAMPER.set(None);
+    assert_eq!(e.to_string(), "转换期间原文件被改动，未替换");
+    assert!(std::fs::read(&src).unwrap() == bytes);
+    let mode = std::fs::metadata(&src).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o400);
+    assert!(!src.with_extension("m4a").exists());
+    no_parts(&t.0);
+}
+
+/// convert(Apple) 产出的 ALAC 转 FLAC 再转回 ALAC：每次都成功，独立读到的标签不变。
+#[tokio::test]
+async fn our_own_apple_output_recodes_both_ways() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("ap-own-alac");
+    let src = t.0.join("src.flac");
+    gen(
+        &ff,
+        &src,
+        &[
+            "-ar",
+            "44100",
+            "-c:a",
+            "flac",
+            "-metadata",
+            "comment=163 key(Don't modify):abc",
+        ],
+    );
+    let out = t.0.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let opts = ConvertOptions {
+        output_dir: out.clone(),
+        format: OutputFormat::Apple,
+        ffmpeg: find_ffmpeg(),
+    };
+    let o = convert(
+        &src,
+        &opts,
+        &OwnEnricher(png(&ff, &t, "red")),
+        None,
+        &CancelToken::default(),
+        &mut |_| {},
+    )
+    .await
+    .unwrap();
+    assert!(is_alac(&o.output));
+    let want = ff_meta(&ff, &o.output);
+    assert!(has(&want, "title", "歌名"), "{want:?}");
+    let tok = CancelToken::default();
+    let flac = recode_lossless(&o.output, Lossless::Flac, &tok).unwrap();
+    let back = recode_lossless(&flac, Lossless::Alac, &tok).unwrap();
+    let mut a = want.clone();
+    let mut b = ff_meta(&ff, &back);
+    a.sort();
+    b.sort();
+    assert_eq!(a, b);
 }

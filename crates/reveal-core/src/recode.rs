@@ -5,9 +5,7 @@ use crate::convert::{
 };
 use lofty::config::{ParseOptions, WriteOptions};
 use lofty::file::{AudioFile, FileType, TaggedFile, TaggedFileExt};
-use lofty::flac::FlacFile;
-use lofty::mp4::{Atom, AtomData, AtomIdent, Mp4Codec, Mp4File};
-use lofty::ogg::tag::VorbisComments;
+use lofty::mp4::{AtomData, AtomIdent, Mp4Codec, Mp4File};
 use lofty::picture::PictureType;
 use lofty::prelude::ItemKey;
 use lofty::tag::{ItemValue, Tag, TagExt, TagType};
@@ -86,8 +84,8 @@ pub fn recodable(path: &Path, to: Lossless) -> bool {
         && read_audio(path).is_ok_and(|f| accepts(&f, path, to).is_ok())
 }
 
-/// 两种格式间都能原样表达、并经 ffmpeg 独立核对过的标签（Vorbis 名）。lofty 认得的其余标签一律
-/// 不转；它不认得的自定义键按原名转成 MP4 的 `----:com.apple.iTunes:<名>`、再转回 Vorbis 注释。
+/// 两种格式间都能原样表达、并经 ffmpeg 独立核对过的标签（Vorbis 名）：本应用自己写出的就是这些。
+/// 其余任何键（自定义键、TXXX、MP4 自由格式原子）一律不转。
 const KNOWN: &[&str] = &[
     "TITLE",
     "ARTIST",
@@ -106,23 +104,20 @@ const KNOWN: &[&str] = &[
     "ENCODER",
 ];
 
-/// ffmpeg 对这些 MP4 自由格式名另作处理（不进元数据或改名），核对不了。
-const FF_SPECIAL: &[&str] = &["cdec", "iTunSMPB", "DISCSUBTITLE"];
-
 /// 源文件的元数据结构是否在白名单里，不在时说出是哪一处。只读文件头部与元数据，不碰音频数据。
 ///
 /// - FLAC：以 `fLaC` 开头（前面不带 ID3），只有 STREAMINFO、PADDING、SEEKTABLE、VORBIS_COMMENT
 ///   （至多一个）、PICTURE（至多一张，正面封面、无描述）块；文件尾没有 ID3v1 / APE 标签。
 /// - WAV：RIFF/WAVE，只有 `fmt `、`data`、`JUNK`/`junk`/`PAD `/`FLLR` 填充、至多一个 `LIST`（须是
-///   INFO）、至多一个 `id3 `/`ID3 ` 块；ID3 只有文本帧（T*** 与 TXXX）、无描述的 COMM 与 USLT、
-///   至多一张正面封面且无描述的 APIC。
+///   INFO，子项逐个枚举、同一项至多一次）、至多一个 `id3 `/`ID3 ` 块。ID3 须是 v2.3 / v2.4、标签头
+///   与各帧都没有标志位；原始帧逐个枚举，同一帧 ID 至多一次；只有对应 `KNOWN` 的标准文本帧与至多
+///   一张正面封面、无描述的 APIC（TXXX、COMM、USLT 等一律不收）。
 /// - MP4（ALAC）：顶层只有 ftyp、moov、mdat、free、skip、wide；moov 下只有 mvhd、iods、一条 trak、
 ///   至多一个 udta（trak 下只有 tkhd、edts、mdia）；udta 下只有一个 meta，其 hdlr 是 mdir、下面只有
-///   hdlr、ilst 与填充；ilst 里每个原子只有一个值，covr 至多一张，自由格式原子的 mean 须是
-///   com.apple.iTunes。
-/// - 所有格式的标签项：名字是合法的 Vorbis 键；lofty 认得的须在 `KNOWN` 里且就是规范名（别名不收）；
-///   同一项（大小写、别名、「描述 / 注释」都算同一项）只出现一次；值里没有 NUL（多值）；
-///   曲序、碟号及其总数是 1–65535 的规范十进制数，有总数就得有序号。
+///   hdlr、ilst 与填充；ilst 里每个原子只有一个值，covr 至多一张，没有自由格式（`----`）原子。
+/// - 所有格式的标签项：键在 `KNOWN` 里且就是规范名（别名不收）；同一项（大小写、别名、「描述 / 注释」
+///   都算同一项）只出现一次；值非空、没有 NUL（多值）；曲序、碟号及其总数是 1–65535 的规范十进制数，
+///   有总数就得有序号。
 fn structure(path: &Path, ty: FileType) -> Result<(), String> {
     let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let items = match ty {
@@ -241,14 +236,23 @@ fn wav_items(f: &mut std::fs::File) -> Result<Items, String> {
             b"fmt " | b"data" | b"JUNK" | b"junk" | b"PAD " | b"FLLR" => skip(f, len)?,
             b"id3 " | b"ID3 " => {
                 id3s += 1;
-                skip(f, len)?;
+                id3_frame_ids(&rd(f, len as usize)?)?;
             }
             b"LIST" => {
                 lists += 1;
-                if rd(f, 4)? != b"INFO" {
+                let b = rd(f, len as usize)?;
+                if b.get(..4) != Some(b"INFO") {
                     return Err("非 INFO 的 LIST 块".into());
                 }
-                skip(f, len.saturating_sub(4))?;
+                let mut ids = HashSet::new();
+                let mut i = 4;
+                while i + 8 <= b.len() {
+                    let id = fourcc(&b[i..i + 4]);
+                    if !ids.insert(id.clone()) {
+                        return Err(format!("INFO {id} 项出现多次"));
+                    }
+                    i += 8 + u32le(&b, i + 4).unwrap_or(0).next_multiple_of(2);
+                }
             }
             id => return Err(format!("{} 数据块", fourcc(id))),
         }
@@ -272,7 +276,7 @@ fn wav_items(f: &mut std::fs::File) -> Result<Items, String> {
         use lofty::id3::v2::Frame;
         let id = fr.id_str();
         match fr {
-            Frame::Text(_) | Frame::Timestamp(_) => {
+            Frame::Text(_) | Frame::Timestamp(_) if id != "TXXX" => {
                 let name = match id {
                     // lofty 把序号与总数都映射到同一帧上
                     "TRCK" => "TRACKNUMBER",
@@ -303,13 +307,6 @@ fn wav_items(f: &mut std::fs::File) -> Result<Items, String> {
                     _ => items.push((name.to_owned(), v)),
                 }
             }
-            Frame::UserText(x) => items.push((x.description.to_string(), x.content.to_string())),
-            Frame::Comment(c) if c.description.is_empty() => {
-                items.push(("COMMENT".into(), c.content.to_string()))
-            }
-            Frame::UnsynchronizedText(u) if u.description.is_empty() => {
-                items.push(("LYRICS".into(), u.content.to_string()))
-            }
             Frame::Picture(p)
                 if p.picture.pic_type() == PictureType::CoverFront
                     && p.picture.description().is_none_or(str::is_empty) =>
@@ -323,6 +320,36 @@ fn wav_items(f: &mut std::fs::File) -> Result<Items, String> {
         return Err("多张图片".into());
     }
     Ok(items)
+}
+
+/// ID3 标签里的原始帧 ID（lofty 读时会把重复帧折叠，所以在它之前自己数）：同一 ID 至多一次。
+fn id3_frame_ids(b: &[u8]) -> Result<(), String> {
+    let bad = || "ID3 损坏".to_string();
+    let syncsafe = |x: &[u8]| x.iter().fold(0usize, |n, &c| n << 7 | (c & 0x7f) as usize);
+    if b.len() < 10 || &b[..3] != b"ID3" {
+        return Err(bad());
+    }
+    let ver = b[3];
+    if !matches!(ver, 3 | 4) || b[5] != 0 {
+        return Err(format!("ID3v2.{ver} 或带标志位的 ID3"));
+    }
+    let end = (10 + syncsafe(&b[6..10])).min(b.len());
+    let (mut ids, mut i) = (HashSet::new(), 10);
+    while i + 10 <= end && b[i] != 0 {
+        let id = fourcc(&b[i..i + 4]);
+        let size = match ver {
+            4 => syncsafe(&b[i + 4..i + 8]),
+            _ => u32be(b, i + 4).ok_or_else(bad)?,
+        };
+        if b[i + 8..i + 10] != [0, 0] {
+            return Err(format!("ID3 {id} 帧带标志位"));
+        }
+        if !ids.insert(id.clone()) {
+            return Err(format!("ID3 {id} 帧出现多次"));
+        }
+        i += 10 + size;
+    }
+    Ok(())
 }
 
 /// 一层 MP4 盒子：(类型, 内容)。
@@ -373,7 +400,41 @@ fn mp4_meta(b: &[u8]) -> Result<(), String> {
             ));
         }
     }
-    only(&kids, &[b"hdlr", b"ilst", b"free", b"skip"], "meta ")
+    only(&kids, &[b"hdlr", b"ilst", b"free", b"skip"], "meta ")?;
+    kids.iter()
+        .filter(|(t, _)| t == b"ilst")
+        .try_for_each(|(_, c)| ilst_raw(c))
+}
+
+/// ilst 里的原始原子（lofty 读时会跳过空值等）：没有自由格式原子，每个只有一个非空的 data。
+fn ilst_raw(b: &[u8]) -> Result<(), String> {
+    for (t, c) in boxes(b)?.iter() {
+        let name = fourcc(t);
+        let kids = boxes(c)?;
+        if t == b"----" {
+            let part = |k: &[u8; 4]| {
+                kids.iter()
+                    .find(|(t, _)| t == k)
+                    .map_or("?".into(), |(_, c)| {
+                        String::from_utf8_lossy(c.get(4..).unwrap_or(b"")).into_owned()
+                    })
+            };
+            return Err(format!(
+                "----:{}:{} 自由格式原子",
+                part(b"mean"),
+                part(b"name")
+            ));
+        }
+        only(&kids, &[b"data"], &format!("{name} "))?;
+        match &kids[..] {
+            [(_, d)] if d.len() > 8 => {}
+            [_] => return Err(format!("{name} 的值为空")),
+            [] => return Err(format!("{name} 没有值")),
+            _ if t == b"covr" => return Err("多张封面".into()),
+            _ => return Err(format!("{name} 有多个值")),
+        }
+    }
+    Ok(())
 }
 
 fn mp4_items(f: &mut std::fs::File) -> Result<Items, String> {
@@ -450,19 +511,7 @@ fn mp4_items(f: &mut std::fs::File) -> Result<Items, String> {
                 };
                 (n.to_owned(), k)
             }
-            AtomIdent::Freeform { mean, name } => {
-                let full = format!("----:{mean}:{name}");
-                if mean != "com.apple.iTunes"
-                    || FF_SPECIAL.iter().any(|s| s.eq_ignore_ascii_case(name))
-                {
-                    return Err(format!("{full} 原子"));
-                }
-                let n = match ItemKey::from_key(TagType::Mp4Ilst, &full) {
-                    Some(i) => i.map_key(TagType::VorbisComments).unwrap_or(&full),
-                    None => name,
-                };
-                (n.to_string(), full)
-            }
+            AtomIdent::Freeform { mean, name } => return Err(format!("----:{mean}:{name} 原子")),
         };
         let [d] = data[..] else {
             return Err(format!("{shown} 有多个值"));
@@ -499,22 +548,15 @@ fn check_items(items: &[(String, String)]) -> Result<(), String> {
     let mut seen = HashSet::new();
     for (k, v) in items {
         let up = k.to_uppercase();
-        if k.is_empty() || !k.bytes().all(|b| (0x20..=0x7d).contains(&b) && b != b'=') {
-            return Err(format!("标签名「{k}」"));
-        }
-        let ok = match ItemKey::from_key(TagType::VorbisComments, k) {
-            Some(i) => {
-                KNOWN.contains(&up.as_str())
-                    && i.map_key(TagType::VorbisComments)
-                        .is_some_and(|c| c.eq_ignore_ascii_case(k))
-            }
-            None => {
-                ItemKey::from_key(TagType::Mp4Ilst, &format!("----:com.apple.iTunes:{k}")).is_none()
-                    && !FF_SPECIAL.iter().any(|s| s.eq_ignore_ascii_case(k))
-            }
-        };
+        let ok = KNOWN.contains(&up.as_str())
+            && ItemKey::from_key(TagType::VorbisComments, k)
+                .and_then(|i| i.map_key(TagType::VorbisComments))
+                .is_some_and(|c| c.eq_ignore_ascii_case(k));
         if !ok {
             return Err(format!("{up} 标签"));
+        }
+        if v.is_empty() {
+            return Err(format!("{up} 的值为空"));
         }
         if v.contains('\0') {
             return Err(format!("{up} 有多个值"));
@@ -547,6 +589,30 @@ thread_local! {
     pub(crate) static HALT_AFTER_PLACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+const CHANGED: &str = "转换期间原文件被改动，未替换";
+
+/// 原文件还是开始转换时那个：同一 inode，权限、大小、修改时间都没变。
+fn untouched(m: &std::fs::Metadata, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(path).is_ok_and(|n| {
+        (
+            n.dev(),
+            n.ino(),
+            n.mode(),
+            n.len(),
+            n.mtime(),
+            n.mtime_nsec(),
+        ) == (
+            m.dev(),
+            m.ino(),
+            m.mode(),
+            m.len(),
+            m.mtime(),
+            m.mtime_nsec(),
+        )
+    })
+}
+
 fn other(to: Lossless) -> Lossless {
     match to {
         Lossless::Alac => Lossless::Flac,
@@ -563,8 +629,8 @@ fn io(e: std::io::Error) -> ConvertError {
 }
 
 /// 把 `path`（FLAC / WAV 或 ALAC .m4a）无损转成 `to`，以「同名 + 新扩展名」落在原处并删掉原文件，
-/// 返回新路径。隐藏副本上转好后比对：解码后的 PCM、位深与采样率，以及经 ffmpeg 独立读到的全部标签
-/// （含自定义键）、附图与歌词（lofty 也再比一遍）全部一致才替换；保留创建时间、权限与扩展属性
+/// 返回新路径。隐藏副本上转好后比对：解码后的 PCM、位深与采样率，以及经 ffmpeg 独立读到的全部标签、
+/// 附图与歌词（lofty 也再比一遍）全部一致才替换；删原文件前原文件被改过（权限、大小、修改时间）则放弃；保留创建时间、权限与扩展属性
 /// （Finder 标签）。元数据结构不在白名单里（见 `structure`）的宁可不转。任一步不成返回一句中文原因，
 /// 原文件不变、不留副本。符号链接、只读文件不转；新文件名已被占用不覆盖——除非那个文件也在白名单里、
 /// 没有别的硬链接名、且与原文件完全一致（上次换上后没来得及删原文件），那就补上属性、删原文件，算转好。
@@ -591,8 +657,7 @@ pub fn recode_lossless(
         Lossless::Alac => ("m4a", ["-c:a", "alac", "-f", "ipod"]),
         Lossless::Flac => ("flac", ["-c:a", "flac", "-f", "flac"]),
     };
-    let raw = ff_meta(&ff, path, cancel)?;
-    let want = norm(&raw);
+    let want = norm(&ff_meta(&ff, path, cancel)?);
     let dst = path.with_extension(ext);
     if dst.symlink_metadata().is_ok() {
         // 上次换上新文件后没来得及删原文件（或本来就有一模一样的）：完全一致才删原文件
@@ -605,6 +670,9 @@ pub fn recode_lossless(
             && verify(&ff, path, &src, &want, &dst, cancel).is_ok();
         if !same {
             return Err(fail(format!("已有同名的 .{ext} 文件，未覆盖")));
+        }
+        if !untouched(&m, path) {
+            return Err(fail(CHANGED));
         }
         keep_attrs(&m, path, &dst).map_err(io)?;
         std::fs::remove_file(path).map_err(io)?;
@@ -624,7 +692,6 @@ pub fn recode_lossless(
         _ => fail("ffmpeg 转换失败，未替换"),
     })?;
     copy_tags(&src, &tmp, to).map_err(|e| fail(format!("写入标签失败：{e}")))?;
-    top_up(&ff, &raw, &want, &tmp, to, cancel)?;
     #[cfg(test)]
     if let Some(f) = TAMPER.get() {
         f(&tmp);
@@ -641,6 +708,10 @@ pub fn recode_lossless(
     #[cfg(test)]
     if HALT_AFTER_PLACE.get() {
         return Err(fail("测试：换上新文件后中断"));
+    }
+    if !untouched(&m, path) {
+        let _ = std::fs::remove_file(&dst);
+        return Err(fail(CHANGED));
     }
     if let Err(e) = std::fs::remove_file(path) {
         let _ = std::fs::remove_file(&dst);
@@ -825,7 +896,8 @@ fn parse_ffmeta(s: &str) -> Vec<(String, String)> {
 }
 
 /// 按键归一后的元数据：键小写、别名合一，「3/10」拆成序号与总数（MP4、ID3 的写法），值逐字不动；
-/// 同键多值排序。容器自带的几项不算。
+/// 同键多值排序。ffmpeg 从 MP4 容器生成的几项（major_brand 等）不算；源文件里真有同名标签的，
+/// 白名单先已拒转。
 type Meta = BTreeMap<String, Vec<String>>;
 
 const NUMERIC: [&str; 4] = ["track", "tracktotal", "disc", "disctotal"];
@@ -867,124 +939,6 @@ fn norm(items: &[(String, String)]) -> Meta {
     }
     m.values_mut().for_each(|v| v.sort());
     m
-}
-
-/// ffmpeg 在 MP4 里从固定原子读出的键：这些只能由 lofty 写进对应原子，不拿自由格式原子凑。
-const MP4_FIXED: &[&str] = &[
-    "title",
-    "artist",
-    "album_artist",
-    "album",
-    "date",
-    "comment",
-    "genre",
-    "composer",
-    "copyright",
-    "grouping",
-    "lyrics",
-    "encoder",
-    "description",
-    "synopsis",
-    "show",
-    "episode_id",
-    "network",
-    "track",
-    "tracktotal",
-    "disc",
-    "disctotal",
-    "compilation",
-    "gapless_playback",
-    "media_type",
-    "rating",
-    "hd_video",
-    "podcast",
-    "category",
-    "keywords",
-    "sort_name",
-    "sort_artist",
-    "sort_album",
-    "sort_album_artist",
-    "sort_composer",
-];
-
-fn vorbis_key(k: &str) -> String {
-    match k {
-        "track" => "TRACKNUMBER".into(),
-        "disc" => "DISCNUMBER".into(),
-        "album_artist" => "ALBUMARTIST".into(),
-        _ => k.to_uppercase(),
-    }
-}
-
-/// lofty 按通用标签写过之后，ffmpeg 读到源里有、新文件里没有或不同的项照原值补上：
-/// FLAC 写成 Vorbis 注释，MP4 写成 `----:com.apple.iTunes:<原键名>` 自由格式原子。
-fn top_up(
-    ff: &Path,
-    raw: &[(String, String)],
-    want: &Meta,
-    tmp: &Path,
-    to: Lossless,
-    cancel: &CancelToken,
-) -> Result<(), ConvertError> {
-    let have = norm(&ff_meta(ff, tmp, cancel)?);
-    let missing: Vec<&String> = want
-        .keys()
-        .filter(|k| have.get(*k) != want.get(*k))
-        .collect();
-    if missing.is_empty() {
-        return Ok(());
-    }
-    fn werr(e: impl std::fmt::Display) -> ConvertError {
-        fail(format!("写入标签失败：{e}"))
-    }
-    let mut file = std::fs::File::open(tmp).map_err(io)?;
-    match to {
-        Lossless::Flac => {
-            let mut f = FlacFile::read_from(&mut file, ParseOptions::new()).map_err(werr)?;
-            if f.vorbis_comments().is_none() {
-                f.set_vorbis_comments(VorbisComments::default());
-            }
-            let vc = f.vorbis_comments_mut().expect("刚补上");
-            for k in missing {
-                let old: Vec<String> = vc
-                    .items()
-                    .filter(|(x, _): &(&str, &str)| norm_key(x) == **k)
-                    .map(|(x, _)| x.to_owned())
-                    .collect();
-                for x in old {
-                    vc.remove(&x).for_each(drop);
-                }
-                for v in &want[k] {
-                    vc.push(vorbis_key(k), v.clone());
-                }
-            }
-            f.save_to_path(tmp, WriteOptions::default()).map_err(werr)
-        }
-        Lossless::Alac => {
-            let mut f = Mp4File::read_from(&mut file, ParseOptions::new()).map_err(werr)?;
-            if f.ilst().is_none() {
-                f.set_ilst(Default::default());
-            }
-            let ilst = f.ilst_mut().expect("刚补上");
-            for k in missing
-                .into_iter()
-                .filter(|k| !MP4_FIXED.contains(&k.as_str()))
-            {
-                let name = raw
-                    .iter()
-                    .find(|(x, _)| norm_key(x) == *k)
-                    .map_or(k.clone(), |(x, _)| x.clone());
-                let ident = AtomIdent::Freeform {
-                    mean: "com.apple.iTunes".into(),
-                    name: name.into(),
-                };
-                ilst.remove(&ident).for_each(drop);
-                let data = want[k].iter().map(|v| AtomData::UTF8(v.clone())).collect();
-                ilst.insert(Atom::from_collection(ident, data).expect("至少一个值"));
-            }
-            f.save_to_path(tmp, WriteOptions::default()).map_err(werr)
-        }
-    }
 }
 
 /// 附图（ffmpeg 的附带图片流）逐张的 SHA-256，按顺序。
