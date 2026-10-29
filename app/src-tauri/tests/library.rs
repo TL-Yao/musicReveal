@@ -961,3 +961,35 @@ fn display_shows_credit_lines_even_before_cleanup() {
     rescan(&r.lib, &r.rx, o, 1);
     assert_eq!(fingerprint(&a), print);
 }
+
+#[test]
+fn credit_lines_after_a_bom_are_cleaned_in_embedded_lyrics_and_lrc_files() {
+    let r = Rig::new("credits-bom");
+    let o = &r.out;
+    let a = mp3(&o.join("a.mp3"), &[], None);
+    reveal_core::embed_lyrics(&a, &format!("\u{feff}{CREDIT}\n[00:01.00]一\n")).unwrap();
+    let b = mp3(&o.join("b.mp3"), &[], None);
+    std::fs::create_dir_all(o.join("lrc")).unwrap();
+    std::fs::write(
+        o.join("lrc/b.lrc"),
+        format!("\u{feff}{CREDIT}\n[00:02.00]二\n"),
+    )
+    .unwrap();
+    r.lib.set_dir(o);
+    settled(&r.rx);
+    assert_eq!(
+        reveal_core::read_lyrics(&a).as_deref(),
+        Some("[00:00.00]作词: Hanser\n[00:01.00]一\n")
+    );
+    assert_eq!(
+        std::fs::read_to_string(o.join("lrc/b.lrc")).unwrap(),
+        "\u{feff}[00:00.00]作词: Hanser\n[00:02.00]二\n"
+    );
+    assert_eq!(
+        reveal_core::read_lyrics(&b).as_deref(),
+        Some("[00:00.00]作词: Hanser\n[00:02.00]二\n")
+    );
+    let after = fingerprints(o);
+    rescan(&r.lib, &r.rx, o, 1);
+    assert_eq!(without_markers(fingerprints(o)), after);
+}

@@ -19,8 +19,8 @@ DL="$BASE/dl"
 OUT="$BASE/out"
 WORK="$BASE/work"
 # App 用到的 muxer：转码（mp3、flac、ipod 即 .m4a）、抽封面（image2pipe）、
-# 改写前后核对（streamhash，含无损互转的 PCM 比对）
-MUXERS=(mp3 flac ipod image2pipe streamhash)
+# 改写前后核对（streamhash，含无损互转的 PCM 比对；ffmetadata，无损互转的标签比对）
+MUXERS=(mp3 flac ipod image2pipe streamhash ffmetadata)
 # App 用到的编码器：转码（libmp3lame、flac、alac、aac）、无损互转比对 PCM（pcm_s32le）
 ENCODERS=(libmp3lame flac alac aac pcm_s32le)
 

@@ -636,17 +636,21 @@ pub fn strip_timestamps(lrc: &str) -> String {
 }
 
 /// 网易云歌词开头的署名 JSON 行（`{"t":毫秒,"c":[{"tx":"作词: "},{"tx":"某人"}]}`）换成
-/// `[mm:ss.xx]作词: 某人` 这样的普通歌词行；其余行（含解析不了的 JSON 行）与换行符原样保留。
+/// `[mm:ss.xx]作词: 某人` 这样的普通歌词行；其余行（含解析不了的 JSON 行）、换行符与开头的 BOM
+/// 原样保留。
 pub fn credit_lines(text: &str) -> String {
-    text.split_inclusive('\n')
-        .map(|seg| {
-            let body = seg.trim_end_matches(['\r', '\n']);
-            match credit_line(body) {
-                Some(l) => l + &seg[body.len()..],
-                None => seg.to_owned(),
-            }
-        })
-        .collect()
+    let (bom, text) = match text.strip_prefix('\u{feff}') {
+        Some(t) => ("\u{feff}", t),
+        None => ("", text),
+    };
+    let lines = text.split_inclusive('\n').map(|seg| {
+        let body = seg.trim_end_matches(['\r', '\n']);
+        match credit_line(body) {
+            Some(l) => l + &seg[body.len()..],
+            None => seg.to_owned(),
+        }
+    });
+    std::iter::once(bom.to_owned()).chain(lines).collect()
 }
 
 fn credit_line(l: &str) -> Option<String> {

@@ -217,3 +217,12 @@ fn parse_lrc_shows_credit_json_lines_as_lyrics() {
         ]
     );
 }
+
+#[test]
+fn credit_line_after_a_utf8_bom_is_converted_and_the_bom_kept() {
+    use crate::credit_lines;
+    let src = "\u{feff}{\"t\":0,\"c\":[{\"tx\":\"作词: \"},{\"tx\":\"某人\"}]}\r\n[00:01.00]一\r\n";
+    let once = credit_lines(src);
+    assert_eq!(once, "\u{feff}[00:00.00]作词: 某人\r\n[00:01.00]一\r\n");
+    assert_eq!(credit_lines(&once), once);
+}
