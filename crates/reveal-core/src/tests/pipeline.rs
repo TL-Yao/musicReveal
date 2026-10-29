@@ -655,6 +655,28 @@ async fn lrc_in_lrc_folder_is_overwritten_and_never_affects_audio_numbering() {
     assert!(hidden.is_empty(), "{hidden:?}");
 }
 
+#[tokio::test]
+async fn lrc_folder_linked_outside_is_not_written_through() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("pl-lrc-link");
+    let plain = flac24(&ff, &t, &[]);
+    let input = t.write("src.ncm", &build_ncm(&plain, b"k", META, None));
+    let out = out_dir(&t);
+    let outside = t.0.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let victim = outside.join("歌手甲、歌手乙 - 测试歌.lrc");
+    std::fs::write(&victim, "外部").unwrap();
+    std::os::unix::fs::symlink(&outside, out.join("lrc")).unwrap();
+    let o = run(&input, &out, OutputFormat::Original, &LyricEnricher, None)
+        .await
+        .res
+        .unwrap();
+    assert_eq!(o.lrc, None);
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "外部");
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+    assert_eq!(read_lyrics(&o.output).as_deref(), Some(MERGED));
+}
+
 /// 普通音频，旁边放 `lrc`（为 None 不放），内嵌歌词 `embedded`；返回转换结果。
 async fn plain_with_sidecar(
     tag: &str,

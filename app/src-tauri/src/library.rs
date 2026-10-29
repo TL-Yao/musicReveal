@@ -466,6 +466,11 @@ impl Worker {
                     }
                 }
             }
+            drop(st);
+            if shown.elapsed() >= PARTIAL {
+                self.emit(lib);
+                shown = Instant::now();
+            }
         }
         self.save();
         lock(&lib.st).scanning = false;
@@ -570,9 +575,7 @@ impl Worker {
         }
         if let Some(b) = beside {
             let home = reveal_core::lrc_home(root, p);
-            let moved = home
-                .parent()
-                .map_or(Ok(()), std::fs::create_dir_all)
+            let moved = reveal_core::safe_lrc_dir(root, &home, true)
                 .and_then(|()| std::fs::rename(&b, &home));
             match moved {
                 Ok(()) => {
@@ -585,9 +588,9 @@ impl Worker {
                 }
                 Err(e) => {
                     eprintln!("无法把 {} 挪进 lrc 文件夹：{e}", b.display());
-                    if src.is_none() {
-                        self.failed.insert(p.to_path_buf(), s);
-                    }
+                    // 嵌入过的按新状态记，下次扫描不再试
+                    let now = src.as_ref().and_then(|_| scan::stat(p)).unwrap_or(s);
+                    self.failed.insert(p.to_path_buf(), now);
                 }
             }
         }
@@ -734,7 +737,12 @@ impl Library {
         let p = Path::new(&t.id);
         trash(p)?;
         let mut lrcs: Vec<PathBuf> = t.lrc.into_iter().collect();
-        lrcs.extend([reveal_core::lrc_home(&root, p), p.with_extension("lrc")]);
+        let home = reveal_core::lrc_home(&root, p);
+        // lrc 文件夹链到外面时不碰那边的文件
+        if reveal_core::safe_lrc_dir(&root, &home, false).is_ok() {
+            lrcs.push(home);
+        }
+        lrcs.push(p.with_extension("lrc"));
         // 逐个现查：同一个路径出现两次时第二次已不在
         for l in lrcs.iter().filter(|l| l.is_file()) {
             let _ = trash(l);

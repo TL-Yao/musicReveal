@@ -117,9 +117,9 @@ pub use track::{
 pub use enrich::OnlineEnricher;
 
 pub use convert::{
-    convert, find_ffmpeg, lrc_home, parse_lrc, strip_timestamps, CancelToken, ConvertError,
-    ConvertOptions, ConvertOutcome, Enricher, LyricLine, Lyrics, NoopEnricher, OutputFormat, Stage,
-    TrackMeta, PART_PREFIX,
+    convert, find_ffmpeg, lrc_home, parse_lrc, safe_lrc_dir, strip_timestamps, CancelToken,
+    ConvertError, ConvertOptions, ConvertOutcome, Enricher, LyricLine, Lyrics, NoopEnricher,
+    OutputFormat, Stage, TrackMeta, PART_PREFIX,
 };
 
 pub use creds::{

@@ -94,11 +94,37 @@ fn land(
     unreachable!("候选编号用尽")
 }
 
+/// `lrc` 的父目录在 `out_root` 之内，且从 `out_root` 往下每一级都是真目录（不是符号链接）时 Ok；
+/// `create` 时顺手建好缺的目录，否则缺目录也算不行。防止经符号链接写到输出文件夹外面。
+pub fn safe_lrc_dir(out_root: &Path, lrc: &Path, create: bool) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    let rel = lrc
+        .parent()
+        .and_then(|d| d.strip_prefix(out_root).ok())
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "不在输出文件夹里"))?;
+    let mut cur = out_root.to_path_buf();
+    for c in rel.components() {
+        cur.push(c);
+        match std::fs::symlink_metadata(&cur) {
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("{} 是符号链接或不是文件夹", cur.display()),
+                ))
+            }
+            Err(e) if create && e.kind() == ErrorKind::NotFound => std::fs::create_dir(&cur)?,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
 /// 写 `<dir>/lrc/…` 下的 .lrc：覆盖已有的（是符号链接就换成普通文件，不写穿）。
 fn write_lrc(dir: &Path, audio: &Path, text: &str) -> std::io::Result<PathBuf> {
     let p = lrc_home(dir, audio);
     let parent = p.parent().unwrap_or(dir);
-    std::fs::create_dir_all(parent)?;
+    safe_lrc_dir(dir, &p, true)?;
     let mut parts = Parts::default();
     let tmp = parts.add(parent);
     std::fs::File::create_new(&tmp)?.write_all(text.as_bytes())?;

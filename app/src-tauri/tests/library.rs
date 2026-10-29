@@ -624,6 +624,44 @@ fn scan_embeds_usable_lrc_and_files_it_under_the_lrc_folder() {
 }
 
 #[test]
+fn lrc_folder_linked_outside_is_left_alone() {
+    let r = Rig::new("lrclink");
+    let outside = r.t.0.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let victim = outside.join("a.lrc");
+    std::fs::write(&victim, "[00:09.00]外部\n").unwrap();
+    std::os::unix::fs::symlink(&outside, r.out.join("lrc")).unwrap();
+    let a = mp3(&r.out.join("a.mp3"), &[], None);
+    let beside = r.out.join("a.lrc");
+    std::fs::write(&beside, "[00:01.00]旁边\n").unwrap();
+    r.lib.set_dir(&r.out);
+    settled(&r.rx);
+    assert_eq!(
+        std::fs::read_to_string(&victim).unwrap(),
+        "[00:09.00]外部\n"
+    );
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+    assert!(beside.exists(), "挪不进去就留在旁边");
+    let t = r.lib.track(&id(&a)).unwrap();
+    assert!(t.has_lyrics);
+    assert_eq!(texts(&r.lib.lyrics(&id(&a)).unwrap()), ["旁边"]);
+    // 同状态不重试
+    r.lib.refresh();
+    let quiet = r.rx.recv_timeout(Duration::from_millis(500));
+    assert!(quiet.is_err(), "{quiet:?}");
+    // 删到废纸篓也不碰外部文件
+    r.lib.trash(&id(&a)).unwrap();
+    let bin = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".Trash");
+    for n in ["a.mp3", "a.lrc"] {
+        let _ = std::fs::remove_file(bin.join(n));
+    }
+    assert_eq!(
+        std::fs::read_to_string(&victim).unwrap(),
+        "[00:09.00]外部\n"
+    );
+}
+
+#[test]
 fn read_only_song_keeps_its_lrc_beside_and_is_not_retried() {
     use std::os::unix::fs::PermissionsExt;
     let r = Rig::new("readonly");
