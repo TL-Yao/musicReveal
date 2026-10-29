@@ -13,7 +13,7 @@ musicReveal 本身以 MIT 许可发布，见 [LICENSE](LICENSE)。它使用或�
 
 ## 2. FFmpeg 与 LAME（LGPL）
 
-打包后的 `musicReveal.app` 在 `Contents/MacOS/ffmpeg` 中附带一个独立的 ffmpeg 可执行文件，用于转码为 MP3 / FLAC。它由以下源码编译：
+打包后的 `musicReveal.app` 在 `Contents/MacOS/ffmpeg` 中附带一个独立的 ffmpeg 可执行文件，用于转码为 MP3 / FLAC / ALAC / AAC。它由以下源码编译：
 
 - [FFmpeg](https://ffmpeg.org/) 9.0.2，GNU Lesser General Public License 2.1 或更高版本；
 - [LAME](https://lame.sourceforge.io/) 3.100，GNU Lesser General Public License 2 或更高版本，静态链接进上述 ffmpeg。
