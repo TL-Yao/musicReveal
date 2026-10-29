@@ -708,8 +708,10 @@ pub struct LyricLine {
 }
 
 /// 带时间的歌词行按时间升序；同一时刻紧挨的第二行是第一行的译文（`merge_lrc` 的输出形状）。
+/// 网易云的署名 JSON 行按 `credit_lines` 当普通歌词行。
 pub fn parse_lrc(text: &str) -> Vec<LyricLine> {
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let text = credit_lines(text.strip_prefix('\u{feff}').unwrap_or(text));
+    let text = text.as_str();
     let mut v: Vec<(u64, &str)> = text
         .lines()
         .flat_map(|l| {

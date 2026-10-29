@@ -8,13 +8,14 @@ pub(crate) mod store;
 pub use model::*;
 pub use real::RealConverter;
 use reveal_core::{
-    CancelToken, ConvertError, ConvertOptions, ConvertOutcome, OutputFormat, QqStatus, Stage,
+    CancelToken, ConvertError, ConvertOptions, ConvertOutcome, Lossless, OutputFormat, QqStatus,
+    Stage,
 };
 use scan::Stat;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 pub use store::home;
 use store::{History, HistoryFile, Key, Pending, Settings};
 use tokio::sync::{watch, Notify};
@@ -62,6 +63,40 @@ fn fmt_of(f: OutputFormat) -> Fmt {
     }
 }
 
+/// 粗估互转速度：每首固定开销 + 按文件大小。
+const RECODE_SECS_PER_FILE: f64 = 0.3;
+const RECODE_BYTES_PER_SEC: f64 = 40e6;
+
+/// 资料库里切到 `f` 时要转换的歌（路径、大小）：Apple → FLAC / WAV；原格式 → 编码为 ALAC 的 .m4a。
+/// OGG / Opus / AAC / MP3 都不动。
+fn reformat_list(dir: &Path, f: Fmt) -> Vec<(PathBuf, u64)> {
+    if dir.as_os_str().is_empty() {
+        return vec![];
+    }
+    let keep = |p: &Path| {
+        let e = p
+            .extension()
+            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        match f {
+            Fmt::Apple => e == "flac" || e == "wav",
+            Fmt::Original => e == "m4a" && reveal_core::is_alac(p),
+        }
+    };
+    let mut v: Vec<(PathBuf, u64)> = scan::files(dir, &keep)
+        .into_iter()
+        .map(|(p, s)| (p, s.size))
+        .collect();
+    v.sort();
+    v
+}
+
+fn estimate(files: usize, bytes: u64) -> u64 {
+    (files as f64 * RECODE_SECS_PER_FILE + bytes as f64 / RECODE_BYTES_PER_SEC).ceil() as u64
+}
+
+const BUSY_REFORMAT: &str = "正在转换，完成前不能更改";
+
 /// 还没有结果的状态：同一源路径此时不再另建任务。
 fn unfinished(s: JobState) -> bool {
     !matches!(s, JobState::Done | JobState::Skipped | JobState::Failed)
@@ -105,7 +140,14 @@ struct State {
     ticks: u64,
     next_id: u64,
     stopping: bool,
+    /// 切换格式后的转换批次（结束后留着给前端看，直到 `dismiss_reformat`）。
+    reformat: Option<Reformat>,
+    /// 批次正在跑：取消它用。
+    batch: Option<CancelToken>,
 }
+
+/// 批次里一首歌换了路径（旧, 新）。
+type Moved = Box<dyn Fn(&str, &str) + Send + Sync>;
 
 struct Inner {
     data_dir: PathBuf,
@@ -120,6 +162,7 @@ struct Inner {
     /// 串行化落盘；true 表示已关闭，不再写。
     saving: Mutex<bool>,
     ready: watch::Sender<bool>,
+    moved: Option<Moved>,
 }
 
 #[derive(Clone)]
@@ -534,13 +577,23 @@ impl Engine {
                 ticks: 0,
                 next_id: 0,
                 stopping: false,
+                reformat: None,
+                batch: None,
             }),
             wake: Notify::new(),
             dirty: Notify::new(),
             kill: Notify::new(),
             saving: Mutex::new(false),
             ready: watch::Sender::new(false),
+            moved: None,
         }))
+    }
+
+    /// 批次把一首歌换成新路径后调用（播放队列据此跟上）。须在 `start()` 之前调用。
+    pub fn on_moved(self, f: Moved) -> Self {
+        let mut inner = Arc::try_unwrap(self.0).ok().expect("start 之前调用");
+        inner.moved = Some(f);
+        Engine(Arc::new(inner))
     }
 
     /// `None`：不自动轮询，只靠 `tick()` 推进（测试用）。须在 `start()` 之前调用。
@@ -651,6 +704,19 @@ impl Engine {
         });
         tokio::spawn(self.clone().worker());
         tokio::spawn(self.clone().emitter());
+        // 上次没转完的批次：重算待转列表接着转
+        let resume = {
+            let st = self.lock();
+            st.settings
+                .reformatting
+                .then(|| (st.settings.format, st.settings.output_dir.clone()))
+        };
+        if let Some((f, dir)) = resume {
+            let list = reformat_list(&dir, f);
+            if self.begin_reformat(f, list) {
+                self.persist();
+            }
+        }
         if let Some(every) = self.0.poll {
             let me = self.clone();
             tokio::spawn(async move {
@@ -867,11 +933,162 @@ impl Engine {
         Ok(())
     }
 
+    /// 切到 `format` 时要转换的已有歌曲数与预计秒数。
+    pub fn preview_format(&self, format: &str) -> Result<Preview, String> {
+        let f = Fmt::parse(format)?;
+        let dir = self.lock().settings.output_dir.clone();
+        let list = reformat_list(&dir, f);
+        Ok(Preview {
+            count: list.len() as u32,
+            eta_secs: estimate(list.len(), list.iter().map(|x| x.1).sum()),
+        })
+    }
+
+    /// 保存输出格式；资料库里有要转换的歌就开始批次。批次没结束时不能改。
     pub fn set_format(&self, format: &str) -> Result<(), String> {
         let f = Fmt::parse(format)?;
-        self.edit(|st| st.settings.format = f);
+        let (busy, dir) = {
+            let st = self.lock();
+            (st.batch.is_some(), st.settings.output_dir.clone())
+        };
+        if busy {
+            return Err(BUSY_REFORMAT.into());
+        }
+        let list = reformat_list(&dir, f);
+        self.edit(|st| {
+            if st.batch.is_some() {
+                return Err(BUSY_REFORMAT.to_string());
+            }
+            st.settings.format = f;
+            Ok(())
+        })?;
+        self.begin_reformat(f, list);
         self.persist();
         Ok(())
+    }
+
+    /// 有歌要转就登记批次并在后台开跑，返回是否开跑；没有就清掉「未完成」标记。
+    fn begin_reformat(&self, f: Fmt, list: Vec<(PathBuf, u64)>) -> bool {
+        let tok = CancelToken::default();
+        let go = self.edit(|st| {
+            if st.batch.is_some() || st.stopping {
+                return false;
+            }
+            st.settings.reformatting = !list.is_empty();
+            if list.is_empty() {
+                return false;
+            }
+            st.batch = Some(tok.clone());
+            st.reformat = Some(Reformat {
+                target: f,
+                total: list.len() as u32,
+                done: 0,
+                current: None,
+                cover_url: None,
+                eta_secs: Some(estimate(list.len(), list.iter().map(|x| x.1).sum())),
+                failed: vec![],
+                finished: false,
+            });
+            true
+        });
+        if go {
+            tokio::spawn(self.clone().reformat(f, list, tok));
+        }
+        go
+    }
+
+    fn edit_reformat(&self, f: impl FnOnce(&mut Reformat)) {
+        self.edit(|st| st.reformat.as_mut().map(f));
+    }
+
+    /// 逐首互转；取消（退出）时停下，留着「未完成」标记下次接着转。
+    async fn reformat(self, f: Fmt, list: Vec<(PathBuf, u64)>, tok: CancelToken) {
+        let to = match f {
+            Fmt::Apple => Lossless::Alac,
+            Fmt::Original => Lossless::Flac,
+        };
+        let total: u64 = list.iter().map(|x| x.1).sum();
+        let (start, mut done) = (Instant::now(), 0u64);
+        let covers = self.covers_dir().join("reformat");
+        let mut left = list.len();
+        for (p, size) in list {
+            if tok.is_cancelled() {
+                break;
+            }
+            let (title, cover) = {
+                let p = p.clone();
+                tokio::task::spawn_blocking(move || {
+                    let title = reveal_core::read_track(&p).ok().and_then(|t| t.title);
+                    (title, reveal_core::read_cover(&p))
+                })
+                .await
+                .unwrap_or_default()
+            };
+            let title = title
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or_else(|| reveal_core::title_from_file_name(&name_of(&p)));
+            let url = match cover {
+                Some(c) => thumbnail(&c, &covers, &p).await.map(|j| asset_url(&j)),
+                None => None,
+            };
+            self.edit_reformat(|r| {
+                r.current = Some(title.clone());
+                r.cover_url = url;
+            });
+            let r = {
+                let (p, tok) = (p.clone(), tok.clone());
+                tokio::task::spawn_blocking(move || reveal_core::recode_lossless(&p, to, &tok))
+                    .await
+                    .unwrap_or_else(|e| Err(ConvertError::Failed(format!("内部错误：{e}"))))
+            };
+            let failure = match r {
+                Err(ConvertError::Cancelled) => break,
+                Ok(new) => {
+                    if let Some(m) = &self.0.moved {
+                        m(&p.to_string_lossy(), &new.to_string_lossy());
+                    }
+                    None
+                }
+                Err(e) => Some(Failure {
+                    title,
+                    reason: e.to_string(),
+                }),
+            };
+            done += size;
+            left -= 1;
+            // 按已转的实际速度估剩下的
+            let eta = (start.elapsed().as_secs_f64() * (total - done) as f64 / done.max(1) as f64)
+                .ceil() as u64;
+            self.edit_reformat(|r| {
+                r.done += 1;
+                r.eta_secs = Some(if left == 0 { 0 } else { eta.max(1) });
+                r.failed.extend(failure);
+            });
+        }
+        let _ = std::fs::remove_dir_all(&covers);
+        let finished = !tok.is_cancelled();
+        self.edit(|st| {
+            st.batch = None;
+            if finished {
+                st.settings.reformatting = false;
+                if let Some(r) = st.reformat.as_mut() {
+                    r.finished = true;
+                    (r.current, r.cover_url, r.eta_secs) = (None, None, None);
+                }
+            }
+        });
+        if finished {
+            self.persist();
+        }
+    }
+
+    /// 清掉已结束的批次；没结束时不动。
+    pub fn dismiss_reformat(&self) {
+        self.edit(|st| {
+            if st.reformat.as_ref().is_some_and(|r| r.finished) {
+                st.reformat = None;
+            }
+        });
     }
 
     /// 拖入的文件或文件夹（只看一层，规则同监听扫描），直接入队；输出文件夹里的不算。
@@ -968,15 +1185,26 @@ impl Engine {
     /// 取消当前任务并等它清理完；宽限期过了还没停就丢弃它。返回后不再写盘。
     /// 被中断的任务不写记录。
     pub async fn shutdown(&self) {
-        let tok = self.edit(|st| {
+        let (tok, batch) = self.edit(|st| {
             st.stopping = true;
-            st.running.as_ref().map(|(_, t)| t.clone())
+            (
+                st.running.as_ref().map(|(_, t)| t.clone()),
+                st.batch.clone(),
+            )
         });
         self.0.wake.notify_one();
-        if let Some(t) = tok {
-            t.cancel();
+        if let Some(b) = &batch {
+            b.cancel();
+        }
+        if tok.is_some() || batch.is_some() {
+            if let Some(t) = tok {
+                t.cancel();
+            }
             let idle = || async {
-                while self.lock().running.is_some() {
+                while {
+                    let st = self.lock();
+                    st.running.is_some() || st.batch.is_some()
+                } {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             };
@@ -1102,6 +1330,7 @@ impl Engine {
             },
             busy,
             waiting_login,
+            reformat: st.reformat.clone(),
             jobs,
             notices: st.notices.iter().map(|(n, _)| n.clone()).collect(),
         }

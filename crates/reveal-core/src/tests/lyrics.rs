@@ -195,3 +195,25 @@ fn netease_lyric_converts_credit_lines_in_both_texts() {
         Some("[00:00.00]译: 某\n[00:01.00]你好")
     );
 }
+
+#[test]
+fn parse_lrc_shows_credit_json_lines_as_lyrics() {
+    let v = parse_lrc(
+        "\u{feff}{\"t\":0,\"c\":[{\"tx\":\"作词: \"},{\"tx\":\"Hanser\"}]}\n[00:01.00]一\n",
+    );
+    assert_eq!(
+        v,
+        [
+            LyricLine {
+                ms: 0,
+                text: "作词: Hanser".into(),
+                trans: None
+            },
+            LyricLine {
+                ms: 1000,
+                text: "一".into(),
+                trans: None
+            }
+        ]
+    );
+}

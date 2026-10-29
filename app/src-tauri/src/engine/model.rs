@@ -34,6 +34,42 @@ pub struct Snapshot {
     pub notices: Vec<Notice>,
     pub busy: u32,
     pub waiting_login: u32,
+    /// 切换输出格式后资料库已有歌的转换批次；没有时省略。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reformat: Option<Reformat>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Reformat {
+    /// 这批转向哪边。
+    pub target: Fmt,
+    pub total: u32,
+    /// 已处理（成功 + 失败）。
+    pub done: u32,
+    /// 正在转的那首的歌名。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cover_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eta_secs: Option<u64>,
+    pub failed: Vec<Failure>,
+    pub finished: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Failure {
+    pub title: String,
+    pub reason: String,
+}
+
+/// 切到某个格式时要转换的已有歌曲数与预计秒数。
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Preview {
+    pub count: u32,
+    pub eta_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]

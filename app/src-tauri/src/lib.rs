@@ -5,7 +5,7 @@ pub mod engine;
 pub mod library;
 pub mod player;
 
-use engine::{AddFolderResult, Engine, RealConverter, Snapshot};
+use engine::{AddFolderResult, Engine, Preview, RealConverter, Snapshot};
 use library::{Library, LibraryView, Lyric};
 use player::{Player, PlayerState};
 use std::sync::Arc;
@@ -67,6 +67,23 @@ async fn set_output_dir(e: State<'_, Engine>, path: String) -> R<()> {
 async fn set_format(e: State<'_, Engine>, format: String) -> R<()> {
     e.ready().await;
     e.set_format(&format)
+}
+
+#[tauri::command]
+async fn preview_format(e: State<'_, Engine>, format: String) -> R<Preview> {
+    e.ready().await;
+    let e = e.inner().clone();
+    // 要读输出文件夹里每首 .m4a 的编码：不占命令线程
+    tauri::async_runtime::spawn_blocking(move || e.preview_format(&format))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn dismiss_reformat(e: State<'_, Engine>) -> R<()> {
+    e.ready().await;
+    e.dismiss_reformat();
+    Ok(())
 }
 
 #[tauri::command]
@@ -310,19 +327,8 @@ pub fn run() {
             );
             app.manage(lib.clone());
             let h = app.handle().clone();
-            let data_dir = data.clone();
-            let eng = Engine::new(
-                data,
-                Arc::new(RealConverter::new(engine::home())),
-                Box::new(move |s| {
-                    lib.observe(&s);
-                    let _ = h.emit("snapshot", s);
-                }),
-            );
-            app.manage(eng.clone());
-            let h = app.handle().clone();
             let player = Player::new(
-                data_dir,
+                data.clone(),
                 Box::new(move |s| {
                     let _ = h.emit("player", s);
                 }),
@@ -330,7 +336,18 @@ pub fn run() {
             if let Err(e) = player.enable_media_controls() {
                 eprintln!("{e}");
             }
-            app.manage(player);
+            app.manage(player.clone());
+            let h = app.handle().clone();
+            let eng = Engine::new(
+                data,
+                Arc::new(RealConverter::new(engine::home())),
+                Box::new(move |s| {
+                    lib.observe(&s);
+                    let _ = h.emit("snapshot", s);
+                }),
+            )
+            .on_moved(Box::new(move |from, to| player.rename(from, to)));
+            app.manage(eng.clone());
             // 不在 setup 里同步等：命令会先等 start 完成
             tauri::async_runtime::spawn(async move { eng.start().await });
             Ok(())
@@ -359,6 +376,8 @@ pub fn run() {
             ignore_existing,
             set_output_dir,
             set_format,
+            preview_format,
+            dismiss_reformat,
             add_files,
             retry_job,
             remove_job,

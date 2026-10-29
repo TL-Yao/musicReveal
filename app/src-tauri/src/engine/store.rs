@@ -13,6 +13,9 @@ pub struct Settings {
     pub folders: Vec<PathBuf>,
     pub output_dir: PathBuf,
     pub format: Fmt,
+    /// 切换格式后的转换批次还没做完：下次启动接着转。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub reformatting: bool,
 }
 
 impl Default for Settings {
@@ -22,6 +25,7 @@ impl Default for Settings {
             folders: vec![],
             output_dir: home().join("Music/musicReveal"),
             format: Fmt::Original,
+            reformatting: false,
         }
     }
 }

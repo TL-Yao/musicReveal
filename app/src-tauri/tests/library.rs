@@ -875,3 +875,87 @@ fn library_is_not_cut_off_by_the_watch_scan_entry_limit() {
     let (_, v) = settled(&r.rx);
     assert_eq!(ids(&v), [id(&z)]);
 }
+
+const CREDIT: &str =
+    "{\"t\":0,\"c\":[{\"tx\":\"作词: \"},{\"tx\":\"Hanser\",\"li\":\"http://x/a.jpg\"}]}";
+
+#[test]
+fn scan_turns_netease_credit_lines_into_plain_lyric_lines() {
+    let r = Rig::new("credits");
+    let o = &r.out;
+    let fixed = |body: &str| format!("[00:00.00]作词: Hanser\n{body}");
+    // 内嵌歌词含署名行：按安全规则重写
+    let a = mp3(&o.join("a.mp3"), &[], None);
+    reveal_core::embed_lyrics(&a, &format!("{CREDIT}\n[00:01.00]一\n")).unwrap();
+    // 没有内嵌，lrc/ 下的 .lrc 含署名行：改写，再嵌入改好的
+    let b = mp3(&o.join("b.mp3"), &[], None);
+    std::fs::create_dir_all(o.join("lrc")).unwrap();
+    std::fs::write(o.join("lrc/b.lrc"), format!("{CREDIT}\n[00:02.00]二\n")).unwrap();
+    // 已有内嵌，旁边的 .lrc 含署名行：改写后挪进 lrc/
+    let c = mp3(&o.join("c.mp3"), &[], None);
+    reveal_core::embed_lyrics(&c, "[00:03.00]三\n").unwrap();
+    std::fs::write(o.join("c.lrc"), format!("{CREDIT}\r\n[00:03.00]三\r\n")).unwrap();
+    // 解析不了的 JSON 行原样
+    let d = mp3(&o.join("d.mp3"), &[], None);
+    reveal_core::embed_lyrics(&d, "{坏的}\n[00:04.00]四\n").unwrap();
+
+    let born = |p: &Path| std::fs::metadata(p).unwrap().created().unwrap();
+    let (a_born, d_print) = (born(&a), fingerprint(&d));
+    r.lib.set_dir(o);
+    settled(&r.rx);
+
+    assert_eq!(
+        reveal_core::read_lyrics(&a).as_deref(),
+        Some(&*fixed("[00:01.00]一\n"))
+    );
+    assert_eq!(born(&a), a_born, "创建时间不变");
+    assert_eq!(
+        texts(&r.lib.lyrics(&id(&a)).unwrap()),
+        ["作词: Hanser", "一"]
+    );
+    assert_eq!(
+        std::fs::read_to_string(o.join("lrc/b.lrc")).unwrap(),
+        fixed("[00:02.00]二\n")
+    );
+    assert_eq!(
+        reveal_core::read_lyrics(&b).as_deref(),
+        Some(&*fixed("[00:02.00]二\n"))
+    );
+    assert!(!o.join("c.lrc").exists());
+    assert_eq!(
+        std::fs::read_to_string(o.join("lrc/c.lrc")).unwrap(),
+        "[00:00.00]作词: Hanser\r\n[00:03.00]三\r\n"
+    );
+    assert_eq!(fingerprint(&d), d_print);
+    assert_eq!(texts(&r.lib.lyrics(&id(&d)).unwrap()), ["四"]);
+
+    // 幂等：再扫、重启后再扫，一个文件都不改
+    let after = fingerprints(o);
+    rescan(&r.lib, &r.rx, o, 1);
+    assert_eq!(without_markers(fingerprints(o)), after);
+    let (lib, rx) = open(&r.data());
+    lib.set_dir(o);
+    settled(&rx);
+    assert_eq!(without_markers(fingerprints(o)), after);
+}
+
+#[test]
+fn display_shows_credit_lines_even_before_cleanup() {
+    let r = Rig::new("credits-ro");
+    let o = &r.out;
+    let a = mp3(&o.join("a.mp3"), &[], None);
+    reveal_core::embed_lyrics(&a, &format!("{CREDIT}\n[00:01.00]一\n")).unwrap();
+    // 只读：改不了，按失败记下不再试，但歌词视图照样显示成普通行
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let print = fingerprint(&a);
+    r.lib.set_dir(o);
+    settled(&r.rx);
+    assert_eq!(fingerprint(&a), print);
+    assert_eq!(
+        texts(&r.lib.lyrics(&id(&a)).unwrap()),
+        ["作词: Hanser", "一"]
+    );
+    rescan(&r.lib, &r.rx, o, 1);
+    assert_eq!(fingerprint(&a), print);
+}

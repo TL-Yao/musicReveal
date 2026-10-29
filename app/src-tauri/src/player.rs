@@ -123,6 +123,15 @@ impl PlayQueue {
         self.repeat = r;
     }
 
+    /// 曲目换了路径（同一首歌）：队列里的条目指向新路径，位置不变。
+    pub fn rename(&mut self, from: &str, to: &str) {
+        for i in self.ids.iter_mut().chain(self.order.iter_mut()) {
+            if i == from {
+                *i = to.to_owned();
+            }
+        }
+    }
+
     /// 曲目失效：移出队列。移走的是当前曲时，当前曲变成它之后的那首。
     pub fn remove(&mut self, id: &str) {
         self.ids.retain(|i| i != id);
@@ -238,6 +247,7 @@ struct Inner {
     hold: Mutex<()>,
 }
 
+#[derive(Clone)]
 pub struct Player(Arc<Inner>);
 
 impl Player {
@@ -381,6 +391,18 @@ impl Player {
                         let _ = s.try_seek(pos);
                     }
                 }
+            }
+        });
+    }
+
+    /// 曲目换了路径（格式互转）：队列与当前曲跟过去，正在放的不打断。
+    pub fn rename(&self, from: &str, to: &str) {
+        self.edit(|st| {
+            if let Some(q) = st.queue.as_mut() {
+                q.rename(from, to);
+            }
+            if st.track.as_deref() == Some(from) {
+                st.track = Some(to.to_owned());
             }
         });
     }

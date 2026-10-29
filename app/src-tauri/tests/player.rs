@@ -52,6 +52,24 @@ fn starts_at_index_in_original_order() {
 }
 
 #[test]
+fn renamed_track_keeps_its_place_in_plain_and_shuffled_queues() {
+    for shuffle in [false, true] {
+        let mut p = PlayQueue::new(abc(), 1, shuffle, Repeat::Off);
+        p.rename("b", "b2");
+        p.rename("c", "c2");
+        assert_eq!(p.current(), Some("b2"));
+        let mut rest: Vec<String> =
+            std::iter::from_fn(|| p.next(false).map(String::from)).collect();
+        if !shuffle {
+            assert_eq!(rest, ["c2"]);
+        } else {
+            rest.sort();
+            assert_eq!(rest, ["a", "c2"]);
+        }
+    }
+}
+
+#[test]
 fn shuffle_keeps_current_first_and_plays_every_other_track_once() {
     let mut p = PlayQueue::new(ids(20), 5, true, Repeat::Off);
     assert_eq!(p.current(), Some("5"));
