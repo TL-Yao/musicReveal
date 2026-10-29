@@ -59,8 +59,8 @@ function renderTransport() {
   rb.classList.toggle("on", p.repeat !== "off");
   rb.innerHTML = icon(p.repeat === "one" ? "repeat1" : "repeat");
   rb.title = { off: "循环播放", all: "循环播放：全部", one: "循环播放：单曲" }[p.repeat];
-  for (const id of ["#btnPrev", "#btnNext", "#btnLyrics"]) $<HTMLButtonElement>(id).disabled = !has;
-  $("#btnLyrics").classList.toggle("on", lyrOpen);
+  for (const id of ["#btnPrev", "#btnNext", "#lcdCover"]) $<HTMLButtonElement>(id).disabled = !has;
+  $("#lcdCover").classList.toggle("on", lyrOpen);
   const vol = $<HTMLInputElement>("#volRange");
   if (!volHeld) vol.value = String(Math.round(p.volume * 100));
   vol.style.setProperty("--v", vol.value + "%");
@@ -75,7 +75,7 @@ function renderLCD() {
   const lcd = $("#lcd"), cover = $("#lcdCover");
   lcd.classList.toggle("idle", !t);
   cover.setAttribute("style", artStyle(t ? hashArt(t.title) : GREY));
-  cover.innerHTML = t ? coverArt(t) : `<div class="art"></div>`;
+  cover.innerHTML = t ? coverArt(t) + `<span class="ov">${icon("chev")}</span>` : `<div class="art"></div>`;
   $("#lcdT1").textContent = t ? t.title : err ? "无法播放" : "未在播放";
   $("#lcdT2").innerHTML = err
     ? `<span class="err">${esc(err)}</span>`
@@ -124,7 +124,7 @@ export function setLyricsOpen(on: boolean) {
   wantLyr = undefined;
   lyrOpen = on && !!S.player.trackId;
   $("#lyrics").classList.toggle("on", lyrOpen);
-  $("#btnLyrics").classList.toggle("on", lyrOpen);
+  $("#lcdCover").classList.toggle("on", lyrOpen);
   if (lyrOpen) loadLyrics();
 }
 export const lyricsOpen = () => lyrOpen;
@@ -204,7 +204,7 @@ export function initPlayer() {
     renderTransport();
     call("player_set_repeat", { mode });
   };
-  $("#btnLyrics").onclick = () => setLyricsOpen(!lyrOpen);
+  $("#lcdCover").onclick = () => setLyricsOpen(!lyrOpen);
 
   const vol = $<HTMLInputElement>("#volRange");
   vol.addEventListener("pointerdown", () => (volHeld = true));

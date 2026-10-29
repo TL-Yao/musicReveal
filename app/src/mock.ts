@@ -437,7 +437,7 @@ function search(q: string) {
   inp.dispatchEvent(new Event("input"));
 }
 function lyrics(on: boolean) {
-  if (!!$("#lyrics.on") !== on) $("#btnLyrics")?.click();
+  if (!!$("#lyrics.on") !== on) $("#lcdCover")?.click();
 }
 function playTitle(title: string, atSec = 0, playing = true) {
   const ids = lib.tracks.map((t) => t.id), i = lib.tracks.findIndex((t) => t.title === title);
