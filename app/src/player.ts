@@ -200,7 +200,7 @@ function renderLyrics(L: LyricLine[]) {
 /* 右半边的播放队列：实际播放顺序，当前首居中；queueRev 或当前曲变了才重新拉 */
 let qOn = false, Q: QueueView = { ids: [], pos: 0 }, qKey = "";
 const queueKey = () => `${S.player.queueRev}|${S.player.trackId ?? ""}`;
-const EQ = `<div class="ov eq"><span class="eq"><i></i><i></i><i></i></span></div>`;
+const EQ = `<div class="ov lyr-qeq"><span class="eq"><i></i><i></i><i></i></span></div>`;
 async function loadQueue() {
   const k = (qKey = queueKey());
   const v = await S.B.invoke<QueueView>("player_queue").catch((e) => (console.error("player_queue", e), null));

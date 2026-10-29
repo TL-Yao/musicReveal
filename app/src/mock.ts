@@ -220,8 +220,8 @@ function removeFromQueue(id: string) {
   if (k < 0) return;
   P.queue.splice(k, 1);
   P.rev++;
-  if (k < P.i) P.i--;
-  if (k !== P.i) return;
+  if (k < P.i) return void P.i--;
+  if (k > P.i) return;
   if (P.i >= P.queue.length) P.i = P.repeat === "all" && P.queue.length ? 0 : -1;
   if (P.i < 0) return void ((P.playing = false), setPos(0));
   P.playing = true;
@@ -310,6 +310,8 @@ const SEC_PER_SONG = 5;
 function convertTrack(t: Track, to: Snapshot["format"]) {
   const fmt = to === "apple" ? "ALAC" : "FLAC", id = pathOf(t.artists, t.title, fmt), old = t.id;
   P.queue = P.queue.map((x) => (x === old ? id : x));
+  P.ids = P.ids.map((x) => (x === old ? id : x));
+  P.rev++;
   files.set(id, t.durationMs);
   if (LYRICS.has(old)) LYRICS.set(id, LYRICS.get(old)!);
   t.id = id;

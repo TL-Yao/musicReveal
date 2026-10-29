@@ -458,7 +458,7 @@ input[type=range].slider::-webkit-slider-thumb { -webkit-appearance: none; width
 .lyr-qr.past { opacity: .45; } .lyr-qr.past:hover { opacity: .8; }
 .lyr-qr.cur { background: rgba(255,255,255,.14); }
 .lyr-qr .cover { width: 36px; height: 36px; --gs: 36px; box-shadow: 0 0 0 .5px rgba(255,255,255,.12); }
-.lyr-qr.cur .ov.eq { opacity: 1; background: rgba(0,0,0,.4); }
+.lyr-qr .lyr-qeq { opacity: 1; background: rgba(0,0,0,.4); }
 .lyr-qr.cur .eq i { animation: eq .9s ease-in-out infinite; }
 .lyr-qr.cur .eq i:nth-child(2) { animation-delay: -.3s; } .lyr-qr.cur .eq i:nth-child(3) { animation-delay: -.6s; }
 .lyr-paused .lyr-qr.cur .eq i { animation-play-state: paused; }
