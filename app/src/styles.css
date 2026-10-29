@@ -99,7 +99,8 @@
 
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; overflow: hidden; }
-body { font: 400 var(--fs-body)/var(--lh-body) var(--font); color: var(--text-1); background: var(--win-bg); -webkit-font-smoothing: antialiased; -webkit-user-select: none; user-select: none; cursor: default; }
+/* 没有断点的长串（英文歌手名、路径）在会换行的地方硬断，不撑出格子；nowrap + 省略号的地方不受影响 */
+body { overflow-wrap: anywhere; font: 400 var(--fs-body)/var(--lh-body) var(--font); color: var(--text-1); background: var(--win-bg); -webkit-font-smoothing: antialiased; -webkit-user-select: none; user-select: none; cursor: default; }
 [hidden] { display: none !important; }
 /* 真窗口：侧栏露出原生 sidebar 材质，内容区自带不透明底 */
 html.native, html.native body { background: transparent; }
@@ -398,9 +399,12 @@ input[type=range].slider::-webkit-slider-thumb { -webkit-appearance: none; width
 .lyr-grid { position: absolute; inset: 0; display: grid; grid-template-columns: var(--lyr-left) minmax(0,1fr); }
 .lyr-art { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: var(--s6); gap: var(--s4); min-width: 0; }
 .lyr-art .cover { width: var(--lyr-cover); height: var(--lyr-cover); border-radius: var(--r-card); box-shadow: 0 24px 60px rgba(0,0,0,.5), 0 0 0 0.5px rgba(255,255,255,.14); --gs: var(--lyr-cover); }
-.lyr-art h3 { margin: 0; font-size: var(--fs-title); font-weight: 700; text-align: center; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.lyr-art p { margin: 2px 0 0; color: rgba(255,255,255,.7); font-size: var(--fs-small); text-align: center; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.lyr-art .meta { font-size: var(--fs-caption); color: rgba(255,255,255,.45); margin-top: 0; }
+/* 文字块要占满左栏宽度：不然它按内容撑宽，max-width 管不住，长歌手名会压到歌词上 */
+.lyr-art > div { width: 100%; }
+.lyr-art h3, .lyr-art p { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; text-align: center; }
+.lyr-art h3 { margin: 0; font-size: var(--fs-title); font-weight: 700; }
+.lyr-art p { margin: 2px 0 0; color: rgba(255,255,255,.7); font-size: var(--fs-small); }
+.lyr-art .meta { font-size: var(--fs-caption); color: rgba(255,255,255,.45); margin-top: 0; -webkit-line-clamp: 1; }
 .lyr-lines { position: relative; overflow-y: auto; padding: 0 var(--s6) 0 var(--s3); scrollbar-width: none; -webkit-mask: linear-gradient(transparent, #000 14%, #000 84%, transparent); mask: linear-gradient(transparent, #000 14%, #000 84%, transparent); }
 .lyr-lines::-webkit-scrollbar { display: none; }
 .lyr-pad { height: var(--pad, 200px); }
