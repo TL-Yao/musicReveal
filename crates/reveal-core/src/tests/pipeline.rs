@@ -8,8 +8,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
+/// 生成素材用的 ffmpeg：`REVEAL_GEN_FFMPEG` 优先（随包的精简版没有 lavfi 与各编码器，
+/// 拿它做 `REVEAL_FFMPEG` 测 App 行为时，素材仍要用完整版生成），否则同 App。
 pub(super) fn ffmpeg() -> Option<PathBuf> {
-    let f = find_ffmpeg();
+    let f = std::env::var_os("REVEAL_GEN_FFMPEG")
+        .map(PathBuf::from)
+        .or_else(find_ffmpeg);
     if f.is_none() {
         eprintln!("跳过：找不到 ffmpeg（可设 REVEAL_FFMPEG）");
     }

@@ -31,7 +31,11 @@ impl Drop for Tmp {
 }
 
 fn ffmpeg(args: &[&str]) {
-    let ff = reveal_core::find_ffmpeg().expect("需要 ffmpeg（可设 REVEAL_FFMPEG）");
+    // 生成素材：`REVEAL_GEN_FFMPEG` 优先（随包精简版做 REVEAL_FFMPEG 时用完整版生成）
+    let ff = std::env::var_os("REVEAL_GEN_FFMPEG")
+        .map(PathBuf::from)
+        .or_else(reveal_core::find_ffmpeg)
+        .expect("需要 ffmpeg（可设 REVEAL_FFMPEG / REVEAL_GEN_FFMPEG）");
     let st = Command::new(ff)
         .args(["-v", "error", "-y"])
         .args(args)
@@ -775,6 +779,13 @@ fn real_output_dir_read_only_scan() {
         partial.len()
     );
     assert!(!v.tracks.is_empty());
+    // 补嵌失败的歌，.lrc 还留在歌旁边
+    let beside = v
+        .tracks
+        .iter()
+        .filter(|t| Path::new(&t.id).with_extension("lrc").exists())
+        .count();
+    eprintln!("补嵌后仍有 {beside} 首的 .lrc 留在歌旁边");
     drop(lib);
 
     let (lib, rx) = open(&t.0.join("data"));

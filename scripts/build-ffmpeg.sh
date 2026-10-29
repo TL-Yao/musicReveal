@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # 构建随 musicReveal 分发的精简 ffmpeg：LGPL、arm64、macOS 11+，静态链接 LAME。
 # 产物：build/ffmpeg/out/ffmpeg 与 build/ffmpeg/out/licenses/。已存在且由本脚本的当前内容
-# 构建则直接复用，传 --force 重新构建。源码包缓存在 build/ffmpeg/dl/，校验 SHA-256 后才使用。
+# 构建（含全部 configure 参数，改了就重建）则直接复用，传 --force 重新构建。
+# 源码包缓存在 build/ffmpeg/dl/，校验 SHA-256 后才使用。产物缺 App 要用的 muxer 时终止。
 set -euo pipefail
 
 FFMPEG_VER=9.0.2
@@ -17,9 +18,21 @@ BASE="$ROOT/build/ffmpeg"
 DL="$BASE/dl"
 OUT="$BASE/out"
 WORK="$BASE/work"
+# App 用到的 muxer：转码（mp3、flac）、抽封面（image2pipe）、补嵌歌词前核对（streamhash）
+MUXERS=(mp3 flac image2pipe streamhash)
+
+check_muxers() { # ffmpeg 路径
+  local have
+  have="$("$1" -hide_banner -muxers 2>/dev/null | awk '$1 ~ /E/ {print $2}')"
+  local m
+  for m in "${MUXERS[@]}"; do
+    grep -qx "$m" <<<"$have" || { echo "$1 缺少 muxer：$m，终止" >&2; return 1; }
+  done
+}
 
 if [[ "${1:-}" != "--force" && -x "$OUT/ffmpeg" && -f "$OUT/licenses/SOURCE.md" ]] \
   && cmp -s "$SELF" "$OUT/licenses/build-ffmpeg.sh"; then
+  check_muxers "$OUT/ffmpeg"
   echo "ffmpeg 已构建：$OUT/ffmpeg"
   exit 0
 fi
@@ -75,10 +88,11 @@ CONF=(
   --enable-zlib --enable-libmp3lame
   --enable-protocol=file,pipe
   --enable-demuxer=flac,ogg,mp3,mov,aac,wav,asf,ape
-  --enable-decoder=flac,vorbis,opus,mp3,mp3float,aac,alac,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_u8,wmav1,wmav2,ape
+  # png / mjpeg：封面流要能读出尺寸，streamhash 才肯核对
+  --enable-decoder=flac,vorbis,opus,mp3,mp3float,aac,alac,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_u8,wmav1,wmav2,ape,png,mjpeg
   --enable-parser=flac,vorbis,opus,mpegaudio,aac
   --enable-encoder=libmp3lame,flac
-  --enable-muxer=mp3,flac,image2pipe
+  --enable-muxer="$(IFS=,; echo "${MUXERS[*]}")"
   --enable-filter=abuffer,abuffersink,aformat,anull,aresample,atrim
 )
 ./configure "${CONF[@]}" \
@@ -86,6 +100,7 @@ CONF=(
 grep -q '^License: LGPL' "$WORK/configure.log" || { grep '^License' "$WORK/configure.log"; echo "许可证不是 LGPL，终止" >&2; exit 1; }
 make -j"$JOBS" ffmpeg >/dev/null
 strip -x ffmpeg -o "$OUT/ffmpeg"
+check_muxers "$OUT/ffmpeg" || { rm -rf "$OUT"; exit 1; }
 
 if otool -L "$OUT/ffmpeg" | tail -n +2 | grep -vE '^\s+/(usr/lib|System)/'; then
   echo "ffmpeg 链接了系统之外的动态库，终止" >&2
@@ -102,7 +117,8 @@ cat >"$OUT/licenses/SOURCE.md" <<EOF
 
 musicReveal.app 内的 \`Contents/MacOS/ffmpeg\` 是由 FFmpeg ${FFMPEG_VER} 与 LAME ${LAME_VER}
 （静态链接）编译而成的独立可执行文件，未启用任何 GPL 或 nonfree 组件（configure 输出：${LICENSE_LINE}）。
-它以独立进程方式被 musicReveal 调用，用于把音频转码为 MP3 / FLAC，以及从 WMA / APE 中原样取出封面。
+它以独立进程方式被 musicReveal 调用，用于把音频转码为 MP3 / FLAC、从 WMA / APE 中原样取出封面，
+以及在把歌词写进音乐文件前后核对其余元数据没有变化。
 
 对应源码随发布一同提供：与 dmg 放在一起的 \`musicReveal_<版本>_ffmpeg-lame-source.tar\`，
 内含下列两个源码包原样（未打补丁，位于 build/ffmpeg/dl/）与构建脚本 scripts/build-ffmpeg.sh。
