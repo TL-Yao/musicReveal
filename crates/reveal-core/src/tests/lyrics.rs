@@ -196,6 +196,51 @@ fn netease_lyric_converts_credit_lines_in_both_texts() {
     );
 }
 
+/// 网易云实际文件里署名行的 t 可以是负数（-1000、-667、-500、-334），表示在 0 秒前显示。
+#[test]
+fn negative_time_credit_lines_start_at_zero_in_order_and_stay_separate() {
+    use crate::credit_lines;
+    let src = concat!(
+        "{\"t\":-1000,\"c\":[{\"tx\":\"作词: \"},{\"tx\":\"コレサワ\"}]}\n",
+        "{\"t\":-667,\"c\":[{\"tx\":\"作曲: \"},{\"tx\":\"コレサワ\"}]}\n",
+        "{\"t\":-334,\"c\":[{\"tx\":\"编曲: \"},{\"tx\":\"某\"}]}\n",
+        "[00:00.000]作词 : コレサワ\n",
+        "[00:04.944]一\n",
+    );
+    let once = credit_lines(src);
+    assert_eq!(
+        once,
+        concat!(
+            "[00:00.00]作词: コレサワ\n",
+            "[00:00.01]作曲: コレサワ\n",
+            "[00:00.02]编曲: 某\n",
+            "[00:00.000]作词 : コレサワ\n",
+            "[00:04.944]一\n",
+        )
+    );
+    assert_eq!(credit_lines(&once), once);
+    // 署名行与同一时刻、不相邻的正文行不配成「原文 + 译文」
+    assert_eq!(
+        parse_lrc(src),
+        [
+            line(0, "作词: コレサワ", None),
+            line(0, "作词 : コレサワ", None),
+            line(10, "作曲: コレサワ", None),
+            line(20, "编曲: 某", None),
+            line(4944, "一", None),
+        ]
+    );
+    // 同一时刻三行以上：都不配对
+    assert_eq!(
+        parse_lrc("[00:00.00]甲\n[00:00.00]乙\n[00:00.00]丙\n"),
+        [
+            line(0, "甲", None),
+            line(0, "乙", None),
+            line(0, "丙", None)
+        ]
+    );
+}
+
 #[test]
 fn parse_lrc_shows_credit_json_lines_as_lyrics() {
     let v = parse_lrc(

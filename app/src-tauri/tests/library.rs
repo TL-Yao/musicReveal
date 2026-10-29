@@ -994,6 +994,82 @@ fn credit_lines_after_a_bom_are_cleaned_in_embedded_lyrics_and_lrc_files() {
     assert_eq!(without_markers(fingerprints(o)), after);
 }
 
+/// 网易云署名行的 t 可以是负数（0 秒前显示）：按原文顺序从 00:00.00 起错开 10ms。
+const NEG_CREDITS: &str = "{\"t\":-1000,\"c\":[{\"tx\":\"作词: \"},{\"tx\":\"niki\"}]}\n{\"t\":-500,\"c\":[{\"tx\":\"作曲: \"},{\"tx\":\"niki\"}]}\n";
+const NEG_FIXED: &str = "[00:00.00]作词: niki\n[00:00.01]作曲: niki\n";
+
+#[test]
+fn negative_time_credit_lines_are_cleaned_in_embedded_lyrics_and_lrc_files() {
+    let r = Rig::new("credits-neg");
+    let o = &r.out;
+    let a = mp3(&o.join("a.mp3"), &[], None);
+    reveal_core::embed_lyrics(&a, &format!("{NEG_CREDITS}[00:01.00]一\n")).unwrap();
+    let b = mp3(&o.join("b.mp3"), &[], None);
+    std::fs::create_dir_all(o.join("lrc")).unwrap();
+    std::fs::write(o.join("lrc/b.lrc"), format!("{NEG_CREDITS}[00:02.00]二\n")).unwrap();
+    r.lib.set_dir(o);
+    settled(&r.rx);
+    assert_eq!(
+        reveal_core::read_lyrics(&a).as_deref(),
+        Some(&*format!("{NEG_FIXED}[00:01.00]一\n"))
+    );
+    assert_eq!(
+        texts(&r.lib.lyrics(&id(&a)).unwrap()),
+        ["作词: niki", "作曲: niki", "一"]
+    );
+    assert_eq!(
+        std::fs::read_to_string(o.join("lrc/b.lrc")).unwrap(),
+        format!("{NEG_FIXED}[00:02.00]二\n")
+    );
+    assert_eq!(
+        reveal_core::read_lyrics(&b).as_deref(),
+        Some(&*format!("{NEG_FIXED}[00:02.00]二\n"))
+    );
+    let after = fingerprints(o);
+    rescan(&r.lib, &r.rx, o, 1);
+    assert_eq!(without_markers(fingerprints(o)), after);
+}
+
+/// 旧版缓存按旧规则记下「没有署名行」（负 t 当时不算），升级后要重读，不能一直跳过。
+#[test]
+fn credit_flags_cached_by_an_older_version_are_rechecked() {
+    let r = Rig::new("credits-stale");
+    let (o, data) = (&r.out.clone(), r.data());
+    let a = mp3(&o.join("a.mp3"), &[], None);
+    reveal_core::embed_lyrics(&a, "[00:01.00]一\n").unwrap();
+    r.lib.set_dir(o);
+    settled(&r.rx);
+    let _t = r.t;
+    drop(r.lib);
+    // 换成带负 t 署名行的歌词，把缓存改成旧版写法：同一 stat、旧键 credits=false
+    reveal_core::embed_lyrics(&a, &format!("{NEG_CREDITS}[00:01.00]一\n")).unwrap();
+    let m = std::fs::metadata(&a).unwrap();
+    let mtime = m
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    let file = data.join("library.json");
+    let mut recs: Vec<serde_json::Map<String, serde_json::Value>> =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    for rec in recs.iter_mut().filter(|x| x["path"] == id(&a)) {
+        rec.retain(|k, _| !k.starts_with("credit"));
+        rec.insert("credits".into(), false.into());
+        rec.insert("size".into(), m.len().into());
+        rec.insert("mtime".into(), mtime.into());
+    }
+    std::fs::write(&file, serde_json::to_string(&recs).unwrap()).unwrap();
+
+    let (lib, rx) = open(&data);
+    lib.set_dir(o);
+    settled(&rx);
+    assert_eq!(
+        reveal_core::read_lyrics(&a).as_deref(),
+        Some(&*format!("{NEG_FIXED}[00:01.00]一\n"))
+    );
+}
+
 /// 测试构建里删到废纸篓只进临时主目录下的 `.Trash`，真实废纸篓不碰。
 #[test]
 fn trash_in_tests_goes_to_the_private_home() {

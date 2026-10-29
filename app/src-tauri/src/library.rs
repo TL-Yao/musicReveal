@@ -154,8 +154,9 @@ struct Rec {
     cover: Option<String>,
     /// 内嵌歌词里有带时间的行。旧缓存没有这一项，重读一次。
     timed: Option<bool>,
-    /// 内嵌歌词里有网易云署名 JSON 行。旧缓存没有这一项，重读一次。
-    #[serde(default)]
+    /// 内嵌歌词里有网易云署名 JSON 行。旧缓存没有这一项，重读一次；
+    /// 旧版存在 `credits` 键下的不算负 t 的行，换键名让它们也重读一次。
+    #[serde(default, rename = "creditLines")]
     credits: Option<bool>,
 }
 
