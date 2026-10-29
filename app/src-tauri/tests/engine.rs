@@ -1529,3 +1529,24 @@ async fn plain_audio_is_ingested_and_shows_up_in_library() {
     assert_eq!(lib.track(&id).unwrap().title, "入库");
     eng.shutdown().await;
 }
+
+/// 测试里没设输出目录的引擎，默认输出目录（与 `home()`）在临时目录里，碰不到真实的 ~/Music。
+/// 只看快照、不启动引擎：修复前它指向真实目录，这里也不会去动它。
+#[test]
+fn default_output_dir_in_tests_is_a_private_temp_dir() {
+    let t = Tmp::new("home");
+    let e = Engine::new(
+        t.0.join("data"),
+        Arc::new(Fake::default()),
+        Box::new(|_| {}),
+    );
+    let out = PathBuf::from(e.snapshot().output_dir);
+    let real = PathBuf::from(std::env::var_os("HOME").unwrap());
+    for p in [&out, &home()] {
+        assert!(
+            p.starts_with(std::env::temp_dir()) && !p.starts_with(&real),
+            "{} 不在临时目录",
+            p.display()
+        );
+    }
+}

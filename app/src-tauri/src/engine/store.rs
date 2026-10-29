@@ -30,7 +30,12 @@ impl Default for Settings {
     }
 }
 
+/// 用户主目录：默认输出目录与 QQ 音乐登录信息都从这里找。
+/// 测试构建（`test-home`）里是本进程自己的临时目录，测试碰不到真实的 ~/Music。
 pub fn home() -> PathBuf {
+    if cfg!(feature = "test-home") {
+        return std::env::temp_dir().join(format!("musicreveal-test-home-{}", std::process::id()));
+    }
     #[cfg(debug_assertions)]
     if let Some(h) = std::env::var_os("MUSICREVEAL_HOME") {
         return h.into();

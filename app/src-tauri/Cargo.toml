@@ -24,5 +24,11 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 rodio = { version = "0.23", default-features = false, features = ["playback", "flac", "mp3", "mp4", "symphonia-alac", "vorbis", "wav"] }
 souvlaki = { version = "0.9", default-features = false }
 
+[features]
+# 只给测试：`home()` 换成本进程自己的临时目录。由下面对自身的 dev 依赖打开，
+# 所以每个测试（含以后新写的）默认都碰不到真实的 ~/Music；应用构建不带它。
+test-home = []
+
 [dev-dependencies]
+musicreveal-app = { path = ".", features = ["test-home"] }
 tokio = { version = "1", features = ["rt-multi-thread", "test-util"] }

@@ -755,7 +755,9 @@ fn a_thousand_cached_tracks_serialize_under_50ms() {
 fn real_output_dir_read_only_scan() {
     let real = std::env::var_os("REVEAL_LIBRARY_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| musicreveal_app::engine::home().join("Music/musicReveal"));
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("HOME").unwrap()).join("Music/musicReveal")
+        });
     let t = Tmp::new("real");
     let dir = t.0.join("library");
     let st = Command::new("cp")

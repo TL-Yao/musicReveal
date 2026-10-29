@@ -6,6 +6,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// 真实主目录（`home()` 在测试里是临时目录）：只从这里读源文件与 QQ 登录信息。
+fn real_home() -> PathBuf {
+    PathBuf::from(std::env::var_os("HOME").expect("HOME"))
+}
+
 fn pick(dir: &Path, ext: &str, must: &str, n: usize) -> Vec<PathBuf> {
     let mut all: Vec<PathBuf> = std::fs::read_dir(dir)
         .unwrap()
@@ -25,15 +30,19 @@ fn pick(dir: &Path, ext: &str, must: &str, n: usize) -> Vec<PathBuf> {
 async fn real_files_dropped_into_watch_folder_get_converted() {
     let src_dir = std::env::var_os("REVEAL_E2E_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| home().join("Downloads/hanser"));
+        .unwrap_or_else(|| real_home().join("Downloads/hanser"));
     let mut files = pick(&src_dir, "mflac", "hanser-二次元凶.mflac", 3);
     files.extend(pick(&src_dir, "ncm", "Hanser - 啵唧.ncm", 3));
 
     let tmp = std::env::temp_dir().join(format!("mr-e2e-{}", std::process::id()));
     let (watch, out, data) = (tmp.join("watch"), tmp.join("out"), tmp.join("data"));
     std::fs::create_dir_all(&watch).unwrap();
-    let eng = Engine::new(data, Arc::new(RealConverter::new(home())), Box::new(|_| {}))
-        .with_poll_interval(Some(Duration::from_millis(500)));
+    let eng = Engine::new(
+        data,
+        Arc::new(RealConverter::new(real_home())),
+        Box::new(|_| {}),
+    )
+    .with_poll_interval(Some(Duration::from_millis(500)));
     eng.start().await;
     eng.complete_onboarding(
         vec![watch.to_string_lossy().into()],

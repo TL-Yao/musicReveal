@@ -2146,6 +2146,7 @@ name = "musicreveal-app"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "musicreveal-app",
  "objc2-foundation",
  "reveal-core",
  "rodio",
