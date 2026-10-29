@@ -67,8 +67,8 @@ fn fmt_of(f: OutputFormat) -> Fmt {
 const RECODE_SECS_PER_FILE: f64 = 0.3;
 const RECODE_BYTES_PER_SEC: f64 = 40e6;
 
-/// 资料库里切到 `f` 时要转换的歌（路径、大小）：Apple → FLAC / WAV；原格式 → 编码为 ALAC 的 .m4a。
-/// OGG / Opus / AAC / MP3 都不动。
+/// 资料库里切到 `f` 时要转换的歌（路径、大小）：Apple → ALAC 装得下的 FLAC / WAV；原格式 → 编码为
+/// ALAC 的 .m4a。OGG / Opus / AAC / MP3 与 `recode_lossless` 不会去转的（只读、32 bit 等）都不算。
 fn reformat_list(dir: &Path, f: Fmt) -> Vec<(PathBuf, u64)> {
     if dir.as_os_str().is_empty() {
         return vec![];
@@ -79,8 +79,8 @@ fn reformat_list(dir: &Path, f: Fmt) -> Vec<(PathBuf, u64)> {
             .map(|e| e.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
         match f {
-            Fmt::Apple => e == "flac" || e == "wav",
-            Fmt::Original => e == "m4a" && reveal_core::is_alac(p),
+            Fmt::Apple => (e == "flac" || e == "wav") && reveal_core::recodable(p, Lossless::Alac),
+            Fmt::Original => e == "m4a" && reveal_core::recodable(p, Lossless::Flac),
         }
     };
     let mut v: Vec<(PathBuf, u64)> = scan::files(dir, &keep)

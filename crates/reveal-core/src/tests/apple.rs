@@ -439,3 +439,58 @@ fn recode_refuses_and_leaves_the_original_untouched() {
     assert_eq!(e.to_string(), "不是 ALAC，未转换");
     assert!(!is_alac(&aac));
 }
+
+/// ALAC 装不下的无损（32 bit 整数、32 bit 浮点）不转 ALAC：照原格式档保持 WAV，PCM 不变。
+#[tokio::test]
+async fn apple_keeps_wav_that_alac_cannot_hold_losslessly() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("ap-32");
+    for c in ["pcm_s32le", "pcm_f32le"] {
+        let src = t.0.join(format!("{c}.wav"));
+        gen(&ff, &src, &["-ar", "48000", "-c:a", c]);
+        let out = t.0.join(format!("out-{c}"));
+        let o = apple(&src, &out, &NoopEnricher).await;
+        assert_eq!(o.output.extension().unwrap(), "wav", "{c}");
+        assert!(!is_alac(&o.output), "{c}");
+        let hash = |p: &Path| {
+            let o = Command::new(&ff)
+                .args(["-v", "error", "-i"])
+                .arg(p)
+                .args(["-map", "0:a:0", "-c:a", "copy", "-f", "hash", "-"])
+                .output()
+                .unwrap();
+            String::from_utf8(o.stdout).unwrap()
+        };
+        assert_eq!(hash(&src), hash(&o.output), "{c}: 采样原样");
+    }
+}
+
+/// 位深不是 16 / 24 的 FLAC、WAV 不在互转之列：`recodable` 与 `recode_lossless` 一致。
+#[test]
+fn recodable_matches_what_recode_would_accept() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("ap-recodable");
+    let tok = CancelToken::default();
+    let cases: [(&str, &[&str], bool); 4] = [
+        ("a16.flac", &["-c:a", "flac"], true),
+        ("b24.wav", &["-c:a", "pcm_s24le"], true),
+        ("c32.wav", &["-c:a", "pcm_s32le"], false),
+        ("d.wav", &["-c:a", "pcm_f32le"], false),
+    ];
+    for (name, args, ok) in cases {
+        let p = t.0.join(name);
+        gen(&ff, &p, args);
+        assert_eq!(recodable(&p, Lossless::Alac), ok, "{name}");
+        assert!(!recodable(&p, Lossless::Flac), "{name}");
+        let r = recode_lossless(&p, Lossless::Alac, &tok);
+        assert_eq!(r.is_ok(), ok, "{name}: {r:?}");
+        if let Ok(m4a) = r {
+            assert!(recodable(&m4a, Lossless::Flac), "{name}");
+            assert!(!recodable(&m4a, Lossless::Alac), "{name}");
+        }
+    }
+    let ro = t.0.join("ro.flac");
+    gen(&ff, &ro, &["-c:a", "flac"]);
+    std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o444)).unwrap();
+    assert!(!recodable(&ro, Lossless::Alac), "只读");
+}

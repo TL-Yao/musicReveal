@@ -766,6 +766,40 @@ async fn attached_picture(
     Ok((out.status.success() && !out.stdout.is_empty()).then_some(out.stdout))
 }
 
+/// 第一条音频流能原样放进 ALAC：16 / 24 bit 整数采样（看 ffmpeg 报的采样格式，读不了标签的也算得出）。
+/// 32 bit 整数、浮点、8 bit 等都不行。
+async fn alac_fits(ff: &Path, input: &Path, cancel: &CancelToken) -> Result<bool, ConvertError> {
+    let child = tokio::process::Command::new(ff)
+        .args(["-hide_banner", "-nostdin", "-i"])
+        .arg(input)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| ConvertError::Failed(format!("无法启动 ffmpeg：{e}")))?;
+    let out = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(ConvertError::Cancelled),
+        o = child.wait_with_output() => o.map_err(io_err)?,
+    };
+    Ok(sample_fits_alac(&String::from_utf8_lossy(&out.stderr)))
+}
+
+/// ffmpeg 输入信息里第一条音频流的采样格式是 `s16` / `s16p`，或带 `(24 bit)` 的 `s32` / `s32p`。
+fn sample_fits_alac(dump: &str) -> bool {
+    let Some(a) = dump
+        .lines()
+        .find_map(|l| l.split_once("Audio:").map(|x| x.1))
+    else {
+        return false;
+    };
+    a.split(", ").any(|f| {
+        let f = f.trim();
+        matches!(f, "s16" | "s16p") || matches!(f, "s32 (24 bit)" | "s32p (24 bit)")
+    })
+}
+
 /// 转码目标。
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Target {
@@ -798,7 +832,8 @@ impl Target {
 /// 要不要转码、转成什么。`readable`：lofty 读得了源的标签。
 /// 原格式：已是 MP3 不重编码；WMA / APE 的标签 lofty 写不全，总要转成 MP3 / FLAC；
 /// lofty 读不了的也要转码（无损转 FLAC，有损转 MP3）。
-/// Apple：无损（含读不了标签的）转 ALAC，MP3 / M4A 不动，其余有损转 AAC。
+/// Apple：无损（含读不了标签的）转 ALAC，MP3 / M4A 不动，其余有损转 AAC；ALAC 装不下的无损
+/// （见 `alac_fits`）由调用方改按原格式档处理。
 fn target_of(c: &Container, f: OutputFormat, readable: bool) -> Option<Target> {
     let lossless = matches!(c, Container::Flac | Container::Wav | Container::Ape);
     match (f, c) {
@@ -874,7 +909,16 @@ pub async fn convert(
 
     let mut container = d.container;
     let mut own_cover = None;
-    let target = target_of(&container, opts.format, src_tags.is_some());
+    let mut target = target_of(&container, opts.format, src_tags.is_some());
+    if let Some(t) = target {
+        let ff = opts
+            .ffmpeg
+            .clone()
+            .ok_or_else(|| ConvertError::Failed("缺少 ffmpeg".into()))?;
+        if t == Target::Alac && !alac_fits(&ff, &cur, cancel).await? {
+            target = target_of(&container, OutputFormat::Original, src_tags.is_some());
+        }
+    }
     if let Some(target) = target {
         let ff = opts
             .ffmpeg

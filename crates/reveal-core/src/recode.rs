@@ -47,6 +47,36 @@ pub(crate) fn is_aac(p: &Path) -> bool {
     mp4_codec(p) == Some(Mp4Codec::AAC)
 }
 
+/// `src`（读自 `path`）能不能无损转成 `to`，不能时给出原因。ALAC 只收 16 / 24 bit 整数、1–8 声道。
+fn accepts(src: &TaggedFile, path: &Path, to: Lossless) -> Result<(), String> {
+    match to {
+        Lossless::Alac => {
+            if !matches!(src.file_type(), FileType::Flac | FileType::Wav) {
+                return Err("不是 FLAC 或 WAV，未转换".into());
+            }
+            let p = src.properties();
+            let bits = p.bit_depth();
+            if !matches!(bits, Some(16 | 24)) {
+                let b = bits.map_or("未知".into(), |b| b.to_string());
+                return Err(format!("位深 {b} bit 无法无损转成 ALAC，未转换"));
+            }
+            if !matches!(p.channels(), Some(1..=8)) {
+                return Err("声道数无法无损转成 ALAC，未转换".into());
+            }
+            Ok(())
+        }
+        Lossless::Flac if src.file_type() == FileType::Mp4 && is_alac(path) => Ok(()),
+        Lossless::Flac => Err("不是 ALAC，未转换".into()),
+    }
+}
+
+/// `recode_lossless(path, to)` 会去转它（普通文件、不是只读、格式与位深合适）；
+/// 不会去转的不算进待转数。
+pub fn recodable(path: &Path, to: Lossless) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && !m.permissions().readonly())
+        && read_audio(path).is_ok_and(|f| accepts(&f, path, to).is_ok())
+}
+
 #[cfg(test)]
 thread_local! {
     /// 测试钩子：比对前改动隐藏副本，模拟转换不保真。
@@ -83,29 +113,11 @@ pub fn recode_lossless(
     let ff = crate::find_ffmpeg().ok_or_else(|| fail("找不到 ffmpeg，未转换"))?;
     let _g = rewrite_lock();
     let src = read_audio(path).map_err(|_| fail("读不了这首歌的音频信息，未转换"))?;
-    let (ok, ext, args) = match to {
-        Lossless::Alac => (
-            matches!(src.file_type(), FileType::Flac | FileType::Wav),
-            "m4a",
-            ["-c:a", "alac", "-f", "ipod"],
-        ),
-        Lossless::Flac => (
-            src.file_type() == FileType::Mp4 && is_alac(path),
-            "flac",
-            ["-c:a", "flac", "-f", "flac"],
-        ),
+    accepts(&src, path, to).map_err(fail)?;
+    let (ext, args) = match to {
+        Lossless::Alac => ("m4a", ["-c:a", "alac", "-f", "ipod"]),
+        Lossless::Flac => ("flac", ["-c:a", "flac", "-f", "flac"]),
     };
-    if !ok {
-        return Err(fail(match to {
-            Lossless::Alac => "不是 FLAC 或 WAV，未转换",
-            Lossless::Flac => "不是 ALAC，未转换",
-        }));
-    }
-    let bits = src.properties().bit_depth();
-    if to == Lossless::Alac && !matches!(bits, Some(16 | 24)) {
-        let b = bits.map_or("未知".into(), |b| b.to_string());
-        return Err(fail(format!("位深 {b} bit 无法无损转成 ALAC，未转换")));
-    }
     let dst = path.with_extension(ext);
     if dst.symlink_metadata().is_ok() {
         return Err(fail(format!("已有同名的 .{ext} 文件，未覆盖")));

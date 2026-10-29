@@ -117,7 +117,7 @@ pub use track::{
 
 pub use enrich::OnlineEnricher;
 
-pub use recode::{is_alac, recode_lossless, Lossless};
+pub use recode::{is_alac, recodable, recode_lossless, Lossless};
 
 pub use convert::{
     convert, credit_lines, find_ffmpeg, lrc_home, parse_lrc, safe_lrc_dir, strip_timestamps,

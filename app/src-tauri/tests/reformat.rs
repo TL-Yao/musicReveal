@@ -287,3 +287,22 @@ async fn onboarding_with_apple_and_old_mp3_setting_start_no_batch() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(exts(&out), ["a.flac"]);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn preview_counts_only_songs_the_batch_would_convert() {
+    let t = Tmp::new("count");
+    let out = t.0.join("out");
+    flac(&out.join("a.flac"), "能转");
+    gen(&out.join("b.wav"), &["-c:a", "pcm_s32le"]);
+    gen(&out.join("c.wav"), &["-c:a", "pcm_f32le"]);
+    gen(&out.join("d.wav"), &["-c:a", "pcm_s24le"]);
+    let moves = Moves::default();
+    let e = engine(&t.0.join("data"), &moves).await;
+    e.complete_onboarding(vec![], out.to_string_lossy().into(), "original")
+        .unwrap();
+    assert_eq!(e.preview_format("apple").unwrap().count, 2);
+    e.set_format("apple").unwrap();
+    let r = finished(&e).await;
+    assert_eq!((r.total, r.done, r.failed.len()), (2, 2, 0));
+    assert_eq!(exts(&out), ["a.m4a", "b.wav", "c.wav", "d.m4a"]);
+}
