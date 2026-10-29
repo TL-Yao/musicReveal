@@ -466,7 +466,8 @@ pub(crate) fn front_cover(tag: &Tag) -> Option<Vec<u8>> {
 }
 
 /// 写入标签并返回音质描述。`lyrics`：要嵌入的歌词；`src_lyrics`：源文件内嵌歌词，转码会丢，
-/// 没有 `lyrics` 时写回；`src_pics`：源文件的全部图片，同样转码会丢，产物里没有图片时写回。
+/// 没有 `lyrics` 时写回；`src_pics`：源文件的全部图片，同样转码会丢，产物里没有图片时写回；
+/// `src_totals`：源文件的曲目与碟片总数，ffmpeg 写 MP4 时会丢，产物里没有时写回。
 fn write_tags(
     p: &Path,
     m: &TrackMeta,
@@ -474,6 +475,7 @@ fn write_tags(
     lyrics: Option<&str>,
     src_lyrics: Option<&str>,
     src_pics: Vec<Picture>,
+    src_totals: (Option<u32>, Option<u32>),
 ) -> Result<String, ConvertError> {
     let mut f = read_audio(p)?;
     if f.primary_tag().is_none() {
@@ -505,6 +507,12 @@ fn write_tags(
     }
     if let Some(v) = m.disc {
         t.set_disk(v);
+    }
+    if let (Some(n), None) = (src_totals.0, t.track_total()) {
+        t.set_track_total(n);
+    }
+    if let (Some(n), None) = (src_totals.1, t.disk_total()) {
+        t.set_disk_total(n);
     }
     if t.pictures().is_empty() {
         src_pics.into_iter().for_each(|p| t.push_picture(p));
@@ -971,6 +979,10 @@ pub async fn convert(
     };
     let tags = tags_of(&src_tags);
     let src_lyrics = lyrics_of(&tags);
+    let totals = (
+        tags.iter().find_map(|t| t.track_total()),
+        tags.iter().find_map(|t| t.disk_total()),
+    );
     let src_pics = tags
         .iter()
         .map(|t| t.pictures())
@@ -1006,8 +1018,18 @@ pub async fn convert(
             container.clone(),
             lrc_text.clone(),
         );
-        blocking(move || write_tags(&p, &m, &c, l.as_deref(), src_lyrics.as_deref(), src_pics))
-            .await?
+        blocking(move || {
+            write_tags(
+                &p,
+                &m,
+                &c,
+                l.as_deref(),
+                src_lyrics.as_deref(),
+                src_pics,
+                totals,
+            )
+        })
+        .await?
     };
     if cancel.is_cancelled() {
         return Err(ConvertError::Cancelled);

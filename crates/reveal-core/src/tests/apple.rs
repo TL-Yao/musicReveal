@@ -1320,3 +1320,59 @@ async fn our_own_apple_output_recodes_both_ways() {
     b.sort();
     assert_eq!(a, b);
 }
+
+/// 复审四：导入带曲序与碟号总数的 FLAC，两档产物都照搬总数。
+#[tokio::test]
+async fn import_keeps_track_and_disc_totals() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("ap-totals");
+    let src = t.0.join("src.flac");
+    gen(
+        &ff,
+        &src,
+        &[
+            "-ar",
+            "44100",
+            "-c:a",
+            "flac",
+            "-metadata",
+            "TRACKNUMBER=3",
+            "-metadata",
+            "TRACKTOTAL=12",
+            "-metadata",
+            "DISCNUMBER=1",
+            "-metadata",
+            "DISCTOTAL=2",
+        ],
+    );
+    for (dir, format) in [
+        ("apple", OutputFormat::Apple),
+        ("orig", OutputFormat::Original),
+    ] {
+        let out = t.0.join(dir);
+        std::fs::create_dir_all(&out).unwrap();
+        let opts = ConvertOptions {
+            output_dir: out,
+            format,
+            ffmpeg: find_ffmpeg(),
+        };
+        let o = convert(
+            &src,
+            &opts,
+            &NoopEnricher,
+            None,
+            &CancelToken::default(),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        let f = lofty::read_from_path(&o.output).unwrap();
+        let tag = f.primary_tag().unwrap();
+        assert_eq!(
+            (tag.track(), tag.track_total(), tag.disk(), tag.disk_total()),
+            (Some(3), Some(12), Some(1), Some(2)),
+            "{dir}: {}",
+            o.output.display()
+        );
+    }
+}
