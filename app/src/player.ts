@@ -165,29 +165,41 @@ async function loadLyrics() {
   if (lyrId === id) renderLyrics(L ?? []);
 }
 
-function renderLyrics(L: LyricLine[]) {
+/** 画歌词页。背景（.lyr-bg/.lyr-veil）一直复用，只换图；onlyRight：左右栏布局不变时只换右半边（切歌词 / 队列） */
+function renderLyrics(L: LyricLine[], onlyRight = false) {
   const t = cur(), box = $("#lyrics");
   lines = L;
   lineEls = [];
   curLine = -1;
   if (!t) return void (box.innerHTML = "");
   const art = artStyle(hashArt(t.title));
-  const cover = `<div class="cover" style="${art}">${coverArt(t)}</div>`;
-  const head = `<div class="lyr-bg" style="${art}">${t.coverUrl ? `<img src="${esc(t.coverUrl)}" alt="">` : ""}</div><div class="lyr-veil"></div>`;
-  const ctl = `<div class="lyr-ctlbox"><div class="lyr-trk"><i id="lyrFill"></i><input type="range" min="0" max="1000" value="0" id="lyrScrub" aria-label="播放进度"></div>
+  let bg = box.querySelector<HTMLElement>(".lyr-bg");
+  if (!bg) (box.innerHTML = `<div class="lyr-bg"></div><div class="lyr-veil"></div>`), (bg = box.querySelector<HTMLElement>(".lyr-bg")!);
+  bg.setAttribute("style", art);
+  if ((bg.querySelector("img")?.getAttribute("src") ?? undefined) !== t.coverUrl) bg.innerHTML = t.coverUrl ? `<img src="${esc(t.coverUrl)}" alt="">` : "";
+  const right = qOn
+    ? `<div class="lyr-q" id="lyrQueue"></div>`
+    : `<div class="lyr-lines" id="lyrLines"><div class="lyr-pad"></div>${L.map((l, i) => {
+        const gap = !l.text.trim() || l.text.trim() === "…";
+        return `<div class="ln${gap ? " gap" : ""}" data-i="${i}">${gap ? "• • •" : esc(l.text)}${l.trans ? `<span class="tr">${esc(l.trans)}</span>` : ""}</div>`;
+      }).join("")}<div class="lyr-pad"></div></div>`;
+  const grid = box.querySelector(".lyr-grid");
+  if (onlyRight && grid && L.length) {
+    grid.lastElementChild!.outerHTML = right;
+    const qb = $(".lyr-qbtn", box);
+    qb.classList.toggle("on", qOn);
+    qb.title = qOn ? "显示歌词" : "播放队列";
+  } else {
+    const cover = `<div class="cover" style="${art}">${coverArt(t)}</div>`;
+    const ctl = `<div class="lyr-ctlbox"><div class="lyr-trk"><i id="lyrFill"></i><input type="range" min="0" max="1000" value="0" id="lyrScrub" aria-label="播放进度"></div>
     <div class="lyr-tm"><span id="lyrTimeL"></span><span id="lyrTimeR"></span></div>
     <div class="lyr-ctl"><button class="lyr-aux lyr-qbtn${qOn ? " on" : ""}" data-act="queue" title="${qOn ? "显示歌词" : "播放队列"}">${icon("queue")}</button><button class="lyr-sk" data-act="prev" title="上一首">${icon("prev")}</button><button class="lyr-pp" id="lyrPlay" data-act="play"></button><button class="lyr-sk" data-act="next" title="下一首">${icon("next")}</button><button class="lyr-aux lyr-del" data-act="trash" title="移到废纸篓">${icon("trash")}</button></div></div>`;
-  if (!L.length && !qOn) {
-    box.innerHTML = head + `<div class="lyr-none"><div>${cover}<h3>${esc(t.title)}</h3><p>${esc(t.artists.join("、"))}</p><p class="sub">${lyrKey || !S.lib.scanning ? "这首歌没有歌词" : "正在读取资料库…"}</p>${ctl}</div></div>`;
-  } else {
     const meta = [t.album, t.year].filter(Boolean).join(" · ");
-    const right = qOn
-      ? `<div class="lyr-q" id="lyrQueue"></div>`
-      : `<div class="lyr-lines" id="lyrLines"><div class="lyr-pad"></div>${L.map((l, i) => {
-          const gap = !l.text.trim() || l.text.trim() === "…";
-          return `<div class="ln${gap ? " gap" : ""}" data-i="${i}">${gap ? "• • •" : esc(l.text)}${l.trans ? `<span class="tr">${esc(l.trans)}</span>` : ""}</div>`;
-        }).join("")}<div class="lyr-pad"></div></div>`;
-    box.innerHTML = head + `<div class="lyr-grid"><div class="lyr-art">${cover}<div><h3>${esc(t.title)}</h3><p>${esc(t.artists.join("、"))}</p>${meta ? `<p class="meta">${esc(meta)}</p>` : ""}</div>${ctl}</div>${right}</div>`;
+    const body = !L.length && !qOn
+      ? `<div class="lyr-none"><div>${cover}<h3>${esc(t.title)}</h3><p>${esc(t.artists.join("、"))}</p><p class="sub">${lyrKey || !S.lib.scanning ? "这首歌没有歌词" : "正在读取资料库…"}</p>${ctl}</div></div>`
+      : `<div class="lyr-grid"><div class="lyr-art">${cover}<div><h3>${esc(t.title)}</h3><p>${esc(t.artists.join("、"))}</p>${meta ? `<p class="meta">${esc(meta)}</p>` : ""}</div>${ctl}</div>${right}</div>`;
+    while (bg.nextElementSibling!.nextElementSibling) bg.nextElementSibling!.nextElementSibling!.remove();
+    box.insertAdjacentHTML("beforeend", body);
   }
   syncCtl();
   updateProgress();
@@ -219,7 +231,7 @@ function renderQueue(instant: boolean) {
 }
 function toggleQueue() {
   qOn = !qOn;
-  renderLyrics(lines);
+  renderLyrics(lines, true);
   if (qOn) loadQueue();
 }
 function layoutLyrics() {
@@ -241,7 +253,10 @@ function syncLyrics(force: boolean, instant = false) {
     el.style.setProperty("--bl", i === c ? "0px" : Math.min(1.1, Math.abs(i - c) * 0.4).toFixed(2) + "px");
   });
   const box = document.getElementById("lyrLines"), el = lineEls[Math.max(0, c)];
+  // instant（刚画出来）：关掉行的过渡，样式落定后再放开，首帧就是最终的模糊层次
+  if (instant) box?.classList.add("lyr-instant");
   if (box && el && lyrOpen) box.scrollTo({ top: el.offsetTop - box.clientHeight / 2 + el.offsetHeight / 2, behavior: instant || reduced() ? "auto" : "smooth" });
+  if (instant && box) void box.offsetHeight, box.classList.remove("lyr-instant");
 }
 
 export function initPlayer() {
