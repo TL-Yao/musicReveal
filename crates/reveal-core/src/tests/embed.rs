@@ -200,3 +200,105 @@ fn lrc_home_mirrors_the_subpath_under_lrc() {
         Path::new("/m/out/lrc/y.lrc")
     );
 }
+
+/// 全局元数据（ffmetadata），去掉歌词键。
+fn ffmeta(ff: &Path, p: &Path) -> Vec<String> {
+    let o = std::process::Command::new(ff)
+        .args(["-v", "error", "-nostdin", "-i"])
+        .arg(p)
+        .args(["-f", "ffmetadata", "-"])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    // 行尾 `\` 是值里的换行：先拼回一条
+    let mut entries: Vec<String> = vec![];
+    let mut open = false;
+    for l in String::from_utf8_lossy(&o.stdout).lines() {
+        match entries.last_mut() {
+            Some(e) if open => *e += l,
+            _ => entries.push(l.to_owned()),
+        }
+        open = (l.len() - l.trim_end_matches('\\').len()) % 2 == 1;
+    }
+    entries.retain(|e| !e.to_lowercase().starts_with("lyrics"));
+    entries
+}
+
+/// lofty 不建模的元数据：要么原样保留，要么拒绝写入且原文件不变；绝不能「成功」却丢了。
+fn keeps_or_refuses(ff: &Path, p: &Path, marker: &[u8]) {
+    let before = std::fs::read(p).unwrap();
+    let meta = ffmeta(ff, p);
+    match embed_lyrics(p, LRC) {
+        Ok(()) => {
+            assert_eq!(ffmeta(ff, p), meta, "{}", p.display());
+            let after = std::fs::read(p).unwrap();
+            assert!(
+                after.windows(marker.len()).any(|w| w == marker),
+                "{}：未知项丢了",
+                p.display()
+            );
+            assert_eq!(read_lyrics(p).as_deref(), Some(LRC));
+        }
+        Err(_) => assert_eq!(std::fs::read(p).unwrap(), before, "{}", p.display()),
+    }
+    assert!(parts_in(p.parent().unwrap()).is_empty());
+}
+
+#[test]
+fn m4a_mdta_metadata_is_kept_or_the_write_is_refused() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("emb-mdta");
+    let p = t.0.join("a.m4a");
+    gen(
+        &ff,
+        &p,
+        &[
+            "-c:a",
+            "aac",
+            "-movflags",
+            "use_metadata_tags",
+            "-metadata",
+            "review_custom=keep",
+            "-metadata",
+            "title=keep-title",
+        ],
+    );
+    assert!(ffmeta(&ff, &p).contains(&"review_custom=keep".to_string()));
+    keeps_or_refuses(&ff, &p, b"review_custom");
+}
+
+/// syncsafe 32 位。
+fn syncsafe(n: u32) -> [u8; 4] {
+    [
+        (n >> 21) as u8 & 0x7f,
+        (n >> 14) as u8 & 0x7f,
+        (n >> 7) as u8 & 0x7f,
+        n as u8 & 0x7f,
+    ]
+}
+
+#[test]
+fn id3v22_unknown_frames_are_kept_or_the_write_is_refused() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("emb-v22");
+    let raw = t.0.join("raw.mp3");
+    let audio = gen(&ff, &raw, &["-c:a", "libmp3lame", "-id3v2_version", "0"]);
+    let frame = |id: &[u8], data: &[u8]| {
+        let n = data.len() as u32;
+        [id, &n.to_be_bytes()[1..], data].concat()
+    };
+    let frames = [
+        frame(b"TT2", b"\0title22"),
+        frame(b"XZZ", b"xzz-payload-keep"),
+    ]
+    .concat();
+    let tag = [
+        b"ID3\x02\x00\x00".as_slice(),
+        &syncsafe(frames.len() as u32),
+        &frames,
+    ]
+    .concat();
+    let p = t.write("a.mp3", &[tag, audio].concat());
+    assert!(ffmeta(&ff, &p).contains(&"title=title22".to_string()));
+    keeps_or_refuses(&ff, &p, b"xzz-payload-keep");
+}
