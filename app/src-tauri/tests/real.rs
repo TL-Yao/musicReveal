@@ -85,7 +85,12 @@ async fn real_files_dropped_into_watch_folder_get_converted() {
         let o = PathBuf::from(j.output.as_ref().unwrap());
         assert!(o.starts_with(&out));
         assert!(std::fs::metadata(&o).unwrap().len() > 0);
-        let r = std::process::Command::new(reveal_core::find_ffmpeg().unwrap())
+        // 校验解码用完整 ffmpeg：`REVEAL_GEN_FFMPEG` 优先（随包精简版没有 null 输出）
+        let ff = std::env::var_os("REVEAL_GEN_FFMPEG")
+            .map(PathBuf::from)
+            .or_else(reveal_core::find_ffmpeg)
+            .unwrap();
+        let r = std::process::Command::new(ff)
             .args(["-v", "error", "-i"])
             .arg(&o)
             .args(["-f", "null", "-"])

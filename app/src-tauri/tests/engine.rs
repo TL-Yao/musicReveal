@@ -1445,7 +1445,11 @@ async fn start_removes_leftover_part_files_only() {
 #[tokio::test(flavor = "multi_thread")]
 async fn plain_audio_is_ingested_and_shows_up_in_library() {
     use musicreveal_app::library::Library;
-    let ff = reveal_core::find_ffmpeg().expect("需要 ffmpeg");
+    // 生成素材：`REVEAL_GEN_FFMPEG` 优先（随包精简版没有 lavfi）
+    let ff = std::env::var_os("REVEAL_GEN_FFMPEG")
+        .map(std::path::PathBuf::from)
+        .or_else(reveal_core::find_ffmpeg)
+        .expect("需要 ffmpeg");
     let t = Tmp::new("plain");
     let (watch, out) = (t.dir("watch"), t.dir("out"));
     let (tx, rx) = std::sync::mpsc::channel();
