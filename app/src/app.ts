@@ -1,9 +1,10 @@
 // 界面外壳：侧栏、通知卡、引导三步（在内容面板里原位呈现）、拖放面、键盘，以及独立的设置窗口视图。
 import type { Backend } from "./backend";
 import type { Library, PlayerState, Snapshot } from "./types";
-import { $, $$, afterMotion, baseName, esc, icon, reduced, springLinear, tilde } from "./dom";
+import { $, $$, afterMotion, baseName, esc, icon, reduced, springLinear, switchHTML, tilde } from "./dom";
 import { S, call } from "./store";
-import { closeMenu, initLibrary, renderVoid, setLibrary } from "./library";
+import { closeMenu, initLibrary, renderVoid, setBusy, setLibrary } from "./library";
+import { FORMAT_ROW, initFormat, renderFormat } from "./format";
 import { initPlayer, lyricsOpen, refreshNowPlaying, setLyricsOpen, setPlayer, togglePlay } from "./player";
 import { initTray, renderTray } from "./tray";
 
@@ -64,8 +65,10 @@ function render() {
   renderQQ();
   renderOutput();
   renderNotices();
-  renderTray(onb ? [] : S.snap.jobs, firstTasks);
+  const rf = onb ? undefined : S.snap.reformat;
+  renderTray(onb ? [] : S.snap.jobs, firstTasks, rf);
   firstTasks = false;
+  setBusy(rf && !rf.finished ? rf.current : undefined);
   renderStage();
   renderVoid(); // 空资料库的文案随监听文件夹数变
 }
@@ -149,16 +152,12 @@ function renderQQ() {
 }
 
 function renderOutput() {
-  const dir = outDir(), on = format() === "mp3" ? "1" : "0";
+  const dir = outDir();
   for (const box of $$(".ob-out, .pathbox")) {
     $(".name", box).textContent = baseName(dir);
     $(".path", box).textContent = tilde(dir);
   }
-  for (const seg of $$(".seg")) {
-    seg.dataset.on = on;
-    $$("button", seg).forEach((b, i) => b.classList.toggle("on", String(i) === on));
-  }
-  $$<HTMLInputElement>(".radio input").forEach((r) => (r.checked = r.value === format()));
+  document.getElementById("obSwitch")?.setAttribute("aria-checked", String(format() === "apple"));
 }
 
 /* —— 通知卡：新文件夹里的旧歌 / 补转完成 —— */
@@ -208,12 +207,12 @@ function cardHTML(k: string) {
       <div class="cta"><span></span><button class="btn primary lg" id="obNext">继续</button></div></div>`;
   if (k === "ob2")
     return `<div class="stage-card ob" data-k="ob2"><div class="steps">${dots()}</div>
-      <h2>输出设置</h2><p class="lead">按「歌手 - 歌名」命名，写入封面、标签与 .lrc 歌词。源文件保持不变。</p>
+      <h2>输出设置</h2><p class="lead">按「歌手 - 歌名」命名，写入封面、标签与歌词。源文件保持不变。</p>
       <div class="box">
         <div class="srow ob-out" role="button" title="选择输出文件夹…"><span class="ico">${icon("folder")}</span><span><div class="name"></div><div class="path"></div></span><span><button class="btn" id="obPick">选择…</button></span></div>
-        <div class="ob-seg"><div class="lab">输出格式</div><div class="seg" id="obSeg" data-on="0"><div class="thumb"></div><button data-v="original">原格式</button><button data-v="mp3">MP3</button></div></div>
+        <div class="srow ob-fmt"><span class="ico">${icon("note")}</span><span><div class="name" id="obFmtName">Apple Music 兼容</div><div class="path">存为「音乐」App 可直接导入的格式</div></span><span>${switchHTML("obSwitch", "obFmtName")}</span></div>
       </div>
-      <p class="rule">原格式：保留无损音质。MP3：320 kbps，兼容性更好。</p>
+      <p class="rule">打开后，FLAC 等无损格式存为 Apple 无损，音质完全一样；OGG、Opus 存为 AAC 256 kbps，略有损失；MP3、M4A 不变。之后可在设置中更改。</p>
       <div class="cta"><button class="btn quiet" id="obBack">上一步</button><button class="btn primary lg" id="obNext">继续</button></div></div>`;
   return `<div class="stage-card ob" data-k="ob3"><div class="steps">${dots()}</div>
       <h2>QQ 音乐账号</h2><p class="lead">用于解密 QQ 音乐新格式文件。网易云音乐文件无需登录。</p>
@@ -264,10 +263,7 @@ async function pickOutDir() {
   if (onboarding()) (ob.outputDir = p), render();
   else call("set_output_dir", { path: p });
 }
-function setFormat(v: Format) {
-  if (onboarding()) (ob.format = v), render();
-  else call("set_format", { format: v });
-}
+
 async function finishOnboarding() {
   if (!onboarding()) return; // complete_onboarding 会重设监听文件夹，引导之外绝不能再发
   ob.revealed = 3;
@@ -294,17 +290,17 @@ function wire() {
       await call("add_watch_folder", { path: p });
     }
   };
-  // 分段控件、QQ 卡片、引导舞台上的按钮都走委托
+  // QQ 卡片、引导舞台上的按钮都走委托
   document.addEventListener("click", (e) => {
     const t = e.target as Element;
-    const seg = t.closest<HTMLElement>(".seg button");
-    if (seg) return setFormat(seg.dataset.v as Format);
     const cmd = t.closest<HTMLElement>("#qqAlert [data-cmd], .qq [data-cmd]")?.dataset.cmd;
     if (cmd) return void call(cmd);
     if (!t.closest("#stage") || !onboarding()) return;
     if (t.closest("#obNext")) return ob.step < 3 ? setObStep(ob.step + 1) : void finishOnboarding();
     if (t.closest("#obBack")) return setObStep(ob.step - 1);
     if (t.closest("#obAdd")) return void addFolder();
+    // 引导时资料库是空的：拨动即生效，第 3 步随 complete_onboarding 一起提交
+    if (t.closest("#obSwitch")) return (ob.format = format() === "apple" ? "original" : "apple"), render();
     if (t.closest(".ob-out")) return void pickOutDir();
     const tog = t.closest<HTMLElement>("[data-toggle]")?.dataset.toggle;
     if (tog) {
@@ -354,9 +350,7 @@ export function startSettings(backend: Backend) {
   root.hidden = false;
   root.innerHTML = `<div class="form">
     <div class="frow"><label>输出文件夹</label><div><div class="field"><div class="pathbox"><span class="ico">${icon("folder")}</span><span><div class="name"></div><div class="path"></div></span></div><button class="btn" id="stPick">选择…</button></div><p class="help">转换好的歌曲按「歌手 - 歌名」命名写到这里；这个文件夹里的歌就是资料库。</p></div></div>
-    <div class="frow"><label>输出格式</label><div>
-      <label class="radio"><input type="radio" name="format" value="original"><i></i><span><div class="lab">原格式</div><div class="desc">保留无损音质，文件较大。</div></span></label>
-      <label class="radio"><input type="radio" name="format" value="mp3"><i></i><span><div class="lab">MP3</div><div class="desc">320 kbps，兼容性更好。只影响之后转换的歌曲。</div></span></label></div></div>
+    ${FORMAT_ROW}
     <div class="frow"><label>QQ 音乐</label><div class="qqline"></div></div>
   </div>`;
   root.addEventListener("click", async (e) => {
@@ -368,13 +362,11 @@ export function startSettings(backend: Backend) {
     const cmd = t.closest<HTMLElement>("[data-cmd]")?.dataset.cmd;
     if (cmd) call(cmd);
   });
-  root.addEventListener("change", (e) => {
-    const r = e.target as HTMLInputElement;
-    if (r.name === "format") call("set_format", { format: r.value });
-  });
+  initFormat(root);
   load<Snapshot>(S.B.onSnapshot, "get_snapshot", (s) => {
     S.snap = { ...s, onboarded: true };
     renderOutput();
+    renderFormat();
     renderQQ();
   });
 }

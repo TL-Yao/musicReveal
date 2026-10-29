@@ -5,7 +5,9 @@ export type Snapshot = {
   /** accessible=false 时 reason 给出原因（不存在 / 无权限 / 条目超过 5000） */
   folders: { path: string; name: string; accessible: boolean; reason?: string }[];
   outputDir: string;
-  format: "original" | "mp3";
+  format: "original" | "apple";
+  /** 切换输出格式引发的已有歌曲批量转换；无批次时省略 */
+  reformat?: Reformat;
   qq: { state: "loggedIn" | "notInstalled" | "loggedOut" | "needsAuth" | "expired"; account?: string };
   /** 本次运行的任务，新任务在最上面 */
   jobs: Job[];
@@ -40,6 +42,27 @@ export type Job = {
   output?: string;
 };
 
+export type Reformat = {
+  /** 这批是转向哪边 */
+  target: "apple" | "original";
+  /** 本批总首数 */
+  total: number;
+  /** 已处理（成功 + 失败） */
+  done: number;
+  /** 正在转的那首的歌名（标题，不是文件名） */
+  current?: string;
+  /** 正在转的那首的封面（资料库缩略图 asset 地址），可无 */
+  coverUrl?: string;
+  /** 剩余秒数估计 */
+  etaSecs?: number;
+  /** 失败的歌名 + 一句中文原因 */
+  failed: { title: string; reason: string }[];
+  /** 批次结束（全部处理完） */
+  finished: boolean;
+};
+/** preview_format 的返回：若切到该格式，资料库里需要转换的已有歌曲数与预计耗时 */
+export type FormatPreview = { count: number; etaSecs: number };
+
 export type AddFolderResult = { existing: number };
 
 // 资料库与播放器（`library` / `player` 事件，get_library / get_player / get_lyrics 的载荷）
@@ -54,7 +77,7 @@ export type Track = {
   track?: number;
   disc?: number;
   durationMs: number;
-  /** "FLAC 24bit/48kHz" | "MP3 320k" */
+  /** "FLAC 24bit/48kHz" | "ALAC 24bit/48kHz" | "AAC 256k" | "MP3 320k" */
   quality: string;
   /** 可直接作 img src */
   coverUrl?: string;

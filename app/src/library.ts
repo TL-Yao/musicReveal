@@ -90,8 +90,26 @@ function renderHead() {
 
 const rowHTML = (t: Track, i: number) => {
   const land = landing.has(t.id) ? " landing nocover" : "";
-  return `<li class="song${land}" id="song-${i}" role="option" aria-selected="false" data-id="${esc(t.id)}"><div class="c-title">${coverHTML(t)}<div class="tt"><div class="t1">${esc(t.title)}</div><div class="t2">${esc(t.artists.join("、"))}</div></div></div><div class="c-album">${esc(t.album ?? "")}</div><div class="c-dur">${fmtTime(t.durationMs)}</div><div class="c-fmt">${esc(t.quality)}</div></li>`;
+  return `<li class="song${land}" id="song-${i}" role="option" aria-selected="false" data-id="${esc(t.id)}"><div class="c-title">${coverHTML(t)}<div class="tt"><div class="t1">${esc(t.title)}</div><div class="t2">${esc(t.artists.join("、"))}</div></div></div><div class="c-album">${esc(t.album ?? "")}</div><div class="c-dur">${fmtTime(t.durationMs)}</div>${fmtCell(t)}</li>`;
 };
+
+/* 格式转换批次：正在转的那首（按歌名匹配）格式列显示「正在转换…」，转完那一下格式字样弹一下 */
+let busyTitle: string | undefined;
+let flip = { title: "", until: 0 };
+const fmtCell = (t: Track) => {
+  const busy = t.title === busyTitle, flipped = t.title === flip.title && performance.now() < flip.until;
+  return `<div class="c-fmt${busy ? " busy" : flipped ? " flip" : ""}">${busy ? "正在转换…" : esc(t.quality)}</div>`;
+};
+export function setBusy(title?: string) {
+  if (title === busyTitle) return;
+  const was = busyTitle;
+  busyTitle = title;
+  if (was) flip = { title: was, until: performance.now() + 1500 };
+  for (const t of view) {
+    const c = (t.title === was || t.title === title) && rows.get(t.id)?.querySelector(".c-fmt");
+    if (c) c.outerHTML = fmtCell(t);
+  }
+}
 function renderSongs() {
   const ul = $("#songs");
   ul.innerHTML = view.map(rowHTML).join("");

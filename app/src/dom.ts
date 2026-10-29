@@ -75,3 +75,8 @@ export function titleFromFile(fileName: string) {
   const t = (i >= 0 ? stem.slice(i + 3) : j >= 0 ? stem.slice(j + 1) : stem).trim();
   return t || stem.trim();
 }
+/** 照 macOS 的开关：button[role=switch]，Tab 聚焦、空格原生切换；状态写在 aria-checked 上 */
+export const switchHTML = (id: string, labelledBy: string, describedBy = "") =>
+  `<button class="switch" id="${id}" role="switch" aria-checked="false" aria-labelledby="${labelledBy}"${describedBy ? ` aria-describedby="${describedBy}"` : ""}><i></i></button>`;
+/** 秒 → 分钟（向上取整，至少 1） */
+export const minutes = (secs: number) => Math.max(1, Math.ceil(secs / 60));
