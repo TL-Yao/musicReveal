@@ -1,14 +1,27 @@
 //! 真实端到端：真实转换器 + 自动轮询，监听与输出都在临时目录。
-//! 源文件只读复制自 `~/Downloads/hanser/`（可用 REVEAL_E2E_DIR 覆盖）。
+//! 源文件只读复制自主仓库的 `testdata/real-samples`（不入库，可用 REVEAL_E2E_DIR 覆盖）；
+//! QQ 登录信息只读自真实主目录（解密 mflac 要用）。
 
 use musicreveal_app::engine::*;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// 真实主目录（`home()` 在测试里是临时目录）：只从这里读源文件与 QQ 登录信息。
+/// 真实主目录（`home()` 在测试里是临时目录）：只从这里只读 QQ 登录信息。
 fn real_home() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").expect("HOME"))
+}
+
+/// 真实样本目录：主仓库（从 worktree 里跑也找得到）的 `testdata/real-samples`，版权音乐，不入库。
+fn samples() -> PathBuf {
+    let o = std::process::Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("需要 git 来定位主仓库");
+    assert!(o.status.success(), "定位不到主仓库");
+    let git = PathBuf::from(String::from_utf8(o.stdout).unwrap().trim());
+    git.parent().unwrap().join("testdata/real-samples")
 }
 
 fn pick(dir: &Path, ext: &str, must: &str, n: usize) -> Vec<PathBuf> {
@@ -30,7 +43,7 @@ fn pick(dir: &Path, ext: &str, must: &str, n: usize) -> Vec<PathBuf> {
 async fn real_files_dropped_into_watch_folder_get_converted() {
     let src_dir = std::env::var_os("REVEAL_E2E_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| real_home().join("Downloads/hanser"));
+        .unwrap_or_else(samples);
     let mut files = pick(&src_dir, "mflac", "hanser-二次元凶.mflac", 3);
     files.extend(pick(&src_dir, "ncm", "Hanser - 啵唧.ncm", 3));
 
@@ -108,6 +121,16 @@ async fn real_files_dropped_into_watch_folder_get_converted() {
         let err = String::from_utf8_lossy(&r.stderr);
         if !r.status.success() || !err.trim().is_empty() {
             bad.push(format!("{} ffmpeg: {err}", o.display()));
+        }
+        // 我们产出的 FLAC 在 Apple Music 兼容开关两头都转得过去
+        if o.extension().is_some_and(|e| e == "flac") {
+            let tok = reveal_core::CancelToken::default();
+            let r = reveal_core::recode_lossless(&o, reveal_core::Lossless::Alac, &tok)
+                .and_then(|m| reveal_core::recode_lossless(&m, reveal_core::Lossless::Flac, &tok));
+            match r {
+                Ok(back) => println!("  互转往返成功：{}", back.display()),
+                Err(e) => bad.push(format!("{} 互转：{e}", o.display())),
+            }
         }
     }
     let _ = std::fs::remove_dir_all(&tmp);

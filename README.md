@@ -101,7 +101,7 @@ scripts/package.sh
 
 发布时必须把 `dist/musicReveal_<版本>_ffmpeg-lame-source.tar` 与 `.dmg` 一起上传到同一个发布页。应用内置的 ffmpeg 以 LGPL 授权，这个 tar 是它的对应源码（未修改的 FFmpeg、LAME 源码包原样，加上构建脚本），按 LGPL 须与二进制在同一处提供；只上传 dmg 不符合许可要求。
 
-仓库中标记为 `#[ignore]` 的测试需要联网或本机真实文件，默认不运行。
+仓库中标记为 `#[ignore]` 的测试需要联网或本机真实文件，默认不运行。真实样本（QQ 音乐 `.mflac`、网易云 `.ncm` 与带 163 key 的 `.mp3`）放在主仓库的 `testdata/real-samples/`，是版权音乐，已列入 `.gitignore`、永不入库；从 worktree 里跑也会找主仓库的这个目录（可用 `REVEAL_NCM_DIR` / `REVEAL_E2E_DIR` 指定别处）。测试只把样本复制到临时目录再用；解密 `.mflac` 的端到端测试另外只读本机的 QQ 音乐登录信息。
 
 ## 致谢
 
