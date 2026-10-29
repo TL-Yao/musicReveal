@@ -191,9 +191,9 @@ input[type=range].slider::-webkit-slider-thumb { -webkit-appearance: none; width
 .lcd { justify-self: center; width: min(var(--lcd-w), 100%); height: var(--lcd-h); border-radius: var(--r-card); background: var(--glass); backdrop-filter: blur(18px) saturate(160%); box-shadow: inset 0 0 0 0.5px var(--glass-edge), var(--shadow-glass); display: grid; grid-template-columns: var(--lcd-h) minmax(0,1fr) var(--lcd-h); align-items: center; position: relative; overflow: hidden; }
 .lcd .cover { width: var(--art-lcd); height: var(--art-lcd); margin-left: 4px; border-radius: 5px; transition: opacity var(--dur-base); border: 0; padding: 0; cursor: pointer; }
 /* 封面即歌词页开关：悬停露出展开箭头，打开后常驻并翻成收起 */
-.lcd .cover .ov svg { transform: rotate(180deg); transition: transform var(--dur-fast); }
+.lcd .cover .ov svg { transition: transform var(--dur-fast); }
 .lcd .cover:hover .ov, .lcd .cover.on .ov { opacity: 1; }
-.lcd .cover.on .ov svg { transform: none; }
+.lcd .cover.on .ov svg { transform: rotate(180deg); }
 .lcd .cover:disabled { pointer-events: none; }
 .lcd .tx { text-align: center; min-width: 0; padding-bottom: 2px; }
 .lcd .t1 { font-size: var(--fs-small); font-weight: 600; line-height: var(--lh-tight); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
