@@ -201,6 +201,11 @@ function renderLyrics(L: LyricLine[], onlyRight = false) {
     while (bg.nextElementSibling!.nextElementSibling) bg.nextElementSibling!.nextElementSibling!.remove();
     box.insertAdjacentHTML("beforeend", body);
   }
+  if (qOn) {
+    const ph = $("#lyrQueue", box);
+    if (qBox) ph.replaceWith(qBox);
+    else qBox = ph;
+  }
   syncCtl();
   updateProgress();
   if (qOn) return renderQueue(true);
@@ -218,13 +223,38 @@ async function loadQueue() {
   const v = await S.B.invoke<QueueView>("player_queue").catch((e) => (console.error("player_queue", e), null));
   if (v && k === qKey) (Q = v), renderQueue(false);
 }
+/** 队列面板切走时留着，切回来重新挂上；行按曲目（连同显示信息）复用，封面 <img> 不重建就不会闪 */
+let qBox: HTMLElement | undefined, qHead: HTMLElement | undefined;
 function renderQueue(instant: boolean) {
   const box = document.getElementById("lyrQueue");
   if (!box) return;
-  box.innerHTML = `<div class="lyr-qpad"></div>${Q.ids.map((id, i) => {
-    const t = fileTrack(id);
-    return `${i === Q.pos + 1 ? `<h4 class="lyr-qh">接下来播放</h4>` : ""}<div class="lyr-qr${i < Q.pos ? " past" : i === Q.pos ? " cur" : ""}" data-i="${i}"><div class="cover" style="${artStyle(hashArt(t.title))}">${coverArt(t)}${i === Q.pos ? EQ : ""}</div><div><div class="lyr-qt">${esc(t.title)}</div><div class="lyr-qa">${esc(t.artists.join("、"))}</div></div><span class="lyr-qd">${t.durationMs ? fmtTime(t.durationMs) : ""}</span></div>`;
-  }).join("")}<div class="lyr-qpad"></div>`;
+  if (!box.firstChild) box.innerHTML = `<div class="lyr-qpad"></div><div class="lyr-qpad"></div>`;
+  qHead ??= Object.assign(document.createElement("h4"), { className: "lyr-qh", textContent: "接下来播放" });
+  const old = new Map<string, HTMLElement[]>();
+  for (const r of $$<HTMLElement>(".lyr-qr", box)) old.has(r.dataset.k!) ? old.get(r.dataset.k!)!.push(r) : old.set(r.dataset.k!, [r]);
+  const want: Element[] = [box.firstElementChild!];
+  Q.ids.forEach((id, i) => {
+    const t = fileTrack(id), k = JSON.stringify([id, t.title, t.artists, t.durationMs, t.coverUrl]);
+    let r = old.get(k)?.shift();
+    if (!r) {
+      const tmp = document.createElement("div");
+      tmp.innerHTML = `<div class="lyr-qr"><div class="cover" style="${artStyle(hashArt(t.title))}">${coverArt(t)}</div><div><div class="lyr-qt">${esc(t.title)}</div><div class="lyr-qa">${esc(t.artists.join("、"))}</div></div><span class="lyr-qd">${t.durationMs ? fmtTime(t.durationMs) : ""}</span></div>`;
+      r = tmp.firstElementChild as HTMLElement;
+      r.dataset.k = k;
+    }
+    r.dataset.i = String(i);
+    r.classList.toggle("past", i < Q.pos);
+    r.classList.toggle("cur", i === Q.pos);
+    const eq = r.querySelector(".lyr-qeq");
+    if (i === Q.pos && !eq) r.querySelector(".cover")!.insertAdjacentHTML("beforeend", EQ);
+    else if (i !== Q.pos) eq?.remove();
+    if (i === Q.pos + 1) want.push(qHead!);
+    want.push(r);
+  });
+  want.push(box.lastElementChild!);
+  for (const rs of old.values()) rs.forEach((r) => r.remove());
+  if (!want.includes(qHead)) qHead.remove();
+  want.forEach((el, i) => box.children[i] !== el && box.insertBefore(el, box.children[i] ?? null));
   syncCtl();
   const c = box.querySelector<HTMLElement>(".lyr-qr.cur");
   if (c) box.scrollTo({ top: c.offsetTop - box.clientHeight / 2 + c.offsetHeight / 2, behavior: instant || reduced() ? "auto" : "smooth" });
