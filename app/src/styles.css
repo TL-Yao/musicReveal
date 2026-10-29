@@ -427,6 +427,44 @@ input[type=range].slider::-webkit-slider-thumb { -webkit-appearance: none; width
 .lyr-none h3 { margin: 0 0 var(--s1); font-size: var(--fs-title); font-weight: 700; }
 .lyr-none p { margin: 0; font-size: var(--fs-small); color: rgba(255,255,255,.6); }
 .lyr-none .sub { margin-top: var(--s1); color: rgba(255,255,255,.45); font-size: var(--fs-caption); }
+/* 歌词页左栏：进度条 + 走带（上一首 / 播放暂停 / 下一首，两侧是队列开关与废纸篓） */
+.lyr-art > div.lyr-ctlbox, .lyr-none .lyr-ctlbox { width: var(--lyr-cover); margin: 4px auto 0; }
+.lyr-none .lyr-ctlbox { margin-top: 16px; }
+.lyr-trk { position: relative; height: 16px; display: flex; align-items: center; }
+.lyr-trk i { position: absolute; left: 0; right: 0; height: 4px; border-radius: 2px; background: linear-gradient(90deg, rgba(255,255,255,.82) var(--p, 0%), rgba(255,255,255,.2) 0); transition: height .15s; }
+.lyr-trk:hover i { height: 6px; border-radius: 3px; }
+.lyr-trk input { position: absolute; inset: 0; width: 100%; margin: 0; opacity: 0; cursor: default; }
+.lyr-tm { display: flex; justify-content: space-between; margin-top: 1px; font-size: 11px; font-variant-numeric: tabular-nums; color: rgba(255,255,255,.5); }
+.lyr-ctl { position: relative; display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 6px; }
+.lyr-ctl button { appearance: none; border: 0; padding: 0; background: transparent; color: rgba(255,255,255,.88); display: grid; place-items: center; border-radius: 999px; cursor: default; transition: background .15s, color .15s, transform .12s; }
+.lyr-ctl button:hover:not(:disabled) { background: rgba(255,255,255,.12); color: #fff; }
+.lyr-ctl button:active:not(:disabled) { transform: scale(.9); }
+.lyr-ctl button:disabled { opacity: .35; }
+.lyr-sk { width: 38px; height: 38px; } .lyr-sk svg { width: 21px; height: 21px; }
+.lyr-pp { width: 48px; height: 48px; } .lyr-pp svg { width: 28px; height: 28px; }
+.lyr-ctl .lyr-aux { position: absolute; width: 28px; height: 28px; color: rgba(255,255,255,.42); }
+.lyr-aux svg { width: 15px; height: 15px; }
+.lyr-qbtn { left: -12px; }
+.lyr-ctl .lyr-qbtn.on { color: #fff; background: rgba(255,255,255,.18); }
+.lyr-del { right: -12px; }
+.lyr-ctl .lyr-del:hover:not(:disabled) { color: #FF6961; background: rgba(255,255,255,.1); }
+/* 歌词页右栏：播放队列 */
+.lyr-q { position: relative; overflow-y: auto; padding: 0 var(--s6) 0 var(--s3); scrollbar-width: none; -webkit-mask: linear-gradient(transparent, #000 10%, #000 88%, transparent); mask: linear-gradient(transparent, #000 10%, #000 88%, transparent); }
+.lyr-q::-webkit-scrollbar { display: none; }
+.lyr-qpad { height: 38%; }
+.lyr-qh { margin: 14px 10px 6px; font-size: 11px; font-weight: 600; letter-spacing: .04em; color: rgba(255,255,255,.45); }
+.lyr-qr { display: grid; grid-template-columns: 36px minmax(0,1fr) auto; align-items: center; gap: 10px; max-width: 520px; padding: 6px 10px; border-radius: 8px; cursor: default; transition: background .12s, opacity .2s; }
+.lyr-qr:hover { background: rgba(255,255,255,.08); }
+.lyr-qr.past { opacity: .45; } .lyr-qr.past:hover { opacity: .8; }
+.lyr-qr.cur { background: rgba(255,255,255,.14); }
+.lyr-qr .cover { width: 36px; height: 36px; --gs: 36px; box-shadow: 0 0 0 .5px rgba(255,255,255,.12); }
+.lyr-qr.cur .ov.eq { opacity: 1; background: rgba(0,0,0,.4); }
+.lyr-qr.cur .eq i { animation: eq .9s ease-in-out infinite; }
+.lyr-qr.cur .eq i:nth-child(2) { animation-delay: -.3s; } .lyr-qr.cur .eq i:nth-child(3) { animation-delay: -.6s; }
+.lyr-paused .lyr-qr.cur .eq i { animation-play-state: paused; }
+.lyr-qt { font-size: 13px; font-weight: 500; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lyr-qa { font-size: 12px; color: rgba(255,255,255,.55); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lyr-qd { font-size: 12px; color: rgba(255,255,255,.45); font-variant-numeric: tabular-nums; }
 
 /* ===================================================================
    右键菜单、设置窗口

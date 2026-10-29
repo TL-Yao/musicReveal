@@ -98,4 +98,8 @@ export type PlayerState = {
   shuffle: boolean;
   repeat: Repeat;
   error?: string;
+  /** 播放队列每变一次加一；变了再调 player_queue 拉 */
+  queueRev: number;
 };
+/** player_queue 的返回：实际播放顺序（随机时为打乱后的），pos 为当前曲下标（等于长度表示没有当前曲） */
+export type QueueView = { ids: string[]; pos: number };

@@ -5,7 +5,7 @@ import { $, $$, afterMotion, baseName, esc, icon, reduced, springLinear, switchH
 import { S, call } from "./store";
 import { closeMenu, initLibrary, renderVoid, setBusy, setLibrary } from "./library";
 import { FORMAT_ROW, initFormat, renderFormat } from "./format";
-import { initPlayer, lyricsOpen, refreshNowPlaying, setLyricsOpen, setPlayer, togglePlay } from "./player";
+import { initPlayer, lyricsOpen, refreshNowPlaying, setLyricsOpen, setPlayer, togglePlay, trashCurrent } from "./player";
 import { initTray, renderTray } from "./tray";
 
 type Format = Snapshot["format"];
@@ -324,6 +324,7 @@ function wire() {
     }
     if (e.metaKey && e.key === "ArrowRight") call("player_next");
     if (e.metaKey && e.key === "ArrowLeft") call("player_prev");
+    if (e.metaKey && e.key === "Backspace" && lyricsOpen()) e.preventDefault(), trashCurrent();
   });
 }
 

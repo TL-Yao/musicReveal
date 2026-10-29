@@ -180,7 +180,7 @@ function setQuery(q: string) {
   $("#scroll").scrollTop = 0;
 }
 
-function trash(id: string) {
+export function trash(id: string) {
   const el = rows.get(id);
   if (el) {
     el.classList.add("gone");

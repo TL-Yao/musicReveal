@@ -1,7 +1,7 @@
 // 开发期假后台：只在 vite dev + ?mock 时由 main.ts 动态加载，生产构建里不存在。
 // 按同一份 IPC 契约实现快照 / 资料库 / 播放器 / 歌词；window.MR 供截图脚本把界面切到任意状态。
 import type { Backend, DragDrop } from "./backend";
-import type { Job, Library, LyricLine, PlayerState, Repeat, Snapshot, Track } from "./types";
+import type { Job, Library, LyricLine, PlayerState, QueueView, Repeat, Snapshot, Track } from "./types";
 import { titleFromFile } from "./dom";
 
 const HOME = "/Users/me";
@@ -120,7 +120,8 @@ const fullLibrary = () => [...SONG_ROWS, ...EXTRA_ROWS].map((r, i) => mkTrack(r,
    =================================================================== */
 let snap: Snapshot;
 let lib: Library = { dir: OUT, tracks: [], scanning: false };
-const P = { queue: [] as string[], i: -1, playing: false, base: 0, at: 0, volume: 0.7, shuffle: false, repeat: "off" as Repeat, error: undefined as string | undefined };
+/** queue 为实际播放顺序（随机时打乱），ids 为点播时的原顺序 */
+const P = { ids: [] as string[], queue: [] as string[], i: -1, rev: 0, playing: false, base: 0, at: 0, volume: 0.7, shuffle: false, repeat: "off" as Repeat, error: undefined as string | undefined };
 type Extra = { title?: string; artists: string[]; album?: string; quality: string; art: string; noTrack?: boolean };
 const extra = new Map<string, Extra>();
 const runs = new Map<string, number>();
@@ -166,13 +167,15 @@ const broken = new Set<string>();
 const position = () => (P.playing ? P.base + Date.now() - P.at : P.base);
 function playerState(): PlayerState {
   const id = P.queue[P.i], d = durOf(id);
-  return { ...(id ? { trackId: id } : {}), playing: P.playing && !!id, positionMs: Math.min(position(), d), durationMs: d, volume: P.volume, shuffle: P.shuffle, repeat: P.repeat, ...(P.error ? { error: P.error } : {}) };
+  return { ...(id ? { trackId: id } : {}), playing: P.playing && !!id, positionMs: Math.min(position(), d), durationMs: d, volume: P.volume, shuffle: P.shuffle, repeat: P.repeat, ...(P.error ? { error: P.error } : {}), queueRev: P.rev };
 }
 function load() {
   while (P.queue[P.i] && broken.has(P.queue[P.i])) {
     const id = P.queue[P.i];
     P.error = `「${titleFromFile(id.split("/").pop() ?? id)}」文件不存在，已跳过`;
     P.queue = P.queue.filter((x) => x !== id);
+    P.ids = P.ids.filter((x) => x !== id);
+    P.rev++;
     if (P.i >= P.queue.length) P.i = P.queue.length ? 0 : -1;
   }
   if (P.i < 0) P.playing = false;
@@ -185,13 +188,43 @@ const setPos = (ms: number) => ((P.base = ms), (P.at = Date.now()));
 function advance(auto: boolean, dir = 1) {
   if (!P.queue.length) return;
   if (auto && P.repeat === "one") return setPos(0);
-  let i = P.shuffle && P.queue.length > 1 ? (P.i + 1 + Math.floor(Math.random() * (P.queue.length - 1))) % P.queue.length : P.i + dir;
+  let i = P.i + dir;
   if (i >= P.queue.length) {
     if (auto && P.repeat === "off") return (P.playing = false), setPos(0);
     i = 0;
   }
   if (i < 0) i = P.queue.length - 1;
   P.i = i;
+  P.error = undefined;
+  setPos(0);
+  load();
+}
+/** 同真后台 PlayQueue::set_shuffle：开则当前曲排第一、其余打乱；关则回原顺序 */
+function reorder() {
+  const cur = P.queue[P.i];
+  if (P.shuffle) {
+    const rest = P.ids.filter((x) => x !== cur);
+    for (let k = rest.length - 1; k > 0; k--) {
+      const j = Math.floor(Math.random() * (k + 1));
+      [rest[k], rest[j]] = [rest[j], rest[k]];
+    }
+    P.queue = cur ? [cur, ...rest] : rest;
+  } else P.queue = [...P.ids];
+  P.i = cur ? P.queue.indexOf(cur) : -1;
+  P.rev++;
+}
+/** 同真后台 Player::remove：移出队列；是当前曲就接着放下一首（末首且非循环全部则停、清空当前曲） */
+function removeFromQueue(id: string) {
+  P.ids = P.ids.filter((x) => x !== id);
+  const k = P.queue.indexOf(id);
+  if (k < 0) return;
+  P.queue.splice(k, 1);
+  P.rev++;
+  if (k < P.i) P.i--;
+  if (k !== P.i) return;
+  if (P.i >= P.queue.length) P.i = P.repeat === "all" && P.queue.length ? 0 : -1;
+  if (P.i < 0) return void ((P.playing = false), setPos(0));
+  P.playing = true;
   P.error = undefined;
   setPos(0);
   load();
@@ -385,13 +418,16 @@ export const mockBackend: Backend = {
         case "trash_track":
           snapChanged = false;
           lib.tracks = lib.tracks.filter((t) => t.id !== a.id);
-          setTimeout(pushLib, 120); // 真后台不停播：已打开的文件照常放完
+          removeFromQueue(a.id);
+          setTimeout(pushLib, 120);
+          setTimeout(pushPlayer, 30);
           break;
         default: {
           snapChanged = false;
           if (!cmd.startsWith("player_")) throw `mock: unknown command ${cmd}`;
-          player(cmd.slice(7), a);
+          const out = player(cmd.slice(7), a);
           setTimeout(pushPlayer, 30);
+          return out;
         }
       }
       return undefined;
@@ -406,9 +442,18 @@ export const mockBackend: Backend = {
   pickFiles: async () => [`${HOME}/Downloads/hanser-魔法少女的午后.mflac`],
 };
 
-function player(cmd: string, a: Record<string, any>) {
+function player(cmd: string, a: Record<string, any>): QueueView | void {
   switch (cmd) {
-    case "play": P.queue = a.ids; P.i = a.index; P.playing = true; P.error = undefined; setPos(0); load(); break;
+    case "play":
+      P.ids = [...a.ids]; P.queue = [...a.ids]; P.i = a.index; P.playing = true; P.error = undefined;
+      if (P.shuffle) reorder();
+      P.rev++; setPos(0); load();
+      break;
+    case "queue": return { ids: [...P.queue], pos: P.i < 0 ? P.queue.length : P.i };
+    case "jump":
+      if (!(a.index >= 0 && a.index < P.queue.length)) return;
+      P.i = a.index; P.playing = true; P.error = undefined; setPos(0); load();
+      break;
     case "toggle":
       P.error = undefined;
       if (P.i < 0) return;
@@ -419,7 +464,7 @@ function player(cmd: string, a: Record<string, any>) {
     case "prev": P.error = undefined; if (position() > 3000) setPos(0); else advance(false, -1); break;
     case "seek": setPos(a.ms); break;
     case "set_volume": P.volume = a.volume; break;
-    case "set_shuffle": P.shuffle = a.on; break;
+    case "set_shuffle": P.shuffle = a.on; reorder(); break;
     case "set_repeat": P.repeat = a.mode; break;
     default: throw `mock: unknown command player_${cmd}`;
   }
@@ -447,7 +492,7 @@ function playTitle(title: string, atSec = 0, playing = true) {
   pushPlayer();
 }
 function stop() {
-  P.queue = []; P.i = -1; P.playing = false; P.error = undefined; setPos(0);
+  P.ids = []; P.queue = []; P.i = -1; P.rev++; P.playing = false; P.error = undefined; setPos(0);
   pushPlayer();
 }
 function proc(): Job { const j = job(QPOOL[0], "transcode"); return j; }
