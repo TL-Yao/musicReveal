@@ -223,7 +223,7 @@ async function loadQueue() {
   const v = await S.B.invoke<QueueView>("player_queue").catch((e) => (console.error("player_queue", e), null));
   if (v && k === qKey) (Q = v), renderQueue(false);
 }
-/** 队列面板切走时留着，切回来重新挂上；行按曲目（连同显示信息）复用，封面 <img> 不重建就不会闪 */
+/** 队列面板切走时留着，切回来重新挂上；行按曲目 id 复用，封面 <img> 不重建就不会闪 */
 let qBox: HTMLElement | undefined, qHead: HTMLElement | undefined;
 function renderQueue(instant: boolean) {
   const box = document.getElementById("lyrQueue");
@@ -234,14 +234,23 @@ function renderQueue(instant: boolean) {
   for (const r of $$<HTMLElement>(".lyr-qr", box)) old.has(r.dataset.k!) ? old.get(r.dataset.k!)!.push(r) : old.set(r.dataset.k!, [r]);
   const want: Element[] = [box.firstElementChild!];
   Q.ids.forEach((id, i) => {
-    const t = fileTrack(id), k = JSON.stringify([id, t.title, t.artists, t.durationMs, t.coverUrl]);
-    let r = old.get(k)?.shift();
+    const t = fileTrack(id);
+    let r = old.get(id)?.shift();
     if (!r) {
       const tmp = document.createElement("div");
-      tmp.innerHTML = `<div class="lyr-qr"><div class="cover" style="${artStyle(hashArt(t.title))}">${coverArt(t)}</div><div><div class="lyr-qt">${esc(t.title)}</div><div class="lyr-qa">${esc(t.artists.join("、"))}</div></div><span class="lyr-qd">${t.durationMs ? fmtTime(t.durationMs) : ""}</span></div>`;
+      tmp.innerHTML = `<div class="lyr-qr"><div class="cover">${coverArt(t)}</div><div><div class="lyr-qt"></div><div class="lyr-qa"></div></div><span class="lyr-qd"></span></div>`;
       r = tmp.firstElementChild as HTMLElement;
-      r.dataset.k = k;
+      r.dataset.k = id;
+      r.dataset.cv = t.coverUrl ?? "";
     }
+    // 标签变了只改文字与底色；封面地址真的变了才换 <img>
+    const set = (el: Element, v: string) => el.textContent !== v && (el.textContent = v);
+    const cv = r.querySelector<HTMLElement>(".cover")!, st = artStyle(hashArt(t.title));
+    if (cv.getAttribute("style") !== st) cv.setAttribute("style", st);
+    if (r.dataset.cv !== (t.coverUrl ?? "")) (r.dataset.cv = t.coverUrl ?? ""), (cv.querySelector(".art")!.outerHTML = coverArt(t));
+    set(r.querySelector(".lyr-qt")!, t.title);
+    set(r.querySelector(".lyr-qa")!, t.artists.join("、"));
+    set(r.querySelector(".lyr-qd")!, t.durationMs ? fmtTime(t.durationMs) : "");
     r.dataset.i = String(i);
     r.classList.toggle("past", i < Q.pos);
     r.classList.toggle("cur", i === Q.pos);
