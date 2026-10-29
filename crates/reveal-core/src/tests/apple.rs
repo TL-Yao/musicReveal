@@ -2,7 +2,7 @@
 
 use super::pipeline::{ffmpeg, gen};
 use super::Tmp;
-use crate::recode::TAMPER;
+use crate::recode::{AFTER_PLACE, TAMPER};
 use crate::*;
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::picture::{MimeType, Picture, PictureType};
@@ -1525,4 +1525,30 @@ fn review4_mp4_data_type_must_match_the_key() {
     f.save_to_path(&m4a, lofty::config::WriteOptions::default())
         .unwrap();
     refused(&t, &m4a, Lossless::Flac, "©wrt");
+}
+
+/// 第四轮：换上新文件后、删原文件前，目标被别的程序换成另一个文件、原文件也被改了权限——回滚不删别人的文件。
+#[test]
+fn rollback_only_removes_the_file_it_placed() {
+    let Some(ff) = ffmpeg() else { return };
+    let t = Tmp::new("ap-r4-unplace");
+    let src = sample(&ff, &t, "a.flac", &["-c:a", "flac"]);
+    std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let bytes = std::fs::read(&src).unwrap();
+    AFTER_PLACE.set(Some(|dst: &Path| {
+        let other = dst.with_file_name("other");
+        std::fs::write(&other, b"not mine").unwrap();
+        std::fs::rename(&other, dst).unwrap();
+        let src = dst.with_extension("flac");
+        std::fs::set_permissions(src, std::fs::Permissions::from_mode(0o400)).unwrap();
+    }));
+    let e = recode_lossless(&src, Lossless::Alac, &CancelToken::default()).unwrap_err();
+    AFTER_PLACE.set(None);
+    assert!(e.to_string().starts_with("转换期间原文件被改动"), "{e}");
+    assert_eq!(
+        std::fs::read(src.with_extension("m4a")).unwrap(),
+        b"not mine"
+    );
+    assert!(std::fs::read(&src).unwrap() == bytes);
+    no_parts(&t.0);
 }

@@ -621,6 +621,8 @@ thread_local! {
     pub(crate) static TAMPER: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
     /// 测试钩子：新文件换上后、删原文件前中断，模拟此刻退出。
     pub(crate) static HALT_AFTER_PLACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 测试钩子：新文件换上后、删原文件前对新文件路径做点什么。
+    pub(crate) static AFTER_PLACE: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
 }
 
 const CHANGED: &str = "转换期间原文件被改动，未替换";
@@ -732,6 +734,20 @@ pub fn recode_lossless(
     }
     verify(&ff, path, &src, &want, &tmp, cancel)?;
     keep_attrs(&m, path, &tmp).map_err(io)?;
+    use std::os::unix::fs::MetadataExt;
+    let mine = std::fs::symlink_metadata(&tmp)
+        .map(|t| (t.dev(), t.ino()))
+        .map_err(io)?;
+    // 回滚：目标路径还是自己放下的那个文件才删，否则不动它
+    let unplace = |why: String| {
+        let ours = std::fs::symlink_metadata(&dst).is_ok_and(|d| (d.dev(), d.ino()) == mine);
+        if ours {
+            let _ = std::fs::remove_file(&dst);
+            fail(why)
+        } else {
+            fail(format!("{why}；.{ext} 文件已被别的程序换掉，没动它"))
+        }
+    };
     match place(&tmp, &dst) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -743,13 +759,15 @@ pub fn recode_lossless(
     if HALT_AFTER_PLACE.get() {
         return Err(fail("测试：换上新文件后中断"));
     }
+    #[cfg(test)]
+    if let Some(f) = AFTER_PLACE.get() {
+        f(&dst);
+    }
     if !untouched(&m, path) {
-        let _ = std::fs::remove_file(&dst);
-        return Err(fail(CHANGED));
+        return Err(unplace(CHANGED.into()));
     }
     if let Err(e) = std::fs::remove_file(path) {
-        let _ = std::fs::remove_file(&dst);
-        return Err(io(e));
+        return Err(unplace(format!("读写失败：{e}")));
     }
     Ok(dst)
 }
