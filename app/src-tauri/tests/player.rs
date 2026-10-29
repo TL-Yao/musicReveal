@@ -787,3 +787,46 @@ fn play_rejects_empty_queue_or_bad_index() {
     assert!(p.play(vec![], 0).is_err());
     assert!(p.play(vec!["x".into()], 1).is_err());
 }
+
+/// 正在播放的 FLAC 被转成 ALAC：播放不断，当前曲与队列指向新路径，上一首 / 下一首照常。
+#[test]
+#[ignore = "需要音频设备"]
+fn track_recoded_while_playing_keeps_playing_and_the_queue_follows() {
+    let _g = audio();
+    let t = Tmp::new("recode");
+    let (Some(a), Some(b)) = (
+        encode(&t.0, "a.flac", &[], 4.0),
+        encode(&t.0, "b.flac", &[], 4.0),
+    ) else {
+        eprintln!("没有 ffmpeg，跳过");
+        return;
+    };
+    let p = quiet(&t, Box::new(|_| {}));
+    p.play(vec![a.clone(), b.clone()], 0).unwrap();
+    wait(&p, 3, |s| s.playing && s.position_ms >= 300);
+    let new = reveal_core::recode_lossless(
+        Path::new(&a),
+        reveal_core::Lossless::Alac,
+        &Default::default(),
+    )
+    .unwrap();
+    let new = new.to_string_lossy().into_owned();
+    assert!(!Path::new(&a).exists());
+    p.rename(&a, &new);
+    let s = p.state();
+    assert_eq!(s.track_id.as_deref(), Some(new.as_str()));
+    assert!(s.playing && s.error.is_none(), "{s:?}");
+    let before = s.position_ms;
+    let s = wait(&p, 3, |s| s.position_ms >= before + 500);
+    assert!(s.playing && s.error.is_none(), "播放没被打断：{s:?}");
+
+    p.next();
+    let s = wait(&p, 3, |s| s.track_id.as_deref() == Some(b.as_str()));
+    assert!(s.error.is_none(), "{s:?}");
+    p.prev();
+    let s = wait(&p, 3, |s| {
+        s.track_id.as_deref() == Some(new.as_str()) && s.playing
+    });
+    assert!(s.error.is_none(), "上一首是新路径：{s:?}");
+    p.stop();
+}
