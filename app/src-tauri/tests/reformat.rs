@@ -296,6 +296,9 @@ async fn preview_counts_only_songs_the_batch_would_convert() {
     gen(&out.join("b.wav"), &["-c:a", "pcm_s32le"]);
     gen(&out.join("c.wav"), &["-c:a", "pcm_f32le"]);
     gen(&out.join("d.wav"), &["-c:a", "pcm_s24le"]);
+    // 3、8 声道：ALAC 往返保不住声道数与布局，不在待转之列
+    gen(&out.join("e.flac"), &["-ac", "3", "-c:a", "flac"]);
+    gen(&out.join("f.wav"), &["-ac", "8", "-c:a", "pcm_s16le"]);
     let moves = Moves::default();
     let e = engine(&t.0.join("data"), &moves).await;
     e.complete_onboarding(vec![], out.to_string_lossy().into(), "original")
@@ -304,5 +307,8 @@ async fn preview_counts_only_songs_the_batch_would_convert() {
     e.set_format("apple").unwrap();
     let r = finished(&e).await;
     assert_eq!((r.total, r.done, r.failed.len()), (2, 2, 0));
-    assert_eq!(exts(&out), ["a.m4a", "b.wav", "c.wav", "d.m4a"]);
+    assert_eq!(
+        exts(&out),
+        ["a.m4a", "b.wav", "c.wav", "d.m4a", "e.flac", "f.wav"]
+    );
 }

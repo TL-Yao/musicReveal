@@ -786,7 +786,8 @@ async fn alac_fits(ff: &Path, input: &Path, cancel: &CancelToken) -> Result<bool
     Ok(sample_fits_alac(&String::from_utf8_lossy(&out.stderr)))
 }
 
-/// ffmpeg 输入信息里第一条音频流的采样格式是 `s16` / `s16p`，或带 `(24 bit)` 的 `s32` / `s32p`。
+/// ffmpeg 输入信息里第一条音频流的采样格式是 `s16` / `s16p`，或带 `(24 bit)` 的 `s32` / `s32p`，
+/// 且是单声道或立体声（更多声道 ALAC 保不住声道数与布局）。
 fn sample_fits_alac(dump: &str) -> bool {
     let Some(a) = dump
         .lines()
@@ -794,10 +795,10 @@ fn sample_fits_alac(dump: &str) -> bool {
     else {
         return false;
     };
-    a.split(", ").any(|f| {
-        let f = f.trim();
-        matches!(f, "s16" | "s16p") || matches!(f, "s32 (24 bit)" | "s32p (24 bit)")
-    })
+    let fields: Vec<&str> = a.split(", ").map(str::trim).collect();
+    let has = |set: &[&str]| fields.iter().any(|f| set.contains(f));
+    has(&["s16", "s16p", "s32 (24 bit)", "s32p (24 bit)"])
+        && has(&["mono", "stereo", "1 channels", "2 channels"])
 }
 
 /// 转码目标。
