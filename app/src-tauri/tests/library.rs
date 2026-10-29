@@ -677,16 +677,24 @@ fn a_thousand_cached_tracks_serialize_under_50ms() {
     assert!(took < Duration::from_millis(50), "{took:?}");
 }
 
-/// 只读核对真实输出文件夹（默认 ~/Music/musicReveal，可用 REVEAL_LIBRARY_DIR 覆盖）：
-/// 缓存与缩略图都写在临时数据目录里。
+/// 核对真实输出文件夹（默认 ~/Music/musicReveal，可用 REVEAL_LIBRARY_DIR 覆盖）：扫描会补嵌歌词、
+/// 挪 .lrc，所以扫的是它在临时目录里的 APFS 克隆（`cp -c`，不占空间）；原文件夹只读。
 #[test]
 #[ignore = "读本机真实输出文件夹"]
 fn real_output_dir_read_only_scan() {
-    let dir = std::env::var_os("REVEAL_LIBRARY_DIR")
+    let real = std::env::var_os("REVEAL_LIBRARY_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| musicreveal_app::engine::home().join("Music/musicReveal"));
     let t = Tmp::new("real");
-    let (lib, rx) = open(&t.0);
+    let dir = t.0.join("library");
+    let st = Command::new("cp")
+        .arg("-cR")
+        .arg(&real)
+        .arg(&dir)
+        .status()
+        .unwrap();
+    assert!(st.success(), "无法克隆 {}", real.display());
+    let (lib, rx) = open(&t.0.join("data"));
     let t0 = std::time::Instant::now();
     lib.set_dir(&dir);
     let (partial, v) = settled(&rx);
@@ -702,7 +710,7 @@ fn real_output_dir_read_only_scan() {
     assert!(!v.tracks.is_empty());
     drop(lib);
 
-    let (lib, rx) = open(&t.0);
+    let (lib, rx) = open(&t.0.join("data"));
     let t0 = std::time::Instant::now();
     lib.set_dir(&dir);
     let (_, v2) = settled(&rx);
