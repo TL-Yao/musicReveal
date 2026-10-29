@@ -59,7 +59,7 @@ pub(crate) fn numbered(dir: &Path, stem: &str, n: u32, ext: &str) -> PathBuf {
 }
 
 /// 不覆盖地把 `src` 落到 `dst`；目标已存在（含悬空符号链接）返回 AlreadyExists。
-fn place(src: &Path, dst: &Path) -> std::io::Result<()> {
+pub(crate) fn place(src: &Path, dst: &Path) -> std::io::Result<()> {
     match std::fs::hard_link(src, dst) {
         Ok(()) => {
             let _ = std::fs::remove_file(src);
@@ -189,7 +189,8 @@ impl Enricher for NoopEnricher {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OutputFormat {
     Original,
-    Mp3,
+    /// Apple Music 能导入的格式：无损转 ALAC、Apple 不认的有损转 AAC 256k（.m4a），MP3 / M4A 不动。
+    Apple,
 }
 
 #[derive(Debug, Clone)]
@@ -465,13 +466,14 @@ pub(crate) fn front_cover(tag: &Tag) -> Option<Vec<u8>> {
 }
 
 /// 写入标签并返回音质描述。`lyrics`：要嵌入的歌词；`src_lyrics`：源文件内嵌歌词，转码会丢，
-/// 没有 `lyrics` 时写回。
+/// 没有 `lyrics` 时写回；`src_pics`：源文件的全部图片，同样转码会丢，产物里没有图片时写回。
 fn write_tags(
     p: &Path,
     m: &TrackMeta,
     c: &Container,
     lyrics: Option<&str>,
     src_lyrics: Option<&str>,
+    src_pics: Vec<Picture>,
 ) -> Result<String, ConvertError> {
     let mut f = read_audio(p)?;
     if f.primary_tag().is_none() {
@@ -503,6 +505,9 @@ fn write_tags(
     }
     if let Some(v) = m.disc {
         t.set_disk(v);
+    }
+    if t.pictures().is_empty() {
+        src_pics.into_iter().for_each(|p| t.push_picture(p));
     }
     let key = lyrics_key(t);
     match (lyrics, src_lyrics) {
@@ -537,24 +542,32 @@ fn write_tags(
     }
     f.save_to_path(p, lofty::config::WriteOptions::default())
         .map_err(|e| ConvertError::Failed(format!("写入标签失败：{e}")))?;
-    Ok(quality(&f, c))
+    Ok(quality(&f, c, p))
 }
 
-pub(crate) fn quality(f: &TaggedFile, c: &Container) -> String {
+pub(crate) fn quality(f: &TaggedFile, c: &Container, p: &Path) -> String {
     let pr = f.properties();
+    let alac = *c == Container::M4a && crate::recode::is_alac(p);
     match c {
-        Container::Flac | Container::Wav => {
+        _ if alac || matches!(c, Container::Flac | Container::Wav) => {
             let rate = pr.sample_rate().unwrap_or(0);
             let khz = if rate.is_multiple_of(1000) {
                 (rate / 1000).to_string()
             } else {
                 format!("{:.1}", rate as f64 / 1000.0)
             };
-            let name = if *c == Container::Flac { "FLAC" } else { "WAV" };
+            let name = match c {
+                Container::Flac => "FLAC",
+                Container::Wav => "WAV",
+                _ => "ALAC",
+            };
             format!("{name} {}bit/{khz}kHz", pr.bit_depth().unwrap_or(16))
         }
         _ => {
-            let name = ext(c).to_ascii_uppercase();
+            let name = match c {
+                Container::M4a if crate::recode::is_aac(p) => "AAC".into(),
+                _ => ext(c).to_ascii_uppercase(),
+            };
             // Vorbis 等可能不写标称码率，退回按文件大小 / 时长算的整体码率
             let Some(k) = [pr.audio_bitrate(), pr.overall_bitrate()]
                 .into_iter()
@@ -620,6 +633,43 @@ pub fn strip_timestamps(lrc: &str) -> String {
         .filter(|l| !l.is_empty())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// 网易云歌词开头的署名 JSON 行（`{"t":毫秒,"c":[{"tx":"作词: "},{"tx":"某人"}]}`）换成
+/// `[mm:ss.xx]作词: 某人` 这样的普通歌词行；其余行（含解析不了的 JSON 行）与换行符原样保留。
+pub fn credit_lines(text: &str) -> String {
+    text.split_inclusive('\n')
+        .map(|seg| {
+            let body = seg.trim_end_matches(['\r', '\n']);
+            match credit_line(body) {
+                Some(l) => l + &seg[body.len()..],
+                None => seg.to_owned(),
+            }
+        })
+        .collect()
+}
+
+fn credit_line(l: &str) -> Option<String> {
+    let l = l.trim();
+    if !(l.starts_with('{') && l.ends_with('}')) {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(l).ok()?;
+    let ms = v.get("t")?.as_f64().filter(|t| *t >= 0.0)? as u64;
+    let text: String = v
+        .get("c")?
+        .as_array()?
+        .iter()
+        .map(|c| c.get("tx").and_then(|t| t.as_str()))
+        .collect::<Option<Vec<_>>>()?
+        .concat();
+    Some(format!(
+        "[{:02}:{:02}.{:02}]{}",
+        ms / 60_000,
+        ms / 1000 % 60,
+        ms % 1000 / 10,
+        text.trim()
+    ))
 }
 
 /// 原文每个时间点之后紧跟同一时刻（按毫秒）的译文；一行多时间戳展开成多行。
@@ -710,6 +760,54 @@ async fn attached_picture(
     Ok((out.status.success() && !out.stdout.is_empty()).then_some(out.stdout))
 }
 
+/// 转码目标。
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Target {
+    Flac,
+    Mp3,
+    Alac,
+    Aac,
+}
+
+impl Target {
+    fn container(self) -> Container {
+        match self {
+            Target::Flac => Container::Flac,
+            Target::Mp3 => Container::Mp3,
+            Target::Alac | Target::Aac => Container::M4a,
+        }
+    }
+
+    /// ffmpeg 编码参数；ALAC 的位深随源（16 → s16p，24 → s32p），采样率不变。
+    fn args(self) -> &'static [&'static str] {
+        match self {
+            Target::Flac => &["-codec:a", "flac", "-f", "flac"],
+            Target::Mp3 => &["-codec:a", "libmp3lame", "-b:a", "320k", "-f", "mp3"],
+            Target::Alac => &["-codec:a", "alac", "-f", "ipod"],
+            Target::Aac => &["-codec:a", "aac", "-b:a", "256k", "-f", "ipod"],
+        }
+    }
+}
+
+/// 要不要转码、转成什么。`readable`：lofty 读得了源的标签。
+/// 原格式：已是 MP3 不重编码；WMA / APE 的标签 lofty 写不全，总要转成 MP3 / FLAC；
+/// lofty 读不了的也要转码（无损转 FLAC，有损转 MP3）。
+/// Apple：无损（含读不了标签的）转 ALAC，MP3 / M4A 不动，其余有损转 AAC。
+fn target_of(c: &Container, f: OutputFormat, readable: bool) -> Option<Target> {
+    let lossless = matches!(c, Container::Flac | Container::Wav | Container::Ape);
+    match (f, c) {
+        (OutputFormat::Apple, _) if lossless => Some(Target::Alac),
+        (OutputFormat::Apple, Container::Mp3 | Container::M4a) if readable => None,
+        (OutputFormat::Apple, Container::Mp3) => Some(Target::Mp3),
+        (OutputFormat::Apple, _) => Some(Target::Aac),
+        (OutputFormat::Original, Container::Wma) => Some(Target::Mp3),
+        (OutputFormat::Original, Container::Ape) => Some(Target::Flac),
+        (OutputFormat::Original, _) if !readable && lossless => Some(Target::Flac),
+        (OutputFormat::Original, _) if !readable => Some(Target::Mp3),
+        (OutputFormat::Original, _) => None,
+    }
+}
+
 pub async fn convert(
     input: &Path,
     opts: &ConvertOptions,
@@ -770,18 +868,7 @@ pub async fn convert(
 
     let mut container = d.container;
     let mut own_cover = None;
-    // 已是 MP3 不重编码；WMA / APE 的标签 lofty 写不全，总要转成 MP3 / FLAC；
-    // lofty 读不了的也要转码（无损转 FLAC，有损转 MP3）
-    let lossless = matches!(container, Container::Flac | Container::Wav | Container::Ape);
-    let target = match (&container, opts.format) {
-        (Container::Wma, _) => Some(Container::Mp3),
-        (_, OutputFormat::Original) if src_tags.is_none() && lossless => Some(Container::Flac),
-        _ if src_tags.is_none() => Some(Container::Mp3),
-        (Container::Mp3, _) => None,
-        (_, OutputFormat::Mp3) => Some(Container::Mp3),
-        (Container::Ape, OutputFormat::Original) => Some(Container::Flac),
-        (_, OutputFormat::Original) => None,
-    };
+    let target = target_of(&container, opts.format, src_tags.is_some());
     if let Some(target) = target {
         let ff = opts
             .ffmpeg
@@ -793,10 +880,7 @@ pub async fn convert(
             own_cover = attached_picture(&ff, &cur, cancel).await?;
         }
         let next = parts.add(dir);
-        let codec: &[&str] = match target {
-            Container::Flac => &["-codec:a", "flac", "-f", "flac"],
-            _ => &["-codec:a", "libmp3lame", "-b:a", "320k", "-f", "mp3"],
-        };
+        let codec = target.args();
         let mut child = tokio::process::Command::new(ff)
             .args(["-v", "error", "-nostdin", "-y", "-i"])
             .arg(&cur)
@@ -828,7 +912,7 @@ pub async fn convert(
             return Err(ConvertError::Failed(format!("ffmpeg 转码失败（{status}）")));
         }
         cur = next;
-        container = target;
+        container = target.container();
     }
     let src_tags = match src_tags {
         Some(t) => t,
@@ -836,6 +920,12 @@ pub async fn convert(
     };
     let tags = tags_of(&src_tags);
     let src_lyrics = lyrics_of(&tags);
+    let src_pics = tags
+        .iter()
+        .map(|t| t.pictures())
+        .find(|p| !p.is_empty())
+        .map(<[Picture]>::to_vec)
+        .unwrap_or_default();
     let mut meta = merge(d.meta, &tags);
     drop(tags);
     drop(src_tags);
@@ -865,7 +955,8 @@ pub async fn convert(
             container.clone(),
             lrc_text.clone(),
         );
-        blocking(move || write_tags(&p, &m, &c, l.as_deref(), src_lyrics.as_deref())).await?
+        blocking(move || write_tags(&p, &m, &c, l.as_deref(), src_lyrics.as_deref(), src_pics))
+            .await?
     };
     if cancel.is_cancelled() {
         return Err(ConvertError::Cancelled);

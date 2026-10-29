@@ -147,3 +147,51 @@ fn parse_lrc_ignores_leading_bom() {
         [line(1000, "第一句", None), line(2000, "第二句", None)]
     );
 }
+
+#[test]
+fn netease_credit_json_lines_become_plain_lines() {
+    use crate::credit_lines;
+    let src = concat!(
+        "{\"t\":0,\"c\":[{\"tx\":\"作词: \"},{\"tx\":\"Hanser\",\"li\":\"http://x/a.jpg\",\"or\":\"orpheus://a\"}]}\n",
+        "{\"t\":1500,\"c\":[{\"tx\":\" 作曲: \"},{\"tx\":\"甲\"},{\"tx\":\"/乙 \"}]}\r\n",
+        "{\"t\":61230,\"c\":[{\"tx\":\"编曲:\"}]}\n",
+        "{not json}\n",
+        "{\"t\":0,\"c\":\"x\"}\n",
+        "{\"c\":[{\"tx\":\"缺时间\"}]}\n",
+        "[00:05.00]正文\n",
+        "末行"
+    );
+    assert_eq!(
+        credit_lines(src),
+        concat!(
+            "[00:00.00]作词: Hanser\n",
+            "[00:01.50]作曲: 甲/乙\r\n",
+            "[01:01.23]编曲:\n",
+            "{not json}\n",
+            "{\"t\":0,\"c\":\"x\"}\n",
+            "{\"c\":[{\"tx\":\"缺时间\"}]}\n",
+            "[00:05.00]正文\n",
+            "末行"
+        )
+    );
+    // 幂等；没有 JSON 行的原样
+    let once = credit_lines(src);
+    assert_eq!(credit_lines(&once), once);
+    assert_eq!(credit_lines("[00:01.00]一\n"), "[00:01.00]一\n");
+    let lines = parse_lrc(&once);
+    assert_eq!(lines[0].text, "作词: Hanser");
+    assert_eq!(lines[1].text, "作曲: 甲/乙");
+}
+
+#[test]
+fn netease_lyric_converts_credit_lines_in_both_texts() {
+    let body = r#"{"lrc":{"lyric":"{\"t\":0,\"c\":[{\"tx\":\"作词: \"},{\"tx\":\"Hanser\"}]}\n[00:01.00]こんにちは\n"},"tlyric":{"lyric":"{\"t\":0,\"c\":[{\"tx\":\"译: 某\"}]}\n[00:01.00]你好\n"},"code":200}"#;
+    let l = crate::enrich::netease_lyric(body.as_bytes())
+        .unwrap()
+        .unwrap();
+    assert_eq!(l.lrc, "[00:00.00]作词: Hanser\n[00:01.00]こんにちは");
+    assert_eq!(
+        l.translated_lrc.as_deref(),
+        Some("[00:00.00]译: 某\n[00:01.00]你好")
+    );
+}

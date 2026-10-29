@@ -47,7 +47,7 @@ pub fn read_track(path: &Path) -> Result<TrackInfo, Error> {
         _ => None,
     };
     let quality = match container {
-        Some(c) => quality(&f, &c),
+        Some(c) => quality(&f, &c, path),
         None => format!("{:?}", f.file_type()),
     };
     Ok(TrackInfo {
@@ -116,6 +116,7 @@ pub fn embed_lyrics(path: &Path, lrc: &str) -> Result<(), Error> {
     std::fs::OpenOptions::new().write(true).open(path)?;
     let ff =
         crate::find_ffmpeg().ok_or_else(|| IoError::other("找不到 ffmpeg，无法核对，不写入"))?;
+    let _g = crate::recode::rewrite_lock();
     let mut parts = Parts::default();
     let tmp = parts.add(path.parent().unwrap_or(Path::new(".")));
     std::fs::copy(path, &tmp)?;

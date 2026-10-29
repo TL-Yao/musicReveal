@@ -58,7 +58,7 @@ fn reason(e: &ConvertError) -> String {
 fn fmt_of(f: OutputFormat) -> Fmt {
     match f {
         OutputFormat::Original => Fmt::Original,
-        OutputFormat::Mp3 => Fmt::Mp3,
+        OutputFormat::Apple => Fmt::Apple,
     }
 }
 
@@ -404,7 +404,7 @@ impl State {
             output_dir: self.settings.output_dir.clone(),
             format: match self.settings.format {
                 Fmt::Original => OutputFormat::Original,
-                Fmt::Mp3 => OutputFormat::Mp3,
+                Fmt::Apple => OutputFormat::Apple,
             },
             ffmpeg: None,
         };

@@ -1,4 +1,4 @@
-//! 用法：reveal <文件...> -o <目录> [--mp3]
+//! 用法：reveal <文件...> -o <目录> [--apple]
 //! 逐个转换并打印结果；任一失败退出码为 1。
 
 use reveal_core::*;
@@ -12,12 +12,12 @@ async fn main() -> std::process::ExitCode {
     while let Some(a) = args.next() {
         match a.as_str() {
             "-o" => out = args.next().map(PathBuf::from),
-            "--mp3" => format = OutputFormat::Mp3,
+            "--apple" => format = OutputFormat::Apple,
             _ => files.push(PathBuf::from(a)),
         }
     }
     let Some(output_dir) = out.filter(|_| !files.is_empty()) else {
-        eprintln!("用法：reveal <文件...> -o <目录> [--mp3]");
+        eprintln!("用法：reveal <文件...> -o <目录> [--apple]");
         return 2.into();
     };
     if let Err(e) = std::fs::create_dir_all(&output_dir) {

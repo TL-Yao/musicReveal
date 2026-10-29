@@ -363,7 +363,7 @@ async fn same_file_again_is_skipped_until_output_is_gone() {
     assert_eq!(s.jobs[0].output, first.output);
     assert_eq!(r.fake.calls().len(), 1);
     // 换格式不算同一条件
-    r.eng.set_format("mp3").unwrap();
+    r.eng.set_format("apple").unwrap();
     add();
     for _ in 0..500 {
         if r.fake.calls().len() == 2 && r.eng.snapshot().jobs[0].state == JobState::Done {
@@ -483,12 +483,12 @@ async fn onboarding_folders_follow_the_existing_songs_rule() {
     e.complete_onboarding(
         vec![a.to_string_lossy().into()],
         out.to_string_lossy().into(),
-        "mp3",
+        "apple",
     )
     .unwrap();
     let s = e.snapshot();
     assert!(s.onboarded);
-    assert_eq!(s.format, Fmt::Mp3);
+    assert_eq!(s.format, Fmt::Apple);
     assert_eq!(s.folders.len(), 1);
     assert_eq!(notices(&e, NoticeKind::ExistingSongs)[0].count, 1);
 }
@@ -844,10 +844,10 @@ async fn corrupt_settings_and_history_do_not_crash() {
     assert!(data.join("history.json.bak").exists());
     // 之后照常保存
     let out = t.dir("out");
-    e.complete_onboarding(vec![], out.to_string_lossy().into(), "mp3")
+    e.complete_onboarding(vec![], out.to_string_lossy().into(), "apple")
         .unwrap();
     let text = std::fs::read_to_string(data.join("settings.json")).unwrap();
-    assert!(text.contains("\"mp3\""));
+    assert!(text.contains("\"apple\""));
 }
 
 #[tokio::test]
@@ -931,11 +931,11 @@ async fn on_change_receives_snapshots() {
     )
     .with_poll_interval(None);
     e.start().await;
-    e.set_format("mp3").unwrap();
+    e.set_format("apple").unwrap();
     tokio::time::sleep(Duration::from_millis(150)).await;
     let got = got.lock().unwrap();
     assert!(!got.is_empty());
-    assert_eq!(got.last().unwrap().format, Fmt::Mp3);
+    assert_eq!(got.last().unwrap().format, Fmt::Apple);
     let json = serde_json::to_value(got.last().unwrap()).unwrap();
     assert!(json.get("outputDir").is_some() && json.get("waitingLogin").is_some());
 }
@@ -1009,8 +1009,12 @@ async fn concurrent_saves_never_leave_broken_or_stale_files() {
         hs.push(tokio::task::spawn_blocking(move || {
             let lib = lib.to_string_lossy().to_string();
             for k in 0..40 {
-                e.set_format(if (i + k) % 2 == 0 { "mp3" } else { "original" })
-                    .unwrap();
+                e.set_format(if (i + k) % 2 == 0 {
+                    "apple"
+                } else {
+                    "original"
+                })
+                .unwrap();
                 e.add_watch_folder(&lib).unwrap();
                 e.remove_watch_folder(&lib);
             }

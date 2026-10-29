@@ -418,12 +418,13 @@ async fn lenient_plain_sources_convert() {
     }
     let o = convert_with(
         &rf64,
-        &t.0.join("out-mp3"),
-        OutputFormat::Mp3,
+        &t.0.join("out-apple"),
+        OutputFormat::Apple,
         &NoopEnricher,
     )
     .await;
-    assert_eq!(o.output.extension().unwrap(), "mp3");
+    assert_eq!(o.output.extension().unwrap(), "m4a");
+    assert!(is_alac(&o.output));
     assert_eq!(o.meta.title.as_deref(), Some("大文件"));
 }
 
@@ -534,7 +535,7 @@ async fn full_source_date_is_kept() {
 }
 
 #[tokio::test]
-async fn embedded_lyrics_survive_wav_to_mp3() {
+async fn embedded_lyrics_survive_wav_to_alac() {
     use lofty::prelude::ItemKey;
     let Some(ff) = ffmpeg() else { return };
     let t = Tmp::new("tr-lyr");
@@ -546,11 +547,11 @@ async fn embedded_lyrics_survive_wav_to_mp3() {
     f.insert_tag(tag);
     f.save_to_path(&src, lofty::config::WriteOptions::default())
         .unwrap();
-    let o = convert_with(&src, &t.0.join("out"), OutputFormat::Mp3, &NoopEnricher).await;
-    assert_eq!(o.output.extension().unwrap(), "mp3");
+    let o = convert_with(&src, &t.0.join("out"), OutputFormat::Apple, &NoopEnricher).await;
+    assert_eq!(o.output.extension().unwrap(), "m4a");
     let f = lofty::read_from_path(&o.output).unwrap();
     assert_eq!(
-        f.primary_tag().unwrap().get_string(ItemKey::UnsyncLyrics),
+        f.primary_tag().unwrap().get_string(ItemKey::Lyrics),
         Some("第一句\n第二句")
     );
 }

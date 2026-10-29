@@ -5,6 +5,7 @@ use super::*;
 use aes::cipher::{BlockEncrypt, KeyInit};
 use std::path::PathBuf;
 
+mod apple;
 mod creds;
 mod embed;
 mod enrich;

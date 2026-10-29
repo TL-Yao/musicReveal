@@ -74,7 +74,7 @@ impl History {
                 .get(&(path.to_path_buf(), f))
                 .is_some_and(|d| d.0 == stat)
         };
-        done(Fmt::Original) || done(Fmt::Mp3) || self.ignored.get(path) == Some(&stat)
+        done(Fmt::Original) || done(Fmt::Apple) || self.ignored.get(path) == Some(&stat)
     }
 
     /// 同条件转过且输出仍在、非空。

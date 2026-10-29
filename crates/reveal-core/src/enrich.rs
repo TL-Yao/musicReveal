@@ -241,7 +241,8 @@ pub(crate) fn netease_lyric(body: &[u8]) -> Result<Option<crate::Lyrics>, String
     if flag("nolyric") || flag("uncollected") {
         return Ok(None);
     }
-    Ok(str_at(&v, "/lrc/lyric").and_then(|l| lyrics(l, str_at(&v, "/tlyric/lyric"))))
+    let at = |p| str_at(&v, p).map(crate::credit_lines);
+    Ok(at("/lrc/lyric").and_then(|l| lyrics(&l, at("/tlyric/lyric").as_deref())))
 }
 
 const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \

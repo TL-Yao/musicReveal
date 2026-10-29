@@ -160,29 +160,32 @@ async fn ncm_flac_original_keeps_flac_with_tags_and_cover() {
 }
 
 #[tokio::test]
-async fn ncm_flac_to_mp3_is_cbr_320_with_tags() {
+async fn ncm_flac_to_apple_is_alac_with_tags() {
     let Some(ff) = ffmpeg() else { return };
-    let t = Tmp::new("pl-mp3");
+    let t = Tmp::new("pl-alac");
     let plain = flac24(&ff, &t, &[]);
     let cover = png(&ff, &t);
     let input = t.write("src.ncm", &build_ncm(&plain, b"k123", META, Some(&cover)));
     let out = out_dir(&t);
-    let r = run(&input, &out, OutputFormat::Mp3, &NoopEnricher, None).await;
+    let r = run(&input, &out, OutputFormat::Apple, &NoopEnricher, None).await;
     let o = r.res.unwrap();
     assert_eq!(
         r.stages,
         vec![Stage::Decrypt, Stage::Transcode, Stage::Metadata]
     );
-    assert_eq!(name(&o.output), "歌手甲、歌手乙 - 测试歌.mp3");
-    assert_eq!(o.quality, "MP3 320k");
+    assert_eq!(name(&o.output), "歌手甲、歌手乙 - 测试歌.m4a");
+    assert_eq!(o.quality, "ALAC 24bit/48kHz");
+    assert!(is_alac(&o.output));
+    decodes_cleanly(&ff, &o.output);
     let f = read_back(&o.output);
-    let kbps = f.properties().audio_bitrate().unwrap();
-    assert!((310..=330).contains(&kbps), "{kbps}");
+    let pr = f.properties();
+    assert_eq!((pr.bit_depth(), pr.sample_rate()), (Some(24), Some(48000)));
     let tag = f.primary_tag().unwrap();
     assert_eq!(tag.title().as_deref(), Some("测试歌"));
     assert_eq!(tag.artist().as_deref(), Some("歌手甲, 歌手乙"));
     assert_eq!(tag.album().as_deref(), Some("测试专辑"));
     assert_eq!(tag.pictures().len(), 1);
+    assert_eq!(tag.pictures()[0].data(), &cover[..]);
 }
 
 fn ffprobe_tags(ff: &Path, p: &Path) -> Vec<(String, String)> {
@@ -196,13 +199,16 @@ fn ffprobe_tags(ff: &Path, p: &Path) -> Vec<(String, String)> {
         .lines()
         .filter_map(|l| {
             let (k, v) = l.strip_prefix("format.tags.")?.split_once('=')?;
-            Some((k.to_lowercase(), v.trim_matches('"').to_string()))
+            let k = k.to_lowercase();
+            // MP4 容器的品牌信息不是标签
+            (!["major_brand", "minor_version", "compatible_brands"].contains(&k.as_str()))
+                .then(|| (k, v.trim_matches('"').to_string()))
         })
         .collect()
 }
 
 #[tokio::test]
-async fn mp3_keeps_every_source_tag() {
+async fn apple_keeps_every_source_tag() {
     let Some(ff) = ffmpeg() else { return };
     if !ff.with_file_name("ffprobe").exists() {
         return eprintln!("跳过：ffmpeg 旁没有 ffprobe");
@@ -226,7 +232,7 @@ async fn mp3_keeps_every_source_tag() {
     );
     let input = t.write("src.ncm", &build_ncm(&plain, b"k", META, None));
     let mut keys = vec![];
-    for fmt in [OutputFormat::Original, OutputFormat::Mp3] {
+    for fmt in [OutputFormat::Original, OutputFormat::Apple] {
         let out = t.0.join(format!("out-{fmt:?}"));
         std::fs::create_dir_all(&out).unwrap();
         let o = run(&input, &out, fmt, &LyricEnricher, None)
@@ -262,7 +268,7 @@ async fn mp3_keeps_every_source_tag() {
         k.sort();
         keys.push(k);
     }
-    assert_eq!(keys[0], keys[1], "MP3 与原格式的标签集合不同");
+    assert_eq!(keys[0], keys[1], "Apple 与原格式的标签集合不同");
 }
 
 #[tokio::test]
@@ -276,7 +282,7 @@ async fn mp3_source_is_not_reencoded() {
     );
     let input = t.write("src.ncm", &build_ncm(&plain, b"k9", META, None));
     let out = out_dir(&t);
-    let r = run(&input, &out, OutputFormat::Mp3, &NoopEnricher, None).await;
+    let r = run(&input, &out, OutputFormat::Apple, &NoopEnricher, None).await;
     let o = r.res.unwrap();
     assert_eq!(r.stages, vec![Stage::Decrypt, Stage::Metadata]);
     assert_eq!(o.quality, "MP3 128k");
@@ -305,7 +311,10 @@ async fn qmc_v2_inner_flac_tags_are_used() {
         &qtag(&qmc2(&master, &plain), &make_ekey_v1(&master)),
     );
     let out = out_dir(&t);
-    for (fmt, ext) in [(OutputFormat::Original, "flac"), (OutputFormat::Mp3, "mp3")] {
+    for (fmt, ext) in [
+        (OutputFormat::Original, "flac"),
+        (OutputFormat::Apple, "m4a"),
+    ] {
         let o = run(&input, &out, fmt, &NoopEnricher, None)
             .await
             .res
@@ -369,7 +378,7 @@ async fn cancel_during_decrypt_or_transcode_leaves_nothing() {
     let input = t.write("src.ncm", &build_ncm(&plain, b"k", META, None));
     let out = out_dir(&t);
     for at in [Stage::Decrypt, Stage::Transcode] {
-        let r = run(&input, &out, OutputFormat::Mp3, &NoopEnricher, Some(at)).await;
+        let r = run(&input, &out, OutputFormat::Apple, &NoopEnricher, Some(at)).await;
         assert!(matches!(r.res, Err(ConvertError::Cancelled)), "{at:?}");
         assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0, "{at:?}");
     }
@@ -770,7 +779,8 @@ fn decodes_cleanly(ff: &Path, p: &Path) {
     );
 }
 
-/// WMA / APE 解密后总要转码：APE → FLAC（原格式）或 MP3，WMA → MP3；文件自带标签与封面保留。
+/// WMA / APE 解密后总要转码：APE → FLAC（原格式）或 ALAC（Apple），WMA → MP3（原格式）或
+/// AAC（Apple）；文件自带标签与封面保留。
 async fn legacy_container_case(
     ff: &Path,
     t: &Tmp,
@@ -780,7 +790,7 @@ async fn legacy_container_case(
     expect: [&str; 2],
 ) {
     let input = t.write(src, &enc(&crate::qmc::Cipher::static_v1(), plain));
-    for (fmt, ext) in [OutputFormat::Original, OutputFormat::Mp3]
+    for (fmt, ext) in [OutputFormat::Original, OutputFormat::Apple]
         .into_iter()
         .zip(expect)
     {
@@ -814,7 +824,7 @@ async fn legacy_container_case(
 }
 
 #[tokio::test]
-async fn bkcwma_is_transcoded_to_mp3_in_both_modes() {
+async fn bkcwma_becomes_mp3_or_aac() {
     let Some(ff) = ffmpeg() else { return };
     let t = Tmp::new("pl-wma");
     let cover = png(&ff, &t);
@@ -841,13 +851,13 @@ async fn bkcwma_is_transcoded_to_mp3_in_both_modes() {
         .unwrap();
     assert!(st.success());
     let plain = std::fs::read(&p).unwrap();
-    legacy_container_case(&ff, &t, "a.bkcwma", &plain, &cover, ["mp3", "mp3"]).await;
+    legacy_container_case(&ff, &t, "a.bkcwma", &plain, &cover, ["mp3", "m4a"]).await;
 }
 
 /// `tests/fixtures/sine.ape`：1 秒 440Hz 正弦波（ffmpeg lavfi 合成，22.05kHz 单声道），
 /// 用 Monkey's Audio SDK 1343 的 `mac s.wav s.ape -c2000` 编码；ffmpeg 不能编码 APE。
 #[tokio::test]
-async fn bkcape_becomes_flac_or_mp3() {
+async fn bkcape_becomes_flac_or_alac() {
     let Some(ff) = ffmpeg() else { return };
     let t = Tmp::new("pl-ape");
     let p = t.0.join("p.ape");
@@ -870,7 +880,7 @@ async fn bkcape_becomes_flac_or_mp3() {
     tag.save_to_path(&p, lofty::config::WriteOptions::default())
         .unwrap();
     let plain = std::fs::read(&p).unwrap();
-    legacy_container_case(&ff, &t, "a.bkcape", &plain, &cover, ["flac", "mp3"]).await;
+    legacy_container_case(&ff, &t, "a.bkcape", &plain, &cover, ["flac", "m4a"]).await;
 }
 
 #[tokio::test]

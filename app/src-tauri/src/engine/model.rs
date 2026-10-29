@@ -7,14 +7,16 @@ use serde::{Deserialize, Serialize};
 pub enum Fmt {
     #[default]
     Original,
-    Mp3,
+    /// Apple Music 兼容。旧版的 "mp3" 档读作它。
+    #[serde(alias = "mp3")]
+    Apple,
 }
 
 impl Fmt {
     pub fn parse(s: &str) -> Result<Self, String> {
         match s {
             "original" => Ok(Fmt::Original),
-            "mp3" => Ok(Fmt::Mp3),
+            "apple" => Ok(Fmt::Apple),
             _ => Err(format!("未知的输出格式：{s}")),
         }
     }

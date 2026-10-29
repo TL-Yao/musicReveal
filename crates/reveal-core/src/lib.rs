@@ -107,6 +107,7 @@ mod convert;
 mod creds;
 mod enrich;
 mod flac;
+mod recode;
 mod track;
 
 pub use track::{
@@ -116,10 +117,12 @@ pub use track::{
 
 pub use enrich::OnlineEnricher;
 
+pub use recode::{is_alac, recode_lossless, Lossless};
+
 pub use convert::{
-    convert, find_ffmpeg, lrc_home, parse_lrc, safe_lrc_dir, strip_timestamps, CancelToken,
-    ConvertError, ConvertOptions, ConvertOutcome, Enricher, LyricLine, Lyrics, NoopEnricher,
-    OutputFormat, Stage, TrackMeta, PART_PREFIX,
+    convert, credit_lines, find_ffmpeg, lrc_home, parse_lrc, safe_lrc_dir, strip_timestamps,
+    CancelToken, ConvertError, ConvertOptions, ConvertOutcome, Enricher, LyricLine, Lyrics,
+    NoopEnricher, OutputFormat, Stage, TrackMeta, PART_PREFIX,
 };
 
 pub use creds::{
