@@ -687,7 +687,7 @@ async fn plain_with_sidecar(
     lrc: Option<&str>,
     embedded: Option<&str>,
 ) -> (Tmp, PathBuf, ConvertOutcome) {
-    let ff = find_ffmpeg().unwrap();
+    let ff = ffmpeg().unwrap();
     let t = Tmp::new(tag);
     let src = t.0.join("src");
     std::fs::create_dir_all(&src).unwrap();

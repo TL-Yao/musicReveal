@@ -25,10 +25,7 @@ fn gen_flac(ff: &Path, out: &Path) -> Vec<u8> {
 }
 
 fn setup(tag: &str) -> Option<(Tmp, Vec<u8>)> {
-    let Some(ff) = crate::find_ffmpeg() else {
-        eprintln!("跳过：找不到 ffmpeg");
-        return None;
-    };
+    let ff = super::pipeline::ffmpeg()?;
     let t = Tmp::new(tag);
     let clean = gen_flac(&ff, &t.0.join("clean.flac"));
     Some((t, clean))

@@ -4,16 +4,10 @@ use super::{aes_ecb_pkcs7, audio, b64, Tmp, NCM_META_KEY};
 use crate::*;
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::prelude::Accessor;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
-fn ffmpeg() -> Option<PathBuf> {
-    let f = find_ffmpeg();
-    if f.is_none() {
-        eprintln!("跳过：找不到 ffmpeg（可设 REVEAL_FFMPEG）");
-    }
-    f
-}
+use super::pipeline::ffmpeg;
 
 /// 2 秒 440Hz 正弦波，按 `args` 编码到 `out`。
 fn gen(ff: &Path, out: &Path, args: &[&str]) {
