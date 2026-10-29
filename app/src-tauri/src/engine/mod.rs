@@ -609,16 +609,32 @@ impl Engine {
 
     /// 改状态并安排推送快照。
     fn edit<R>(&self, f: impl FnOnce(&mut State) -> R) -> R {
-        let (r, kick) = {
-            let mut st = self.lock();
-            let r = f(&mut st);
-            (r, !st.queue.is_empty() && st.running.is_none())
+        let r = f(&mut self.lock());
+        self.notify();
+        r
+    }
+
+    /// 同 `edit`，但先落盘再推送：看到新快照时设置与记录已在盘上。改动与落盘都在 `saving` 锁里，
+    /// 推送前取快照也要这把锁，所以快照不会落在「已改、未落盘」之间。
+    fn edit_saved<R>(&self, f: impl FnOnce(&mut State) -> R) -> R {
+        let saving = self.saving();
+        let r = f(&mut self.lock());
+        self.write(&saving);
+        drop(saving);
+        self.notify();
+        r
+    }
+
+    /// 安排推送快照；有排队且空闲时叫醒 worker。
+    fn notify(&self) {
+        let kick = {
+            let st = self.lock();
+            !st.queue.is_empty() && st.running.is_none()
         };
         if kick {
             self.0.wake.notify_one();
         }
         self.0.dirty.notify_one();
-        r
     }
 
     fn settings_path(&self) -> PathBuf {
@@ -633,10 +649,14 @@ impl Engine {
         self.0.data_dir.join("covers")
     }
 
-    /// 落盘当前设置与记录。串行；在锁内取快照，所以后写的一定是更新的版本。
+    /// 落盘锁；守着的值为真表示已关闭，不再写。
+    fn saving(&self) -> MutexGuard<'_, bool> {
+        self.0.saving.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 落盘当前设置与记录，须持着落盘锁：串行，在锁内取快照，所以后写的一定是更新的版本。
     // ponytail: 每次整份重写 history.json，记录到几十万条再改增量
-    fn persist(&self) {
-        let closed = self.0.saving.lock().unwrap_or_else(|e| e.into_inner());
+    fn write(&self, closed: &bool) {
         if *closed {
             return;
         }
@@ -712,10 +732,7 @@ impl Engine {
                 .then(|| (st.settings.format, st.settings.output_dir.clone()))
         };
         if let Some((f, dir)) = resume {
-            let list = reformat_list(&dir, f);
-            if self.begin_reformat(f, list) {
-                self.persist();
-            }
+            self.begin_reformat(f, reformat_list(&dir, f));
         }
         if let Some(every) = self.0.poll {
             let me = self.clone();
@@ -741,7 +758,10 @@ impl Engine {
             if self.lock().stopping {
                 return;
             }
-            let s = self.snapshot();
+            let s = {
+                let _saving = self.saving();
+                self.snapshot()
+            };
             if last.as_ref() != Some(&s) {
                 (self.0.on_change)(s.clone());
                 last = Some(s);
@@ -827,7 +847,7 @@ impl Engine {
             };
             if let Some(out) = reuse {
                 let fresh = hash.is_some();
-                self.edit(|st| {
+                let apply = |st: &mut State| {
                     st.running = None;
                     if let Some(t) = st.task(id) {
                         t.view.state = JobState::Skipped;
@@ -836,9 +856,11 @@ impl Engine {
                     if fresh {
                         st.history.record(key, fmt, out, hash);
                     }
-                });
+                };
                 if fresh {
-                    self.persist();
+                    self.edit_saved(apply);
+                } else {
+                    self.edit(apply);
                 }
                 continue;
             }
@@ -865,7 +887,8 @@ impl Engine {
                     }
                 }
             };
-            let save = self.edit(|st| {
+            // 记下结果；记录有变时先落盘再推送
+            let finish = |st: &mut State| {
                 st.running = None;
                 let Some(t) = st.task(id) else { return false };
                 match r {
@@ -917,10 +940,13 @@ impl Engine {
                     }
                 }
                 false
-            });
-            if save {
-                self.persist();
+            };
+            let saving = self.saving();
+            if finish(&mut self.lock()) {
+                self.write(&saving);
             }
+            drop(saving);
+            self.notify();
         }
     }
 
@@ -928,8 +954,7 @@ impl Engine {
         if path.trim().is_empty() {
             return Err("输出目录不能为空".into());
         }
-        self.edit(|st| st.settings.output_dir = path.into());
-        self.persist();
+        self.edit_saved(|st| st.settings.output_dir = path.into());
         Ok(())
     }
 
@@ -955,22 +980,21 @@ impl Engine {
             return Err(BUSY_REFORMAT.into());
         }
         let list = reformat_list(&dir, f);
-        self.edit(|st| {
+        {
+            let mut st = self.lock();
             if st.batch.is_some() {
                 return Err(BUSY_REFORMAT.to_string());
             }
             st.settings.format = f;
-            Ok(())
-        })?;
+        }
         self.begin_reformat(f, list);
-        self.persist();
         Ok(())
     }
 
-    /// 有歌要转就登记批次并在后台开跑，返回是否开跑；没有就清掉「未完成」标记。
-    fn begin_reformat(&self, f: Fmt, list: Vec<(PathBuf, u64)>) -> bool {
+    /// 有歌要转就登记批次并在后台开跑，没有就清掉「未完成」标记；先落盘再推送。
+    fn begin_reformat(&self, f: Fmt, list: Vec<(PathBuf, u64)>) {
         let tok = CancelToken::default();
-        let go = self.edit(|st| {
+        let go = self.edit_saved(|st| {
             if st.batch.is_some() || st.stopping {
                 return false;
             }
@@ -994,7 +1018,6 @@ impl Engine {
         if go {
             tokio::spawn(self.clone().reformat(f, list, tok));
         }
-        go
     }
 
     fn edit_reformat(&self, f: impl FnOnce(&mut Reformat)) {
@@ -1067,18 +1090,20 @@ impl Engine {
         }
         let _ = std::fs::remove_dir_all(&covers);
         let finished = !tok.is_cancelled();
-        // 先落盘「不再续转」，再对外报结束：看到结束时设置文件已是新的
-        if finished {
-            self.lock().settings.reformatting = false;
-            self.persist();
-        }
-        self.edit(|st| {
+        let end = |st: &mut State| {
             st.batch = None;
             if let Some(r) = st.reformat.as_mut().filter(|_| finished) {
+                st.settings.reformatting = false;
                 r.finished = true;
                 (r.current, r.cover_url, r.eta_secs) = (None, None, None);
             }
-        });
+        };
+        // 结束时先落盘「不再续转」，看到结束时设置文件已是新的；被取消的留着标记下次接着转
+        if finished {
+            self.edit_saved(end);
+        } else {
+            self.edit(end);
+        }
     }
 
     /// 清掉已结束的批次；没结束时不动。
@@ -1114,15 +1139,14 @@ impl Engine {
         }
         let folder = PathBuf::from(path);
         let r = scan::scan(&folder, &self.lock().settings.output_dir.clone());
-        let existing = self.edit(|st| st.add_folder(folder, r));
-        self.persist();
+        let existing = self.edit_saved(|st| st.add_folder(folder, r));
         Ok(AddFolderResult { existing })
     }
 
     /// 移除监听；该文件夹里还没开始的任务一并移出列表。
     pub fn remove_watch_folder(&self, path: &str) {
         let folder = PathBuf::from(path);
-        self.edit(|st| {
+        self.edit_saved(|st| {
             st.settings.folders.retain(|f| *f != folder);
             st.folder_err.remove(&folder);
             st.take_notice(&folder);
@@ -1142,22 +1166,20 @@ impl Engine {
             st.tasks.retain(|t| !gone.contains(&t.id));
             st.queue.retain(|q| !gone.contains(q));
         });
-        self.persist();
     }
 
     pub fn convert_existing(&self, path: &str) {
         let folder = PathBuf::from(path);
-        self.edit(|st| {
+        self.edit_saved(|st| {
             for k in st.take_notice(&folder) {
                 st.submit(k.path, Some(folder.clone()), k.stat);
             }
         });
-        self.persist();
     }
 
     /// 按忽略这一刻的磁盘样子记下：询问期间变过的也不再补转；之后再变（重新下载）照常转换。
     pub fn ignore_existing(&self, path: &str) {
-        self.edit(|st| {
+        self.edit_saved(|st| {
             let files = st
                 .take_notice(Path::new(path))
                 .into_iter()
@@ -1165,7 +1187,6 @@ impl Engine {
                 .collect();
             st.history.ignore(files);
         });
-        self.persist();
     }
 
     /// 关掉通知；关掉「已有旧歌」的提问等于忽略。
@@ -1212,7 +1233,7 @@ impl Engine {
                 let _ = tokio::time::timeout(Duration::from_secs(1), idle()).await;
             }
         }
-        *self.0.saving.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        *self.saving() = true;
     }
 
     fn output_of(&self, id: &str) -> Result<PathBuf, String> {
@@ -1351,7 +1372,7 @@ impl Engine {
                 (f, r)
             })
             .collect();
-        self.edit(|st| {
+        self.edit_saved(|st| {
             st.settings.onboarded = true;
             st.settings.output_dir = out;
             st.settings.format = format;
@@ -1360,7 +1381,6 @@ impl Engine {
                 st.add_folder(f, r);
             }
         });
-        self.persist();
         Ok(())
     }
 }

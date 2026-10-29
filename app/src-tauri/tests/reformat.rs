@@ -312,3 +312,50 @@ async fn preview_counts_only_songs_the_batch_would_convert() {
         ["a.m4a", "b.wav", "c.wav", "d.m4a", "e.flac", "f.wav"]
     );
 }
+
+/// 看到批次开始的快照时，settings.json 已是新格式、标着未完成。记录很多（落盘慢）也一样。
+#[tokio::test(flavor = "multi_thread")]
+async fn batch_start_is_on_disk_before_it_is_broadcast() {
+    let t = Tmp::new("order");
+    let out = t.0.join("out");
+    flac(&out.join("a.flac"), "歌一");
+    let data = t.0.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    // 50 万条记录：落盘要上百毫秒，比快照推送的 50ms 合并窗口长，先广播后落盘就会露馅
+    let ignored: Vec<_> = (0..500_000)
+        .map(|i| serde_json::json!({"path": format!("/nowhere/{i}.flac"), "size": i, "mtime": i}))
+        .collect();
+    std::fs::write(
+        data.join("history.json"),
+        serde_json::json!({"done": [], "ignored": ignored, "failed": [], "pending": []})
+            .to_string(),
+    )
+    .unwrap();
+    let seen: Arc<Mutex<Vec<String>>> = Default::default();
+    let (s, path) = (seen.clone(), data.join("settings.json"));
+    let e = Engine::new(
+        data.clone(),
+        Arc::new(NoConv),
+        Box::new(move |snap| {
+            if snap.reformat.as_ref().is_some_and(|r| !r.finished) {
+                s.lock()
+                    .unwrap()
+                    .push(std::fs::read_to_string(&path).unwrap_or_default());
+            }
+        }),
+    )
+    .with_poll_interval(None);
+    e.start().await;
+    e.complete_onboarding(vec![], out.to_string_lossy().into(), "original")
+        .unwrap();
+    e.set_format("apple").unwrap();
+    finished(&e).await;
+    let seen = seen.lock().unwrap();
+    assert!(!seen.is_empty(), "没看到批次开始");
+    let v: serde_json::Value = serde_json::from_str(&seen[0]).unwrap();
+    assert_eq!(
+        (&v["format"], &v["reformatting"]),
+        (&"apple".into(), &true.into()),
+        "{v}"
+    );
+}
