@@ -651,17 +651,32 @@ pub fn credit_lines(text: &str) -> String {
         Some(t) => ("\u{feff}", t),
         None => ("", text),
     };
-    // 负的 t（在 0 秒前显示）LRC 表示不了：按原文顺序从 0 起每行错开 10ms，免得同一时刻被当成译文
-    let mut early = 0;
+    let ms_of = |t: f64| (t as u64) / 10 * 10;
+    // 负的 t（0 秒前显示）LRC 表示不了：按原文顺序从 0 起取还没被别的行占用的 10ms 刻度，
+    // 免得和同一时刻的行被 parse_lrc 配成「原文 + 译文」
+    let used: std::collections::HashSet<u64> = text
+        .lines()
+        .flat_map(|l| match credit_line(l) {
+            Some((t, _)) => (t >= 0.0).then(|| ms_of(t)).into_iter().collect::<Vec<_>>(),
+            None => {
+                let (tags, body) = split_line(l);
+                if body.trim().is_empty() {
+                    vec![]
+                } else {
+                    tags.into_iter().map(|(ms, _)| ms).collect()
+                }
+            }
+        })
+        .collect();
+    let mut early = (0..).step_by(10).filter(move |ms| !used.contains(ms));
     let lines = text.split_inclusive('\n').map(|seg| {
         let body = seg.trim_end_matches(['\r', '\n']);
         match credit_line(body) {
             Some((t, text)) => {
                 let ms = if t < 0.0 {
-                    early += 10;
-                    early - 10
+                    early.next().unwrap_or(0)
                 } else {
-                    t as u64
+                    ms_of(t)
                 };
                 format!(
                     "[{:02}:{:02}.{:02}]{text}{}",
@@ -730,37 +745,31 @@ pub struct LyricLine {
     pub trans: Option<String>,
 }
 
-/// 带时间的歌词行按时间升序；同一时刻恰好两行、且在原文里紧挨着时，第二行是第一行的译文（`merge_lrc` 的输出形状）。
+/// 带时间的歌词行按时间升序；同一时刻紧挨的第二行是第一行的译文（`merge_lrc` 的输出形状）。
 /// 网易云的署名 JSON 行按 `credit_lines` 当普通歌词行。
 pub fn parse_lrc(text: &str) -> Vec<LyricLine> {
     let text = credit_lines(text.strip_prefix('\u{feff}').unwrap_or(text));
     let text = text.as_str();
-    let mut v: Vec<(u64, usize, &str)> = text
+    let mut v: Vec<(u64, &str)> = text
         .lines()
-        .enumerate()
-        .flat_map(|(n, l)| {
+        .flat_map(|l| {
             let (tags, body) = split_line(l);
             let body = body.trim();
             tags.into_iter()
                 .filter(move |_| !body.is_empty())
-                .map(move |(ms, _)| (ms, n, body))
+                .map(move |(ms, _)| (ms, body))
         })
         .collect();
-    v.sort_by_key(|&(ms, ..)| ms);
+    v.sort_by_key(|&(ms, _)| ms);
     let mut out: Vec<LyricLine> = vec![];
-    for same in v.chunk_by(|a, b| a.0 == b.0) {
-        match same {
-            // 同一时刻恰好两行且在原文里紧挨着：原文 + 译文（merge_lrc 的形状）
-            [(ms, a, t), (_, b, tr)] if b == &(a + 1) => out.push(LyricLine {
-                ms: *ms,
-                text: (*t).into(),
-                trans: Some((*tr).into()),
-            }),
-            _ => out.extend(same.iter().map(|&(ms, _, t)| LyricLine {
+    for (ms, t) in v {
+        match out.last_mut() {
+            Some(l) if l.ms == ms && l.trans.is_none() => l.trans = Some(t.into()),
+            _ => out.push(LyricLine {
                 ms,
                 text: t.into(),
                 trans: None,
-            })),
+            }),
         }
     }
     out
