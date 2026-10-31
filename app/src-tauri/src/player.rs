@@ -706,7 +706,13 @@ impl St {
     /// 播放 `id`；打不开就移出队列试下一首，全部失败则停止。
     fn load(&mut self, mut id: String) {
         if self.out.is_none() {
-            match DeviceSinkBuilder::open_default_sink() {
+            // rodio 固定要 2048 帧缓冲；只收得更小的设备（如部分蓝牙音箱 14..=1024）会拒，改让系统挑
+            let opened = DeviceSinkBuilder::open_default_sink().or_else(|_| {
+                DeviceSinkBuilder::from_default_device()?
+                    .with_buffer_size(rodio::cpal::BufferSize::Default)
+                    .open_stream()
+            });
+            match opened {
                 Ok(mut o) => {
                     o.log_on_drop(false);
                     self.out = Some(o);
