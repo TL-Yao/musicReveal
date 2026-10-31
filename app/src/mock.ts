@@ -120,6 +120,8 @@ const fullLibrary = () => [...SONG_ROWS, ...EXTRA_ROWS].map((r, i) => mkTrack(r,
    =================================================================== */
 let snap: Snapshot;
 let lib: Library = { dir: OUT, tracks: [], scanning: false };
+/** 移到废纸篓的歌，最近的在最后：撤回用 */
+const trashed: Library["tracks"] = [];
 /** queue 为实际播放顺序（随机时打乱），ids 为点播时的原顺序 */
 const P = { ids: [] as string[], queue: [] as string[], i: -1, rev: 0, playing: false, base: 0, at: 0, volume: 0.7, shuffle: false, repeat: "off" as Repeat, error: undefined as string | undefined };
 type Extra = { title?: string; artists: string[]; album?: string; quality: string; art: string; noTrack?: boolean };
@@ -381,6 +383,7 @@ export const mockBackend: Backend = {
         case "ignore_existing": snap.notices = snap.notices.filter((n) => n.folder !== a.path); break;
         case "dismiss_notice": snap.notices = snap.notices.filter((n) => n.id !== a.id); break;
         case "set_output_dir":
+          if (a.path !== snap.outputDir) trashed.length = 0;
           snap.outputDir = a.path;
           // 同真后台：换文件夹即清空并重扫
           lib = { dir: a.path, tracks: [], scanning: true };
@@ -419,11 +422,20 @@ export const mockBackend: Backend = {
         case "open_settings": snapChanged = false; window.open(location.pathname + "?mock&view=settings", "settings", "width=520,height=440"); break;
         case "trash_track":
           snapChanged = false;
+          trashed.push(...lib.tracks.filter((t) => t.id === a.id));
           lib.tracks = lib.tracks.filter((t) => t.id !== a.id);
           removeFromQueue(a.id);
           setTimeout(pushLib, 120);
           setTimeout(pushPlayer, 30);
           break;
+        case "undo_trash": {
+          snapChanged = false;
+          const t = trashed.pop();
+          if (!t) return null;
+          lib.tracks.push(t);
+          setTimeout(pushLib, 120);
+          return t.id;
+        }
         default: {
           snapChanged = false;
           if (!cmd.startsWith("player_")) throw `mock: unknown command ${cmd}`;
@@ -441,6 +453,7 @@ export const mockBackend: Backend = {
   onLibrary: (cb) => void subs.library.push(cb),
   onPlayer: (cb) => void subs.player.push(cb),
   onDragDrop: (cb) => void (drag = cb),
+  onMenuUndo: () => {},
   pickFiles: async () => [`${HOME}/Downloads/hanser-魔法少女的午后.mflac`],
 };
 

@@ -27,6 +27,8 @@ const obFolders = () => ob.extra.map((f) => ({ ...f, checked: !ob.unchecked.has(
 const outDir = () => (onboarding() ? (ob.outputDir ?? S.snap!.outputDir) : S.snap!.outputDir);
 const format = () => (onboarding() ? (ob.format ?? S.snap!.format) : S.snap!.format);
 const pickFolder = () => S.B.invoke<string | null>("pick_folder").catch(() => null);
+/** 文本输入框：⌘Z 与空格归它自己 */
+const typing = (el: Element | null) => !!el?.matches("input:not([type=range]), textarea");
 
 function boot(backend: Backend) {
   S.B = backend;
@@ -51,6 +53,11 @@ export function start(backend: Backend) {
   load<Library>(S.B.onLibrary, "get_library", (l) => (setLibrary(l), refreshNowPlaying()));
   load<PlayerState>(S.B.onPlayer, "get_player", setPlayer);
   S.B.onDragDrop(onDrag);
+  S.B.onMenuUndo(() => {
+    // execCommand 是网页里触发原生文字撤销的唯一途径
+    if (document.hasFocus() && typing(document.activeElement)) document.execCommand("undo");
+    else call("undo_trash");
+  });
 }
 
 function render() {
@@ -316,7 +323,9 @@ function wire() {
     }
     if (e.metaKey && e.key === ",") return e.preventDefault(), void call("open_settings");
     if (S.snap && onboarding()) return;
-    if ((e.target as Element).matches("input:not([type=range]), textarea")) return;
+    if (typing(e.target as Element)) return;
+    // 拦下：不再落到菜单的 ⌘Z 上，一次只撤回一首
+    if (e.metaKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "z") return e.preventDefault(), void call("undo_trash");
     // 焦点在按钮 / 单选上时空格归控件自己（原生激活）
     if (e.key === " " && !e.metaKey && !(e.target as Element).closest("button, a[href], input[type=radio], #menu")) {
       e.preventDefault();

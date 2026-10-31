@@ -15,6 +15,8 @@ export type Backend = {
   /** 播放状态变化时推送，播放中每秒一次；两次之间界面自行插值进度 */
   onPlayer(cb: (p: PlayerState) => void): void;
   onDragDrop(cb: (e: DragDrop) => void): void;
+  /** 点了「编辑 → 撤销」，或焦点在文本框里按的 ⌘Z 落到了菜单上 */
+  onMenuUndo(cb: () => void): void;
   /** 「添加文件…」的系统选择器；取消时为 null */
   pickFiles(): Promise<string[] | null>;
 };
@@ -33,6 +35,7 @@ export const tauriBackend: Backend = {
   onLibrary: (cb) => void listen<Library>("library", (e) => cb(e.payload)),
   onPlayer: (cb) => void listen<PlayerState>("player", (e) => cb(e.payload)),
   onDragDrop: (cb) => void getCurrentWebview().onDragDropEvent((e) => cb(e.payload)),
+  onMenuUndo: (cb) => void listen("menu-undo", () => cb()),
   pickFiles: async () => {
     const r = await open({ multiple: true, directory: false, filters: [{ name: "音乐", extensions: EXTS }] });
     return r && r.length ? r : null;

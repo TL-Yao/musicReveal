@@ -199,11 +199,37 @@ fn show_settings(app: &AppHandle) -> tauri::Result<()> {
     .map(drop)
 }
 
-/// 标准菜单，应用菜单里加「设置…」⌘,。
+/// 「编辑」菜单里顶替预置「撤销」的项：预置项只把 `undo:` 发给 webview，管不到移到废纸篓。
+struct UndoItem(tauri::menu::MenuItem<tauri::Wry>);
+
+/// 撤销项的文字跟着撤回栈走。
+fn sync_undo(app: &AppHandle) {
+    if let (Some(u), Some(l)) = (app.try_state::<UndoItem>(), app.try_state::<Library>()) {
+        let text = if l.can_undo_trash() {
+            "撤销移到废纸篓"
+        } else {
+            "撤销"
+        };
+        let _ = u.0.set_text(text);
+    }
+}
+
+/// 标准菜单，应用菜单里加「设置…」⌘,；「编辑」里的「撤销」⌘Z 换成自己的项（点击见 `on_menu_event`）。
 fn menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
     let menu = Menu::default(app)?;
-    if let Some(first) = menu.items()?.first().and_then(|i| i.as_submenu().cloned()) {
+    let items = menu.items()?;
+    let undo = MenuItem::with_id(app, "undo", "撤销", true, Some("CmdOrCtrl+Z"))?;
+    if let Some(edit) = items
+        .iter()
+        .filter_map(|i| i.as_submenu())
+        .find(|s| s.text().is_ok_and(|t| t == "Edit"))
+    {
+        edit.remove_at(0)?;
+        edit.insert(&undo, 0)?;
+    }
+    app.manage(UndoItem(undo));
+    if let Some(first) = items.first().and_then(|i| i.as_submenu().cloned()) {
         // 「关于」与分隔线之后
         first.insert_items(
             &[
@@ -253,10 +279,32 @@ async fn get_lyrics(l: State<'_, Library>, id: String) -> R<Option<Vec<Lyric>>> 
 }
 
 #[tauri::command]
-async fn trash_track(l: State<'_, Library>, p: State<'_, Player>, id: String) -> R<()> {
+async fn trash_track(
+    app: AppHandle,
+    l: State<'_, Library>,
+    p: State<'_, Player>,
+    id: String,
+) -> R<()> {
     l.trash(&id)?;
     p.remove(&id);
+    sync_undo(&app);
     Ok(())
+}
+
+/// 撤回最近一次移到废纸篓（不加回播放队列）；放不回时弹原生提示说明原因。
+#[tauri::command]
+async fn undo_trash(app: AppHandle, l: State<'_, Library>) -> R<Option<String>> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+    let r = l.undo_trash();
+    sync_undo(&app);
+    if let Err(m) = &r {
+        app.dialog()
+            .message(m)
+            .title("无法撤销移到废纸篓")
+            .kind(MessageDialogKind::Warning)
+            .show(|_| {});
+    }
+    r
 }
 
 #[tauri::command]
@@ -335,6 +383,8 @@ pub fn run() {
             let lib = Library::new(
                 data.clone(),
                 Box::new(move |v| {
+                    // 换输出文件夹会清空撤回栈，随后的这次推送把菜单文字一并改回来
+                    sync_undo(&h);
                     let _ = h.emit("library", v);
                 }),
             );
@@ -367,8 +417,12 @@ pub fn run() {
         })
         .menu(menu)
         .on_menu_event(|app, ev| {
-            if ev.id() == "settings" {
-                let _ = show_settings(app);
+            match ev.id().as_ref() {
+                "settings" => drop(show_settings(app)),
+                // 键盘 ⌘Z 网页先看过：焦点不在文本框时它已拦下并自己撤回，落到这里的只有点菜单、
+                // 文本框里的 ⌘Z；交给网页按焦点决定撤回打的字还是移到废纸篓
+                "undo" => drop(app.emit_to("main", "menu-undo", ())),
+                _ => {}
             }
         })
         .on_window_event(|w, ev| {
@@ -414,6 +468,7 @@ pub fn run() {
             get_library,
             get_lyrics,
             trash_track,
+            undo_trash,
             reveal_track,
         ])
         .build(tauri::generate_context!())
