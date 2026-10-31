@@ -447,7 +447,7 @@ impl Player {
         });
     }
 
-    /// 曲目没了（移到废纸篓）：移出队列；是当前曲就接着播它之后的那首，没有了就停。
+    /// 曲目没了（移到废纸篓）：移出队列；是当前曲就换到它之后的那首（原本在放才接着放），没有了就停。
     pub fn remove(&self, id: &str) {
         self.edit(|st| {
             let Some(q) = st.queue.as_mut() else { return };
@@ -457,7 +457,14 @@ impl Player {
                 return;
             }
             match st.current() {
-                Some(next) => st.load(next),
+                Some(next) if st.playing => st.load(next),
+                // 暂停或停止着：换到下一首但不出声，按播放再从头放
+                Some(next) => {
+                    st.duration_ms =
+                        reveal_core::read_track(Path::new(&next)).map_or(0, |t| t.duration_ms);
+                    st.track = Some(next);
+                    st.halt();
+                }
                 None => {
                     st.track = None;
                     st.duration_ms = 0;

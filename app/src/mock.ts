@@ -226,7 +226,7 @@ function removeFromQueue(id: string) {
   if (k > P.i) return;
   if (P.i >= P.queue.length) P.i = P.repeat === "all" && P.queue.length ? 0 : -1;
   if (P.i < 0) return void ((P.playing = false), setPos(0));
-  P.playing = true;
+  // 同真后台：原本在放才接着放，暂停着就停在下一首开头
   P.error = undefined;
   setPos(0);
   load();

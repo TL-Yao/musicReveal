@@ -759,6 +759,35 @@ fn toggle_next_and_prev_drive_playback() {
     );
 }
 
+/// 删当前曲：在放就接着放下一首；暂停着就停在下一首开头，按播放才出声。
+#[test]
+#[ignore = "需要音频设备"]
+fn removing_the_current_track_only_keeps_playing_if_it_was_playing() {
+    let _g = audio();
+    let t = Tmp::new("rm");
+    let a = make(&t.0, "a.wav").unwrap();
+    let b = make(&t.0, "b.wav").unwrap();
+    let c = make(&t.0, "c.wav").unwrap();
+    let p = quiet(&t, noop());
+    p.play(vec![a.clone(), b.clone(), c.clone()], 0).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    p.remove(&a);
+    let s = p.state();
+    assert!(s.playing && s.track_id.as_deref() == Some(b.as_str()), "{s:?}");
+
+    p.toggle();
+    p.remove(&b);
+    let s = p.state();
+    assert!(
+        !s.playing && s.position_ms == 0 && s.track_id.as_deref() == Some(c.as_str()),
+        "暂停时删当前曲不开播：{s:?}"
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!p.state().playing && p.state().position_ms == 0);
+    p.toggle();
+    wait(&p, 2, |s| s.playing && s.track_id.as_deref() == Some(c.as_str()) && s.position_ms > 0);
+}
+
 /// 曲终消息已发出、还没被处理时拖动进度：留在本曲的新位置继续播，不跳到下一首。
 #[test]
 #[ignore = "需要音频设备"]
