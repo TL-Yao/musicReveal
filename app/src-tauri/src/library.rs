@@ -856,6 +856,14 @@ impl Library {
         Ok(())
     }
 
+    pub fn undo_trash(&self) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+
+    pub fn can_undo_trash(&self) -> bool {
+        false
+    }
+
     /// 在 Finder 里显示。只认资料库里的歌。
     pub fn reveal(&self, id: &str) -> Result<(), String> {
         self.track(id).ok_or("不在资料库里")?;

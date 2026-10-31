@@ -1085,3 +1085,182 @@ fn trash_in_tests_goes_to_the_private_home() {
     assert!(!a.exists() && got.exists());
     std::fs::remove_file(got).unwrap();
 }
+
+/// 本进程测试共用的废纸篓：`home()/.Trash`。
+fn bin() -> PathBuf {
+    musicreveal_app::engine::home().join(".Trash")
+}
+
+/// 各测试自己的文件名前缀：废纸篓是共用的。
+fn undo_tag(t: &str) -> String {
+    format!(
+        "mr-undo{t}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    )
+}
+
+/// 删掉废纸篓里以 `tag` 开头的文件。
+fn clean_bin(tag: &str) {
+    for e in std::fs::read_dir(bin()).into_iter().flatten().flatten() {
+        if e.file_name().to_string_lossy().starts_with(tag) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+#[test]
+fn undo_trash_puts_the_song_and_its_lrcs_back() {
+    let r = Rig::new("undo");
+    let tag = undo_tag("");
+    let a = mp3(&r.out.join(format!("{tag}.mp3")), &[], None);
+    std::fs::write(r.out.join(format!("{tag}.lrc")), "[00:01.00]词\n").unwrap();
+    r.lib.set_dir(&r.out);
+    settled(&r.rx);
+    let home = r.out.join(format!("lrc/{tag}.lrc"));
+    assert!(home.exists(), "扫描时挪进 lrc 文件夹");
+    // 旁边的同名 .lrc 解析不出歌词：扫描不挪它，删歌时一起进废纸篓（与 lrc 文件夹里的同名）
+    let beside = r.out.join(format!("{tag}.lrc"));
+    std::fs::write(&beside, "没有时间\n").unwrap();
+    let home_text = std::fs::read_to_string(&home).unwrap();
+    let song = std::fs::read(&a).unwrap();
+
+    assert!(!r.lib.can_undo_trash());
+    r.lib.trash(&id(&a)).unwrap();
+    settled(&r.rx);
+    assert!(!a.exists() && !home.exists() && !beside.exists());
+    assert!(r.lib.can_undo_trash());
+
+    let got = r.lib.undo_trash();
+    assert!(
+        a.exists() && home.exists() && beside.exists(),
+        "{got:?}：都回到原位"
+    );
+    clean_bin(&tag);
+    assert_eq!(got, Ok(Some(id(&a))));
+    assert_eq!(std::fs::read(&a).unwrap(), song);
+    assert_eq!(std::fs::read_to_string(&home).unwrap(), home_text);
+    assert_eq!(std::fs::read_to_string(&beside).unwrap(), "没有时间\n");
+    assert!(!r.lib.can_undo_trash());
+    let (_, v) = settled(&r.rx);
+    assert_eq!(ids(&v), vec![id(&a)], "重新出现在资料库里");
+    assert_eq!(r.lib.undo_trash(), Ok(None));
+}
+
+#[test]
+fn undo_trash_restores_one_song_per_call_newest_first() {
+    let r = Rig::new("undoorder");
+    let tag = undo_tag("order");
+    let songs: Vec<PathBuf> = ["a", "b", "c"]
+        .iter()
+        .map(|n| mp3(&r.out.join(format!("{tag}-{n}.mp3")), &[], None))
+        .collect();
+    r.lib.set_dir(&r.out);
+    settled(&r.rx);
+    for s in &songs {
+        r.lib.trash(&id(s)).unwrap();
+        settled(&r.rx);
+    }
+    let mut back = vec![];
+    for s in songs.iter().rev() {
+        back.push(r.lib.undo_trash());
+        assert!(s.exists(), "{s:?}");
+        let (_, v) = settled(&r.rx);
+        assert!(v.tracks.iter().any(|t| t.id == id(s)), "{s:?}");
+    }
+    let last = r.lib.undo_trash();
+    clean_bin(&tag);
+    let want: Vec<_> = songs.iter().rev().map(|s| Ok(Some(id(s)))).collect();
+    assert_eq!(back, want);
+    assert_eq!(last, Ok(None));
+}
+
+#[test]
+fn undo_trash_refuses_a_song_no_longer_in_the_trash_and_moves_on() {
+    let r = Rig::new("undogone");
+    let tag = undo_tag("gone");
+    let a = mp3(&r.out.join(format!("{tag}-a.mp3")), &[], None);
+    let b = mp3(&r.out.join(format!("{tag}-b.mp3")), &[], None);
+    std::fs::write(r.out.join(format!("{tag}-b.lrc")), "[00:01.00]词\n").unwrap();
+    r.lib.set_dir(&r.out);
+    settled(&r.rx);
+    let b_lrc = r.out.join(format!("lrc/{tag}-b.lrc"));
+    assert!(b_lrc.exists());
+    r.lib.trash(&id(&a)).unwrap();
+    r.lib.trash(&id(&b)).unwrap();
+    // 废纸篓清掉了 b
+    std::fs::remove_file(bin().join(b.file_name().unwrap())).unwrap();
+
+    let refused = r.lib.undo_trash();
+    let b_lrc_back = b_lrc.exists();
+    let next = r.lib.undo_trash();
+    clean_bin(&tag);
+    assert!(
+        matches!(&refused, Err(m) if !m.is_empty()),
+        "{refused:?}"
+    );
+    assert!(!b.exists() && !b_lrc_back, "歌没放回，它的 .lrc 也不放回");
+    assert_eq!(next, Ok(Some(id(&a))), "作废的记录已出栈，接着撤回更早的");
+    assert!(a.exists());
+}
+
+#[test]
+fn undo_trash_never_overwrites_files_now_at_the_original_paths() {
+    let r = Rig::new("undotaken");
+    let tag = undo_tag("taken");
+    let a = mp3(&r.out.join(format!("{tag}-a.mp3")), &[], None);
+    let b = mp3(&r.out.join(format!("{tag}-b.mp3")), &[], None);
+    std::fs::write(r.out.join(format!("{tag}-b.lrc")), "[00:01.00]词\n").unwrap();
+    r.lib.set_dir(&r.out);
+    settled(&r.rx);
+    let b_lrc = r.out.join(format!("lrc/{tag}-b.lrc"));
+    assert!(b_lrc.exists());
+    r.lib.trash(&id(&a)).unwrap();
+    r.lib.trash(&id(&b)).unwrap();
+    // b 的 .lrc 原位上有了别的文件；a 的原位上也有了
+    std::fs::write(&b_lrc, "占位").unwrap();
+    std::fs::write(&a, "新的").unwrap();
+
+    let b_back = r.lib.undo_trash();
+    let b_lrc_text = std::fs::read_to_string(&b_lrc).unwrap();
+    let b_lrc_kept = bin().join(b_lrc.file_name().unwrap()).exists();
+    let refused = r.lib.undo_trash();
+    let a_kept = bin().join(a.file_name().unwrap()).exists();
+    let after = r.lib.can_undo_trash();
+    clean_bin(&tag);
+    assert_eq!(b_back, Ok(Some(id(&b))), ".lrc 回不去不挡歌");
+    assert!(b.exists());
+    assert_eq!(b_lrc_text, "占位", "不覆盖原位上的 .lrc");
+    assert!(b_lrc_kept, "回不去的 .lrc 留在废纸篓里");
+    assert!(
+        matches!(&refused, Err(m) if !m.is_empty()),
+        "{refused:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&a).unwrap(), "新的", "不覆盖原位上的文件");
+    assert!(a_kept, "回不去的歌留在废纸篓里");
+    assert!(!after, "作废的记录已出栈");
+}
+
+#[test]
+fn set_dir_to_another_folder_forgets_what_can_be_undone() {
+    let r = Rig::new("undodir");
+    let tag = undo_tag("dir");
+    let a = mp3(&r.out.join(format!("{tag}.mp3")), &[], None);
+    r.lib.set_dir(&r.out);
+    settled(&r.rx);
+    r.lib.trash(&id(&a)).unwrap();
+    assert!(r.lib.can_undo_trash());
+    let other = r.t.0.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    r.lib.set_dir(&other);
+    let can = r.lib.can_undo_trash();
+    let got = r.lib.undo_trash();
+    let in_bin = bin().join(a.file_name().unwrap()).exists();
+    clean_bin(&tag);
+    assert!(!can);
+    assert_eq!(got, Ok(None));
+    assert!(!a.exists() && in_bin);
+}
