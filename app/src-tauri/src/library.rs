@@ -170,6 +170,14 @@ struct State {
     reformatted: Option<u32>,
     /// 换目录、删歌时加一：之前开始的扫描结果过时，不再写进 `tracks`。
     epoch: u64,
+    /// 本次运行里删进废纸篓、还能撤回的歌，最近的在最后；换目录时清空。
+    trashed: Vec<Trashed>,
+}
+
+/// 一次「移到废纸篓」：歌与一起进去的 .lrc，各是（原路径，废纸篓里的路径）。
+struct Trashed {
+    song: (PathBuf, PathBuf),
+    lrcs: Vec<(PathBuf, PathBuf)>,
 }
 
 #[derive(Default)]
@@ -687,21 +695,33 @@ impl Worker {
     }
 }
 
-/// NSFileManager 移到废纸篓：不经 Finder，不会弹「想要控制 Finder」的授权。
-/// 测试构建（`test-home`）里挪进临时主目录下的 `.Trash`，碰不到真实废纸篓。
-fn trash(p: &Path) -> Result<(), String> {
+/// NSFileManager 移到废纸篓：不经 Finder，不会弹「想要控制 Finder」的授权。返回进废纸篓后的路径
+/// （系统没给为 None）。测试构建（`test-home`）里挪进临时主目录下的 `.Trash`，碰不到真实废纸篓；
+/// 与真实废纸篓一样重名不覆盖，改叫「名 2」「名 3」…
+fn trash(p: &Path) -> Result<Option<PathBuf>, String> {
     use objc2_foundation::{NSFileManager, NSURL};
     if cfg!(feature = "test-home") {
         let bin = crate::engine::home().join(".Trash");
-        let name = p.file_name().ok_or("路径无效")?;
-        return std::fs::create_dir_all(&bin)
-            .and_then(|()| std::fs::rename(p, bin.join(name)))
-            .map_err(|e| format!("无法移到废纸篓：{e}"));
+        let name = p.file_name().ok_or("路径无效")?.to_string_lossy();
+        std::fs::create_dir_all(&bin).map_err(|e| format!("无法移到废纸篓：{e}"))?;
+        let mut n = 1;
+        loop {
+            let to = match n {
+                1 => bin.join(&*name),
+                _ => bin.join(format!("{name} {n}")),
+            };
+            match reveal_core::place(p, &to) {
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+                r => return r.map(|()| Some(to)).map_err(|e| format!("无法移到废纸篓：{e}")),
+            }
+        }
     }
     let url = NSURL::from_file_path(p).ok_or("路径无效")?;
+    let mut out = None;
     NSFileManager::defaultManager()
-        .trashItemAtURL_resultingItemURL_error(&url, None)
-        .map_err(|e| format!("无法移到废纸篓：{}", e.localizedDescription()))
+        .trashItemAtURL_resultingItemURL_error(&url, Some(&mut out))
+        .map_err(|e| format!("无法移到废纸篓：{}", e.localizedDescription()))?;
+    Ok(out.and_then(|u| u.to_file_path()))
 }
 
 fn drop_cover(covers: &Path, r: &Rec) {
@@ -761,6 +781,7 @@ impl Library {
                 done: HashSet::new(),
                 reformatted: None,
                 epoch: 0,
+                trashed: vec![],
             }),
             sig: sig.clone(),
         });
@@ -795,6 +816,7 @@ impl Library {
             st.dir = dir.to_path_buf();
             st.epoch += 1;
             st.tracks.clear();
+            st.trashed.clear();
             st.scanning = true;
         }
         self.refresh();
@@ -836,32 +858,74 @@ impl Library {
         let t = self.track(id).ok_or("不在资料库里")?;
         let root = lock(&self.0.st).dir.clone();
         let p = Path::new(&t.id);
-        trash(p)?;
+        let bin = trash(p)?;
         let mut lrcs: Vec<PathBuf> = t.lrc.into_iter().collect();
         lrcs.extend([reveal_core::lrc_home(&root, p), p.with_extension("lrc")]);
         // 逐个现查：所在文件夹（含扫描之后才换成的）链到输出文件夹外面的不碰；
         // 同一个路径出现两次时第二次已不在
+        let mut moved = vec![];
         for l in lrcs
             .iter()
             .filter(|l| reveal_core::safe_lrc_dir(&root, l, false).is_ok() && l.is_file())
         {
-            let _ = trash(l);
+            if let Ok(Some(b)) = trash(l) {
+                moved.push((l.clone(), b));
+            }
         }
         {
             let mut st = lock(&self.0.st);
             st.tracks.remove(Path::new(id));
             st.epoch += 1;
+            if let Some(b) = bin.filter(|_| st.dir == root) {
+                st.trashed.push(Trashed {
+                    song: (p.to_path_buf(), b),
+                    lrcs: moved,
+                });
+            }
         }
         self.refresh();
         Ok(())
     }
 
+    /// 撤回最近一次 `trash`：歌与一起进废纸篓的 .lrc 放回原路径，随后重扫。没有可撤回的为 None。
+    /// 不覆盖任何文件：歌已不在废纸篓、原路径已被占、原来的文件夹没了或换成了链接，就不放回，
+    /// 返回给用户看的原因；.lrc 放不回的跳过。无论成败这条记录都出栈。
     pub fn undo_trash(&self) -> Result<Option<String>, String> {
-        Ok(None)
+        let (root, t) = {
+            let mut st = lock(&self.0.st);
+            (st.dir.clone(), st.trashed.pop())
+        };
+        let Some(Trashed {
+            song: (song, bin),
+            lrcs,
+        }) = t
+        else {
+            return Ok(None);
+        };
+        let name = song.file_name().unwrap_or_default().to_string_lossy();
+        if std::fs::symlink_metadata(&bin).is_err() {
+            return Err(format!("「{name}」已不在废纸篓里，无法放回。"));
+        }
+        reveal_core::safe_lrc_dir(&root, &song, false)
+            .map_err(|_| format!("「{name}」原来所在的文件夹已不在或换成了链接，没有放回。"))?;
+        reveal_core::place(&bin, &song).map_err(|e| match e.kind() {
+            std::io::ErrorKind::AlreadyExists => {
+                format!("原位置已有同名文件「{name}」，为免覆盖没有放回。")
+            }
+            _ => format!("无法放回「{name}」：{e}"),
+        })?;
+        // 与删除时一样现查：文件夹换成链到外面的不写进去
+        for (l, b) in &lrcs {
+            if reveal_core::safe_lrc_dir(&root, l, false).is_ok() {
+                let _ = reveal_core::place(b, l);
+            }
+        }
+        self.refresh();
+        Ok(Some(song.to_string_lossy().into_owned()))
     }
 
     pub fn can_undo_trash(&self) -> bool {
-        false
+        !lock(&self.0.st).trashed.is_empty()
     }
 
     /// 在 Finder 里显示。只认资料库里的歌。

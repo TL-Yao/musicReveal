@@ -120,7 +120,7 @@ pub use enrich::OnlineEnricher;
 pub use recode::{is_alac, recodable, recode_lossless, Lossless};
 
 pub use convert::{
-    convert, credit_lines, find_ffmpeg, lrc_home, parse_lrc, safe_lrc_dir, strip_timestamps,
+    convert, credit_lines, find_ffmpeg, lrc_home, parse_lrc, place, safe_lrc_dir, strip_timestamps,
     CancelToken, ConvertError, ConvertOptions, ConvertOutcome, Enricher, LyricLine, Lyrics,
     NoopEnricher, OutputFormat, Stage, TrackMeta, PART_PREFIX,
 };

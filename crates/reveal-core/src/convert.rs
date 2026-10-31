@@ -59,7 +59,7 @@ pub(crate) fn numbered(dir: &Path, stem: &str, n: u32, ext: &str) -> PathBuf {
 }
 
 /// 不覆盖地把 `src` 落到 `dst`；目标已存在（含悬空符号链接）返回 AlreadyExists。
-pub(crate) fn place(src: &Path, dst: &Path) -> std::io::Result<()> {
+pub fn place(src: &Path, dst: &Path) -> std::io::Result<()> {
     match std::fs::hard_link(src, dst) {
         Ok(()) => {
             let _ = std::fs::remove_file(src);
