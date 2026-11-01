@@ -4,5 +4,7 @@ __pycache__/
 build/
 dist/
 app/src-tauri/binaries/
+notes/
+.DS_Store
 # 真实样本（版权音乐）永不入库
 testdata/

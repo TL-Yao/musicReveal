@@ -5,10 +5,10 @@
 在仓库根运行：
 
 ```sh
-~/.local/bin/uv run --python 3.13 --with pycryptodome --with mutagen tools/crosscheck/crosscheck.py
+REVEAL_REF=<music-geshizhuanhuan 目录> uv run --python 3.13 --with pycryptodome --with mutagen tools/crosscheck/crosscheck.py
 ```
 
-- 参考实现路径默认是本机的任务 refs 目录，可用 `REVEAL_REF=<music-geshizhuanhuan 目录>` 覆盖。
+- `REVEAL_REF` 必填，指向参考实现的仓库目录。
 - 大样本大小默认 40MB，可用 `REVEAL_BIG_MB=<n>` 调整。
 - 脚本会先执行 `cargo build --release -p reveal-core --example decrypt_only`。
 

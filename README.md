@@ -1,118 +1,154 @@
 # musicReveal
 
-musicReveal 是一个 macOS 上的小型音乐播放器，自带解密能力：监听你指定的文件夹，把 QQ 音乐、网易云音乐下载的加密音乐在本机转换成普通音频文件、补全封面与歌词等元数据，收进资料库直接播放。
+English | [简体中文](README.zh-CN.md)
 
-<!-- 截图位：主窗口（资料库与转换中的歌曲）、歌词视图、设置窗口。截图之后补充。 -->
+musicReveal is a small music player for macOS with built-in decryption. It watches folders you choose, converts encrypted downloads from QQ Music and NetEase Cloud Music into ordinary audio files on your machine, fills in cover art, lyrics and other metadata, and plays them from its own library.
 
-## 功能
+<!-- Screenshots: main window (library and tracks being converted), lyrics view, settings. -->
 
-- **支持的格式**
-  - QQ 音乐新版加密格式（`mflac`、`mgg` 等 musicex 格式），需要本机已安装并登录 QQ 音乐；
-  - QQ 音乐旧格式（`qmcflac`、`qmcogg`、`qmc0`/`qmc2`/`qmc3`、`bkc*`… 以及文件内自带密钥的 `mflac`/`mgg`）。**旧格式没有用真实文件验证过**：只用合成样本做了测试，并与参考项目的 Python 实现对同一输入的输出逐字节交叉核对；
-  - 网易云音乐 `ncm`，无需登录；
-  - 普通音频（`mp3`、`flac`、`ogg`、`m4a`、`wav`）：同样复制进输出目录、按规则命名并补全元数据。网易云下载的普通 mp3/flac 会按文件里记录的歌曲 ID 补全。
-- **输出**：保持原格式（FLAC、OGG、M4A、MP3 等），或打开「Apple Music 兼容」，转成 Apple Music / iPhone 能直接播放的格式（由应用内置的 ffmpeg 完成，无需另行安装）：无损的 FLAC、WAV、APE 转为 ALAC（`.m4a`，无损，位深与采样率不变）；OGG、Opus、WMA 转为 256 kbps AAC（`.m4a`）；MP3 与 M4A 保持原样、不重新编码。转换时保留文件自带的全部标签、封面和歌词。
-  - 例外：「原格式」下，解密后是 APE 或 WMA 的（`bkcape`、`bkcwma` 等），因为这两种格式无法可靠写入完整标签，仍会转换——APE 转为 FLAC（无损到无损），WMA 转为 320 kbps MP3。
-  - 在设置里切换这一项时，会先告诉你输出目录里有多少首已有的歌要跟着转、大约要多久：打开时把 FLAC、WAV 转为 ALAC，关闭时把 ALAC 转回 FLAC（OGG、Opus、AAC、MP3 不动）。一首一首地转：先在同一文件夹写一个隐藏副本，核对声音逐采样一致、标签、封面和歌词都没丢，才换上并删掉旧文件；文件的创建时间（资料库里的「最近添加」）保持不变；遇到同名文件不覆盖，记为失败并列出原因。转换期间可以照常播放，正在播放或排在队列里的歌换了文件后会自动跟上；退出应用会中断，下次打开时接着转。
-  - 宁可不转，也不丢信息：只转本应用自己写得出的那种文件。标签超出歌名、歌手、专辑、专辑艺人、年份、流派、作曲、注释、曲序、碟号、歌词这几项的（比如其他软件写的自定义字段、同一项写了多个值或空值），带歌词的 WAV，多于两个声道、32 bit 或浮点的，有多张图片或图片不是正面封面的，以及只读文件，都不会跟着转：它们不算进要转的歌数，原样留在输出目录里，照常能播放。
-- **元数据补全**：保留文件自带的标签；再按文件里的歌曲 ID 向对应平台查询，补全年份、曲序、碟号、专辑艺人、高清封面和歌词（含翻译）。多位歌手全部保留。歌词以带时间标的 LRC 原文嵌入音乐文件（因此在 Apple Music 里看到的歌词每行带 `[mm:ss.xx]` 前缀），同时在输出文件夹的 `lrc` 文件夹里按相同的子路径生成同名 `.lrc`（已有的同名 `.lrc` 会被覆盖）。普通音频旁边若有同名 `.lrc`，也一并收进来。网易云歌词开头的作词、作曲等署名行（原本是一段 JSON）会改写成普通的歌词行；资料库扫描时也会把已有歌曲与 `.lrc` 里的这种行改过来。
-- **自动监听**：应用运行期间（关掉窗口也算），监听文件夹里新下载完成的歌曲会自动转换；应用退出期间下载的歌曲，下次打开时自动补转。也可以把文件拖进窗口或用「添加文件…」手动转换。输出目录本身永远不会被当作来源。
-- **资料库与播放**：资料库就是输出目录（含子文件夹）里实际存在的全部可播放文件，包括你手动放进去的。支持播放/暂停、上一首/下一首、拖动进度、音量、随机、循环、搜索与排序；歌曲内嵌的带时间歌词显示为滚动歌词（含翻译），没有时退回读同名 `.lrc`；扫描时会给没有内嵌带时间歌词、但找得到可用 `.lrc`（歌曲旁边或 `lrc` 文件夹里）的歌补嵌歌词，并把歌曲旁边的 `.lrc` 挪进 `lrc` 文件夹；键盘媒体键与控制中心「正在播放」可控制播放。右键可在 Finder 中显示或移到废纸篓（连同它的 `.lrc`）。
-- **不改动源文件**：转换结果写入输出目录（默认 `~/Music/musicReveal`），文件命名为「歌手 - 歌名」（多位歌手以「、」分隔）；同名文件自动加编号，不覆盖；已转换过的歌曲自动跳过（内容完全相同、只是换了文件名或位置的也会跳过）。
+## Features
 
-## 系统要求
+### Supported formats
 
-在 Apple Silicon（arm64）Mac 上测试过。Intel Mac 与 Windows 未测试，不承诺支持。
+| Source | Formats | Notes |
+| --- | --- | --- |
+| QQ Music (current) | `mflac`, `mgg` and other musicex formats | Requires the QQ Music desktop app installed and logged in on this Mac |
+| QQ Music (legacy) | `qmcflac`, `qmcogg`, `qmc0`/`qmc2`/`qmc3`, `bkc*`, and `mflac`/`mgg` files carrying their own key | Tested with synthetic samples only, cross-checked byte for byte against a reference implementation; not verified with real files |
+| NetEase Cloud Music | `ncm` | No login required |
+| Plain audio | `mp3`, `flac`, `ogg`, `m4a`, `wav` | Copied into the output folder, renamed and enriched like everything else; plain files downloaded from NetEase are enriched by the track ID stored inside them |
 
-## 安装与首次打开
+### Output
 
-1. 打开 `musicReveal_<版本>_aarch64.dmg`，把 musicReveal 拖到「应用程序」文件夹。
-2. 首次打开时需要手动允许一次，原因见下文。
+- **Keep original format**: FLAC, OGG, M4A, MP3 and so on stay as they are after decryption. Exceptions: APE and WMA cannot reliably hold full tags, so APE becomes FLAC (lossless to lossless) and WMA becomes 320 kbps MP3.
+- **Apple Music compatible**: convert to formats Apple Music and iPhone play natively, using the ffmpeg bundled inside the app (nothing to install). FLAC, WAV and APE become ALAC (`.m4a`, lossless, same bit depth and sample rate); OGG, Opus and WMA become 256 kbps AAC (`.m4a`); MP3 and M4A are left untouched. All tags, cover art and lyrics are preserved.
+- Toggling this setting also converts the lossless tracks already in your output folder (FLAC/WAV to ALAC when turned on, ALAC back to FLAC when turned off). You are told how many tracks are affected and roughly how long it will take before anything happens. Tracks are converted one at a time: a hidden copy is written next to the original, verified sample for sample and checked for intact tags, cover and lyrics, and only then swapped in. File creation dates are kept; existing files are never overwritten. Playback keeps working during the conversion; quitting interrupts it and it resumes on next launch.
+- When in doubt, nothing is converted: only files musicReveal could have written itself are touched. Files with custom tag fields, multi-valued or empty tags, WAV files with lyrics, more than two channels, 32-bit or floating-point audio, multiple pictures or a non-front-cover picture, and read-only files are left alone and keep playing as they are.
 
-musicReveal 使用开发者自己生成的固定证书签名，没有经过 Apple 公证（notarization）。签名本身是完整有效的：`codesign --verify` 可以通过，应用内容被改动后签名会失效；但这个证书不来自 Apple，系统的 Gatekeeper 不认可它，`spctl --assess` 会显示 `rejected`，从网上下载的安装包第一次打开时会被拦下，提示无法验证开发者。处理方法：
+### Metadata enrichment
 
-- macOS 14 及更早版本：在「应用程序」文件夹里按住 Control 键点按（或右键点按）musicReveal，选择「打开」，在弹出的对话框中再点「打开」。
-- macOS 15 及更新版本：先双击打开一次，看到拦截提示后点「完成」；然后进入「系统设置 → 隐私与安全性」，在页面下方找到关于 musicReveal 的提示，点「仍要打开」，按提示输入登录密码确认。
+Existing tags are kept. The track ID inside the file is then used to query the originating platform for year, track and disc numbers, album artist, high-resolution cover art and lyrics (with translation). All artists on a track are retained. Lyrics are embedded as timestamped LRC and also written as a sibling `.lrc` under the `lrc` folder of the output directory, mirroring the sub-path. A `.lrc` sitting next to a plain audio file is picked up too. NetEase's leading JSON credit lines in lyrics are rewritten as ordinary lyric lines.
 
-允许一次之后，之后的打开不再提示。因为证书固定不变，升级到用同一证书签名的新版本后，已经给过的授权（例如下文「需要授权」一节的权限）仍然有效。
+### Automatic watching
 
-自己从源码构建的应用没有「来自网络」的标记，直接打开即可。
+While the app is running (with the window closed as well), newly completed downloads in watched folders are converted automatically; downloads that happened while the app was not running are picked up on next launch. You can also drop files onto the window or use "Add files…" to convert manually. The output folder itself is never treated as a source.
 
-## 使用
+### Library and playback
 
-1. 首次打开时，添加要监听的文件夹（也可以一个都不加，之后在侧栏随时添加）。
-2. 确认输出目录和输出格式（原格式或 Apple Music 兼容）。这两项之后可以在设置中随时修改；改输出格式时，输出目录里已有的无损歌曲也会跟着转换（见上文）。
-3. 如果新加的文件夹里已有未转换的歌曲，应用会询问一次是否转换它们；否则只处理以后新下载的文件。
-4. 之后在 QQ 音乐或网易云音乐下载歌曲，下载完成后会出现在资料库上方的「正在转换」中，转换完成即进入资料库。
+The library is simply every playable file in the output folder (including sub-folders), including files you put there by hand.
 
-关闭窗口不会退出：播放与转换照常进行，点 Dock 图标重新打开窗口。按 ⌘Q 退出应用；正在转换的歌曲会中断并删除未完成的文件，下次打开时自动重新转换。设置（输出目录、输出格式、QQ 音乐状态）在菜单「musicReveal → 设置…」（⌘,）。
+- Play/pause, previous/next, seeking, volume, shuffle, repeat, search and sorting.
+- A play queue you can inspect and jump around in.
+- Lyrics view with scrolling lyrics (with translation): embedded timestamped lyrics are preferred, falling back to a sibling `.lrc`. On scan, tracks without embedded timestamped lyrics but with a usable `.lrc` get the lyrics embedded, and `.lrc` files next to tracks are moved into the `lrc` folder.
+- Keyboard media keys and the Control Center "Now Playing" widget control playback.
+- Right-click to reveal in Finder or move to Trash (together with its `.lrc`); ⌘⌫ trashes the current track, ⌘Z undoes.
 
-## 隐私
+### Source files are never modified
 
-- 解密、转码、写标签全部在本机完成，音频文件不会上传到任何地方。
-- 联网只用于补全元数据：按歌曲 ID 向 QQ 音乐、网易云音乐的公开接口查询歌曲信息、封面和歌词，不做模糊搜索，不发送音频内容。
-- QQ 音乐新版格式的解密密钥需要向 QQ 音乐的接口获取，为此会读取本机 QQ 音乐客户端保存的登录信息。这些信息只在本机用于这一请求，不会保存到别处，也不会上传给第三方。界面上显示的账号是打码后的。
-- 网易云音乐的文件不需要任何登录信息。
+Converted files go to the output folder (default `~/Music/musicReveal`), named `Artist - Title` (multiple artists joined with "、"). Name collisions get a numeric suffix rather than overwriting. Tracks already converted are skipped, including byte-identical files that were merely renamed or moved.
 
-## 常见问题
+## Requirements
 
-**「正在转换」中的歌曲显示「待登录」**
+macOS 11 or later on Apple Silicon (arm64). Only tested on Apple Silicon Macs; Intel Macs and Windows are untested and unsupported.
 
-这是 QQ 音乐新版格式的文件，解密需要 QQ 音乐的登录信息，而本机 QQ 音乐尚未登录或登录已过期。打开 QQ 音乐并登录后，这些歌曲会自动继续转换，不需要手动重试。
+The user interface is currently Chinese only. Labels quoted below give the on-screen Chinese text in parentheses.
 
-**QQ 音乐状态显示「需要授权」**
+## Installation and first launch
 
-旧版 QQ 音乐把登录信息保存在受系统保护的位置，读取前需要你授权一次：点侧栏或设置中 QQ 音乐状态旁的「授权…」，系统设置会打开「隐私与安全性 → 完全磁盘访问权限」，在列表中打开 musicReveal 的开关，然后重新打开 musicReveal。将 QQ 音乐更新到最新版本后，登录信息存放在普通位置，不再需要这项授权。
+1. Open `musicReveal_<version>_aarch64.dmg` and drag musicReveal into Applications.
+2. The first launch has to be allowed manually, see below.
 
-**转换失败，原因是「文件不完整」**
+musicReveal is signed with a fixed, self-generated certificate and is not notarized by Apple. The signature itself is valid (`codesign --verify` passes, and tampering with the bundle breaks it), but because the certificate is not issued by Apple, Gatekeeper rejects it and the first launch of a downloaded copy is blocked:
 
-文件仍在下载，或者下载中断导致文件被截断。等下载完成后点「重试」；如果文件本身已经损坏，请在 QQ 音乐或网易云音乐中重新下载。
+- **macOS 14 and earlier**: Control-click (or right-click) musicReveal in Applications, choose Open, then click Open again in the dialog.
+- **macOS 15 and later**: double-click it once and click Done on the warning; then go to System Settings → Privacy & Security, scroll to the message about musicReveal, click Open Anyway and confirm with your login password.
 
-**转换格式时提示缺少 ffmpeg**
+After that it opens normally. Because the certificate never changes, permissions you have granted (such as the one described under FAQ) survive upgrades to new versions signed with the same certificate. A build you make from source carries no quarantine flag and opens directly.
 
-正式打包的应用内置了 ffmpeg。如果你运行的是自己用 `cargo` 或 `npx tauri dev` 启动的开发版本，需要自行安装 ffmpeg（例如 `brew install ffmpeg`），或用环境变量 `REVEAL_FFMPEG` 指定其路径。
+## Usage
 
-## 从源码构建
+1. On first launch, add the folders to watch (you can also add them later from the sidebar).
+2. Confirm the output folder and output format (original or Apple Music compatible). Both can be changed later in Settings.
+3. If a newly added folder already contains unconverted tracks, the app asks once whether to convert them; otherwise only new downloads are processed.
+4. Download music in QQ Music or NetEase Cloud Music as usual. Finished downloads appear under "Converting" (正在转换) above the library and move into the library when done.
 
-需要：Xcode 命令行工具、Rust stable、Node.js 22，以及用于汇总依赖许可的 `cargo-about`（`cargo install --locked cargo-about`）。
+Closing the window does not quit: playback and conversion continue, and clicking the Dock icon brings the window back. Press ⌘Q to quit; a track being converted is interrupted, its partial output deleted, and it is converted again on next launch. Settings are under musicReveal → Settings… (⌘,).
+
+## Privacy
+
+- Decryption, transcoding and tagging all happen on your machine. Audio files are never uploaded anywhere.
+- Network access is used only for metadata: track info, cover art and lyrics are fetched from the public QQ Music and NetEase Cloud Music endpoints by track ID. There is no fuzzy search and no audio content is sent.
+- Decryption keys for QQ Music's current format must be obtained from QQ Music's own endpoint, which requires the login state stored by the QQ Music desktop app on this Mac. That information is used locally for this request only, never stored elsewhere and never sent to a third party. The account shown in the UI is masked.
+- NetEase Cloud Music files require no login state at all.
+
+## FAQ
+
+**A track under "Converting" shows "Waiting for login" (待登录)**
+It is a QQ Music current-format file, which needs QQ Music's login state, and the QQ Music app on this Mac is not logged in or the session has expired. Open QQ Music and log in; the tracks continue automatically.
+
+**QQ Music status shows "Authorization needed" (需要授权)**
+Older versions of QQ Music keep their login state in a system-protected location. Click "Authorize…" (授权…) next to the QQ Music status, enable musicReveal under Privacy & Security → Full Disk Access, then relaunch musicReveal. Updating QQ Music to the latest version removes the need for this.
+
+**Conversion failed with "File incomplete" (文件不完整)**
+The file is still downloading, or the download was interrupted and the file is truncated. Wait for the download to finish and click Retry; if the file itself is corrupt, download it again from the platform.
+
+**"ffmpeg not found" when converting formats**
+The packaged app bundles ffmpeg. If you are running a development build started with `cargo` or `npx tauri dev`, install ffmpeg yourself (for example `brew install ffmpeg`) or point the `REVEAL_FFMPEG` environment variable at it.
+
+## Building from source
+
+Requires the Xcode Command Line Tools, stable Rust, Node.js 22, and `cargo-about` for generating the dependency license inventory (`cargo install --locked cargo-about`).
 
 ```sh
-# 以下命令都在仓库根目录执行
+# all commands run from the repository root
 
-# 开发运行
+# development
 (cd app && npm ci && npx tauri dev)
 
-# 检查与测试
+# checks and tests
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 (cd app && npx tsc --noEmit && npx vite build)
 
-# 打包：产出 dist/musicReveal.app、dist/musicReveal_<版本>_aarch64.dmg
-# 与 dist/musicReveal_<版本>_ffmpeg-lame-source.tar
+# packaging: produces dist/musicReveal.app, dist/musicReveal_<version>_aarch64.dmg
+# and dist/musicReveal_<version>_ffmpeg-lame-source.tar
 scripts/package.sh
 ```
 
-`scripts/package.sh` 依次完成：编译内置 ffmpeg（见下）、生成 Rust 依赖许可清单、`tauri build`、签名、用 `hdiutil` 生成 `.dmg`，最后把内置 ffmpeg 对应的源码打成 `_ffmpeg-lame-source.tar`。可以重复运行。
+`scripts/package.sh` builds the bundled ffmpeg, generates the Rust dependency license inventory, runs `tauri build`, signs the app, creates the `.dmg` with `hdiutil`, and finally packs the source corresponding to the bundled ffmpeg into `_ffmpeg-lame-source.tar`. It is safe to run repeatedly.
 
-- **内置 ffmpeg**：`scripts/build-ffmpeg.sh` 从官方地址下载 FFmpeg 与 LAME 源码，校验 SHA-256 后编译一个只含转码所需组件的 LGPL 版本（arm64，macOS 11+，不依赖 Homebrew），结果缓存在 `build/ffmpeg/`，之后复用；脚本内容变了会自动重新编译，传 `--force` 可强制重新编译。
-- **签名**：`scripts/sign-local.sh` 第一次运行时用 openssl 生成自签名代码签名证书「musicReveal Local Signing」（有效期 10 年），保存在独立的钥匙串 `~/Library/Keychains/musicreveal-signing.keychain-db`，钥匙串密码保存在同目录的 `musicreveal-signing.password`（权限 600）。之后一直复用这张证书。它不会改动登录钥匙串、钥匙串搜索列表或系统信任设置，全程没有弹窗。删除这两个文件会生成新证书，已经给过的系统授权需要重新授予。
+- **Bundled ffmpeg**: `scripts/build-ffmpeg.sh` downloads the FFmpeg and LAME sources from their official sites, verifies SHA-256 checksums, and builds an LGPL-only ffmpeg containing just the components needed for transcoding (arm64, macOS 11+, no Homebrew dependency). The result is cached in `build/ffmpeg/`; the script rebuilds automatically when its own contents change, or on demand with `--force`.
+- **Signing**: on first run, `scripts/sign-local.sh` uses openssl to create a self-signed code-signing certificate named "musicReveal Local Signing" (valid for 10 years) in a dedicated keychain at `~/Library/Keychains/musicreveal-signing.keychain-db`, with the keychain password stored alongside in `musicreveal-signing.password` (mode 600). It does not touch the login keychain, the keychain search list or system trust settings, and shows no prompts. Deleting those two files creates a fresh certificate, after which previously granted system permissions must be granted again.
 
-### 发布
+### Repository layout
 
-发布时必须把 `dist/musicReveal_<版本>_ffmpeg-lame-source.tar` 与 `.dmg` 一起上传到同一个发布页。应用内置的 ffmpeg 以 LGPL 授权，这个 tar 是它的对应源码（未修改的 FFmpeg、LAME 源码包原样，加上构建脚本），按 LGPL 须与二进制在同一处提供；只上传 dmg 不符合许可要求。
+| Path | Contents |
+| --- | --- |
+| `crates/reveal-core` | Core library: format detection, decryption, metadata enrichment, transcoding, library |
+| `app/src-tauri` | Tauri backend: folder watching, conversion queue, player, system integration |
+| `app/src` | Frontend (TypeScript, no framework) |
+| `scripts/` | Packaging, bundled ffmpeg build, local signing, license inventory |
+| `tools/crosscheck` | Developer tool: byte-for-byte cross-check of decryption output against a reference implementation using synthetic samples |
 
-仓库中标记为 `#[ignore]` 的测试需要联网或本机真实文件，默认不运行。真实样本（QQ 音乐 `.mflac`、网易云 `.ncm` 与带 163 key 的 `.mp3`）放在主仓库的 `testdata/real-samples/`，是版权音乐，已列入 `.gitignore`、永不入库；从 worktree 里跑也会找主仓库的这个目录（可用 `REVEAL_NCM_DIR` / `REVEAL_E2E_DIR` 指定别处）。测试只把样本复制到临时目录再用；解密 `.mflac` 的端到端测试另外只读本机的 QQ 音乐登录信息。
+### Tests
 
-## 致谢
+Tests marked `#[ignore]` need network access or real files and are skipped by default. Real samples (QQ Music `.mflac`, NetEase `.ncm`, and `.mp3` files carrying a 163 key) live in `testdata/real-samples/`; they are copyrighted music, listed in `.gitignore` and never committed. `REVEAL_NCM_DIR` / `REVEAL_E2E_DIR` point the tests elsewhere. Tests copy samples to a temporary directory before use; the end-to-end `.mflac` test additionally reads the local QQ Music login state.
 
-QQ 音乐与网易云音乐格式的解密算法参考了以下项目，二者均以 MIT 许可发布：
+Before a release, run the whole suite once more against the bundled, trimmed-down ffmpeg: a full ffmpeg on the development machine would hide muxers and decoders the bundled build lacks.
 
-- [mary20050520/qmunlock](https://github.com/mary20050520/qmunlock)
-- [HRuiCcc/music-geshizhuanhuan](https://github.com/HRuiCcc/music-geshizhuanhuan)
+```sh
+scripts/package.sh
+REVEAL_FFMPEG=$PWD/dist/musicReveal.app/Contents/MacOS/ffmpeg \
+REVEAL_GEN_FFMPEG=/opt/homebrew/bin/ffmpeg \
+cargo test --workspace -- --include-ignored
+```
 
-## 许可
+### Releasing
 
-musicReveal 以 [MIT 许可](LICENSE) 发布。第三方组件（FFmpeg、LAME 及 Rust、npm 依赖）的许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+`dist/musicReveal_<version>_ffmpeg-lame-source.tar` must be uploaded to the same release page as the `.dmg`. The bundled ffmpeg is LGPL-licensed, and this tarball is its corresponding source, which the LGPL requires to be offered alongside the binary. Publishing the dmg alone does not satisfy the license.
 
-musicReveal 仅用于转换你本人合法获得的音乐文件，请遵守所在地的法律和各音乐平台的服务条款。
+## License
+
+musicReveal is released under the [MIT License](LICENSE). Licenses of third-party components and reference implementations are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+musicReveal is intended only for converting music files you have lawfully obtained. Please comply with the laws of your jurisdiction and the terms of service of the music platforms you use.

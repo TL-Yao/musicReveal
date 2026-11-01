@@ -14,12 +14,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-REF = Path(
-    os.environ.get(
-        "REVEAL_REF",
-        "REVEAL_REF",
-    )
-)
+REF = Path(os.environ.get("REVEAL_REF") or sys.exit("请用 REVEAL_REF 指定参考实现（music-geshizhuanhuan）的目录"))
 sys.path[:0] = [str(REF), str(REF / "tests")]
 
 from builders import build_ncm, build_qmc_v1, build_qmc_v2, make_ekey_v1, make_ekey_v2  # noqa: E402
