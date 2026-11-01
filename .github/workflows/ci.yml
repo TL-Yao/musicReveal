@@ -30,6 +30,9 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Install ffmpeg (needed by tests that generate audio)
+        run: brew install ffmpeg
+
       - name: cargo test
         run: cargo test --workspace
 
