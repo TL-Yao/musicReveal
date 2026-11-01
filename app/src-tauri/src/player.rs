@@ -429,10 +429,12 @@ impl Player {
 
     pub fn queue(&self) -> QueueView {
         let st = self.lock();
-        st.queue.as_ref().map_or_else(QueueView::default, |q| QueueView {
-            ids: q.order().to_vec(),
-            pos: q.pos(),
-        })
+        st.queue
+            .as_ref()
+            .map_or_else(QueueView::default, |q| QueueView {
+                ids: q.order().to_vec(),
+                pos: q.pos(),
+            })
     }
 
     /// 跳到队列（实际播放顺序）第 `index` 首播放，不重排；越界不动。

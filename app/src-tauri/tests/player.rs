@@ -773,7 +773,10 @@ fn removing_the_current_track_only_keeps_playing_if_it_was_playing() {
     std::thread::sleep(Duration::from_millis(200));
     p.remove(&a);
     let s = p.state();
-    assert!(s.playing && s.track_id.as_deref() == Some(b.as_str()), "{s:?}");
+    assert!(
+        s.playing && s.track_id.as_deref() == Some(b.as_str()),
+        "{s:?}"
+    );
 
     p.toggle();
     p.remove(&b);
@@ -785,7 +788,9 @@ fn removing_the_current_track_only_keeps_playing_if_it_was_playing() {
     std::thread::sleep(Duration::from_millis(300));
     assert!(!p.state().playing && p.state().position_ms == 0);
     p.toggle();
-    wait(&p, 2, |s| s.playing && s.track_id.as_deref() == Some(c.as_str()) && s.position_ms > 0);
+    wait(&p, 2, |s| {
+        s.playing && s.track_id.as_deref() == Some(c.as_str()) && s.position_ms > 0
+    });
 }
 
 /// 曲终消息已发出、还没被处理时拖动进度：留在本曲的新位置继续播，不跳到下一首。

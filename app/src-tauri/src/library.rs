@@ -712,7 +712,11 @@ fn trash(p: &Path) -> Result<Option<PathBuf>, String> {
             };
             match reveal_core::place(p, &to) {
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
-                r => return r.map(|()| Some(to)).map_err(|e| format!("无法移到废纸篓：{e}")),
+                r => {
+                    return r
+                        .map(|()| Some(to))
+                        .map_err(|e| format!("无法移到废纸篓：{e}"))
+                }
             }
         }
     }

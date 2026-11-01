@@ -1198,10 +1198,7 @@ fn undo_trash_refuses_a_song_no_longer_in_the_trash_and_moves_on() {
     let b_lrc_back = b_lrc.exists();
     let next = r.lib.undo_trash();
     clean_bin(&tag);
-    assert!(
-        matches!(&refused, Err(m) if !m.is_empty()),
-        "{refused:?}"
-    );
+    assert!(matches!(&refused, Err(m) if !m.is_empty()), "{refused:?}");
     assert!(!b.exists() && !b_lrc_back, "歌没放回，它的 .lrc 也不放回");
     assert_eq!(next, Ok(Some(id(&a))), "作废的记录已出栈，接着撤回更早的");
     assert!(a.exists());
@@ -1235,11 +1232,12 @@ fn undo_trash_never_overwrites_files_now_at_the_original_paths() {
     assert!(b.exists());
     assert_eq!(b_lrc_text, "占位", "不覆盖原位上的 .lrc");
     assert!(b_lrc_kept, "回不去的 .lrc 留在废纸篓里");
-    assert!(
-        matches!(&refused, Err(m) if !m.is_empty()),
-        "{refused:?}"
+    assert!(matches!(&refused, Err(m) if !m.is_empty()), "{refused:?}");
+    assert_eq!(
+        std::fs::read_to_string(&a).unwrap(),
+        "新的",
+        "不覆盖原位上的文件"
     );
-    assert_eq!(std::fs::read_to_string(&a).unwrap(), "新的", "不覆盖原位上的文件");
     assert!(a_kept, "回不去的歌留在废纸篓里");
     assert!(!after, "作废的记录已出栈");
 }
