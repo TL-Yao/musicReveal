@@ -694,3 +694,6 @@ const MR = {
 };
 (window as any).MR = MR;
 MR.reset();
+// ?scene=<名>：启动即切到该场景（Tauri 窗口里拿不到控制台时用，配合 app/scripts/shot.sh 截图）
+const scene = new URLSearchParams(location.search).get("scene");
+if (scene) MR.scene(scene);

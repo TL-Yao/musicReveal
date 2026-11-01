@@ -1,10 +1,15 @@
 # musicReveal
 
+[![CI](https://github.com/TL-Yao/musicReveal/actions/workflows/ci.yml/badge.svg)](https://github.com/TL-Yao/musicReveal/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 English | [简体中文](README.zh-CN.md)
 
 musicReveal is a small music player for macOS with built-in decryption. It watches folders you choose, converts encrypted downloads from QQ Music and NetEase Cloud Music into ordinary audio files on your machine, fills in cover art, lyrics and other metadata, and plays them from its own library.
 
-<!-- Screenshots: main window (library and tracks being converted), lyrics view, settings. -->
+![Library with tracks being converted](docs/main.png)
+
+![Lyrics view](docs/lyrics.png)
 
 ## Features
 

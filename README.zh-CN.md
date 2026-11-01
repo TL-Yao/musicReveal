@@ -1,10 +1,15 @@
 # musicReveal
 
+[![CI](https://github.com/TL-Yao/musicReveal/actions/workflows/ci.yml/badge.svg)](https://github.com/TL-Yao/musicReveal/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 [English](README.md) | 简体中文
 
 musicReveal 是一个 macOS 上的小型音乐播放器，自带解密能力：监听你指定的文件夹，把 QQ 音乐、网易云音乐下载的加密音乐在本机转换成普通音频文件，补全封面、歌词等元数据，收进资料库直接播放。
 
-<!-- 截图位：主窗口（资料库与转换中的歌曲）、歌词视图、设置窗口。 -->
+![资料库与正在转换的歌曲](docs/main.png)
+
+![歌词页](docs/lyrics.png)
 
 ## 功能
 
