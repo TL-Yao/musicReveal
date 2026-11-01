@@ -184,8 +184,8 @@ fn tea_cbc_decrypt(data: &[u8], key: &[u8; 16]) -> Option<Vec<u8>> {
         std::array::from_fn(|i| u32::from_be_bytes(key[i * 4..i * 4 + 4].try_into().unwrap()));
     let (mut prev, mut cur) = (0u64, 0u64);
     let mut plain = Vec::with_capacity(data.len());
-    for ch in data.chunks_exact(8) {
-        let b = u64::from_be_bytes(ch.try_into().unwrap());
+    for ch in data.as_chunks::<8>().0 {
+        let b = u64::from_be_bytes(*ch);
         let next = tea_decrypt_block(b ^ cur, &k);
         plain.extend((next ^ prev).to_be_bytes());
         prev = b;
@@ -304,8 +304,10 @@ fn musicex(tail: &[u8], file_len: u64) -> Result<Parsed, Error> {
     let f = &tail[tail.len() - size as usize..];
     let utf16 = |r: std::ops::Range<usize>| {
         let w: Vec<u16> = f[r]
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
             .take_while(|&c| c != 0)
             .collect();
         String::from_utf16(&w).ok().filter(|s| !s.is_empty())
